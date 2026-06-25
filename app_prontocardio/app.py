@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app_prontocardio.database import (
     ensure_postgres_schema,
@@ -27,6 +28,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title='API Hospital Prontocardio 💙', lifespan=lifespan)
+
+if settings.cors_allowed_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_allowed_origins,
+        allow_credentials='*' not in settings.cors_allowed_origins,
+        allow_methods=['*'],
+        allow_headers=['*'],
+    )
 
 app.include_router(autenticacao.router)
 app.include_router(livre.router)

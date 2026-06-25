@@ -19,31 +19,46 @@ def test_configuracao_smtp_hostinger_usa_ssl_e_aliases():
     settings = _settings_teste(
         SMTP_HOST='smtp.hostinger.com',
         SMTP_PORT=465,
-        SMTP_USER='tihpc@hospitalprontocardio.com.br',
+        SMTP_USER='usuario_smtp@exemplo.local',
         SMTP_PASSWORD='senha_do_email',
-        SMTP_FROM=(
-            'TI Hospital Prontocardio '
-            '<tihpc@hospitalprontocardio.com.br>'
-        ),
+        SMTP_FROM='TI Hospital Prontocardio <usuario_smtp@exemplo.local>',
     )
 
-    assert settings.smtp_username == 'tihpc@hospitalprontocardio.com.br'
+    assert settings.smtp_username == 'usuario_smtp@exemplo.local'
     assert settings.smtp_from_email.startswith('TI Hospital Prontocardio')
     assert settings.smtp_use_ssl is True
     assert settings.smtp_use_tls is False
 
 
+def test_link_redefinicao_usa_url_explicitada_do_frontend(monkeypatch):
+    settings = _settings_teste(
+        FRONTEND_BASE_URL='https://api.exemplo.local',
+        FRONTEND_PASSWORD_RESET_URL=(
+            'https://app.exemplo.local'
+            '/autenticacao/redefinir-senha#token={token}'
+        ),
+    )
+
+    monkeypatch.setattr(autenticacao, 'settings', settings)
+
+    assert autenticacao._montar_link_redefinicao('abc_123') == (
+        'https://app.exemplo.local'
+        '/autenticacao/redefinir-senha#token=abc_123'
+    )
+
+
 def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
     settings = _settings_teste(
-        FRONTEND_BASE_URL='http://localhost:8080',
+        FRONTEND_BASE_URL='https://api.exemplo.local',
+        FRONTEND_PASSWORD_RESET_URL=(
+            'https://app.exemplo.local'
+            '/autenticacao/redefinir-senha#token={token}'
+        ),
         SMTP_HOST='smtp.hostinger.com',
         SMTP_PORT=465,
-        SMTP_USER='tihpc@hospitalprontocardio.com.br',
+        SMTP_USER='usuario_smtp@exemplo.local',
         SMTP_PASSWORD='senha_do_email',
-        SMTP_FROM=(
-            'TI Hospital Prontocardio '
-            '<tihpc@hospitalprontocardio.com.br>'
-        ),
+        SMTP_FROM='TI Hospital Prontocardio <usuario_smtp@exemplo.local>',
     )
     smtp_instances = []
 
@@ -87,8 +102,16 @@ def test_envio_redefinicao_usa_smtp_ssl_com_hostinger(monkeypatch):
     assert smtp.timeout == SMTP_TIMEOUT_SECONDS
     assert smtp.starttls_chamado is False
     assert smtp.login_args == (
-        'tihpc@hospitalprontocardio.com.br',
+        'usuario_smtp@exemplo.local',
         'senha_do_email',
     )
     assert smtp.mensagem['From'].startswith('TI Hospital Prontocardio')
     assert smtp.mensagem['To'] == 'usuario@teste.com'
+
+    conteudo = smtp.mensagem.get_content()
+    assert (
+        'https://app.exemplo.local'
+        '/autenticacao/redefinir-senha#token=token'
+    ) in conteudo
+    assert '?token=' not in conteudo
+    assert 'https://api.exemplo.local' not in conteudo

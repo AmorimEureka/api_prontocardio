@@ -5,6 +5,7 @@ from email.message import EmailMessage
 from hashlib import sha256
 from http import HTTPStatus
 from typing import Annotated
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
@@ -60,12 +61,19 @@ def autenticar_usuario_para_acesso(
     return {'access_token': token, 'token_type': 'Bearer'}
 
 
+def _montar_link_redefinicao(token: str) -> str:
+    reset_url = settings.frontend_password_reset_url
+    if '{token}' in reset_url:
+        return reset_url.replace('{token}', quote(token, safe=''))
+
+    separator = '&' if '?' in reset_url else '?'
+    return f'{reset_url}{separator}{urlencode({"token": token})}'
+
+
 def _enviar_email_redefinicao(destinatario: str, token: str) -> None:
     if not settings.SMTP_HOST:
         return
-    reset_url = (
-        f"{settings.FRONTEND_BASE_URL.rstrip('/')}/redefinir-senha/?token={token}"
-    )
+    reset_url = _montar_link_redefinicao(token)
     mensagem = EmailMessage()
     mensagem['Subject'] = 'Redefinição de senha · Gestão de Glosas'
     mensagem['From'] = settings.smtp_from_email
