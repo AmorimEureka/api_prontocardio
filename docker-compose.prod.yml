@@ -1,11 +1,18 @@
 services:
   api_prontocardio:
     image: api_prontocardio
-    build: .
+    build:
+      context: .
     env_file:
       - .env
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     extra_hosts:
       - "host-gateway:host-gateway"
+    networks:
+      - api_prontocardio
     restart: unless-stopped
+
+networks:
+  api_prontocardio:
+    name: ${API_NETWORK_NAME:-api_prontocardio}
