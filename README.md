@@ -137,15 +137,30 @@ tipagem e evolucao do endpoint.
 O arquivo `app_prontocardio/settings.py` centraliza variaveis de ambiente com
 `pydantic-settings`:
 
-- Classe `Settings` (herda de `BaseSettings`).
-- Leitura de `.env` com codificacao UTF-8.
-- Variavel obrigatoria:
-	`DATABASE_URL`.
+- `ORACLE_DATABASE_URL`: conexao com o Oracle/MV via `oracle+oracledb`.
+- `DATABASE_URL`: conexao com o PostgreSQL usado pela API.
+- `POSTGRES_SCHEMA`: schema PostgreSQL usado pelos models da aplicacao.
+- `RUN_MIGRATIONS_ON_STARTUP`: controla se migrations rodam ao iniciar a API.
+- `SECRET_KEY` e `ALGORITHM`: assinatura dos tokens JWT.
+- `FRONTEND_BASE_URL`: base do frontend usada como fallback de origem.
+- `FRONTEND_PASSWORD_RESET_URL`: URL da tela do frontend que recebe o token
+	de recuperacao de senha. Se a URL contiver `{token}`, a API substitui
+	esse marcador pelo token gerado; prefira `#token={token}` para evitar
+	que o token seja enviado ao servidor em logs de acesso.
+- `CORS_ALLOWED_ORIGINS`: origens permitidas para chamadas do frontend,
+	separadas por virgula. Quando vazia, usa `FRONTEND_BASE_URL`.
 
 Exemplo de `.env`:
 
 ```env
-DATABASE_URL=oracle+oracledb://usuario:senha@host:1521/?service_name=nome_servico
+ORACLE_DATABASE_URL=oracle+oracledb://usuario:senha@host:1521/?service_name=nome_servico
+DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/banco
+POSTGRES_SCHEMA=api_prontocardio
+SECRET_KEY=gere_uma_chave_forte
+ALGORITHM=HS256
+FRONTEND_BASE_URL=http://localhost:8080
+FRONTEND_PASSWORD_RESET_URL=http://localhost:8080/autenticacao/redefinir-senha#token={token}
+CORS_ALLOWED_ORIGINS=http://localhost:8080
 ```
 
 ## Testes e objetivos
@@ -242,7 +257,10 @@ poetry update
 
 ### 5) Configurar variaveis de ambiente
 
-Crie o arquivo `.env` na raiz com `DATABASE_URL`.
+Crie o arquivo `.env` na raiz com as variaveis descritas na secao de
+configuracao. Para desenvolvimento local, ajuste `ORACLE_DATABASE_URL`,
+`DATABASE_URL`, `POSTGRES_SCHEMA`, `SECRET_KEY`, `ALGORITHM`,
+`FRONTEND_BASE_URL` e `FRONTEND_PASSWORD_RESET_URL`.
 
 ## Execucao da aplicacao
 
@@ -285,12 +303,42 @@ poetry run task tests
 poetry run task pos_tests
 ```
 
+## Producao com Docker
+
+O compose de producao sobe a API na porta `8000` por padrao, configuravel por
+`API_PORT`. O Nginx/proxy reverso do servidor deve ser configurado fora deste
+repositorio e encaminhar trafego para a API na porta publicada ou para
+`api_prontocardio:8000` na rede Docker configurada por `API_NETWORK_NAME`.
+
+Configure no `.env` os valores do ambiente:
+
+```env
+SERVER_NAME=api.exemplo.local
+API_PORT=8000
+API_NETWORK_NAME=api_prontocardio
+FRONTEND_BASE_URL=https://app.exemplo.local
+FRONTEND_PASSWORD_RESET_URL=https://app.exemplo.local/autenticacao/redefinir-senha#token={token}
+CORS_ALLOWED_ORIGINS=https://app.exemplo.local
+```
+
+Build e execucao padrao:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Configuracoes locais de Nginx, certificados e ACME nao devem ser versionadas
+neste repositorio.
+
 ## Observacoes operacionais
 
 - O projeto usa Oracle driver em `thick_mode=True` para compatibilidade com
 	cenarios de autenticacao do ambiente hospitalar.
-- Antes de subir em producao, valide conectividade com o banco e variaveis
-	de ambiente do hospital.
+- Antes de subir em producao, valide conectividade com Oracle, PostgreSQL e
+	variaveis de ambiente do hospital.
+- Em producao controlada, considere `RUN_MIGRATIONS_ON_STARTUP=false` e rode
+	`poetry run alembic upgrade head` como etapa explicita de deploy.
+
 # Gestão de acessos e recuperação de senha
 
 O usuário mais antigo é promovido ao perfil `ti` pela migração
@@ -301,11 +349,13 @@ Para habilitar o envio dos links de recuperação, configure na API:
 
 ```env
 FRONTEND_BASE_URL=http://localhost:8080
+FRONTEND_PASSWORD_RESET_URL=http://localhost:8080/autenticacao/redefinir-senha#token={token}
+CORS_ALLOWED_ORIGINS=http://localhost:8080
 SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
-SMTP_USER=tihpc@hospitalprontocardio.com.br
+SMTP_USER=usuario_smtp@exemplo.local
 SMTP_PASSWORD=senha_do_email
-SMTP_FROM="TI Hospital Prontocardio <tihpc@hospitalprontocardio.com.br>"
+SMTP_FROM="TI Hospital Prontocardio <usuario_smtp@exemplo.local>"
 SMTP_USE_SSL=true
 SMTP_USE_TLS=false
 ```
