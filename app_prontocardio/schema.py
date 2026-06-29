@@ -275,6 +275,7 @@ class Atendimento(BaseModel):
     dt_atendimento: datetime | None = None
     dt_alta: datetime | None = None
     dt_remessa: datetime | None = None
+    dt_competencia: date | None = None
     dt_fechamento: datetime | None = None
     dt_lancamento: datetime | None = None
     hr_lancamento: datetime | None = None

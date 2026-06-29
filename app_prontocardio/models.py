@@ -201,6 +201,7 @@ class ModelContaAtendimento:
     )
     dt_alta: Mapped[datetime | None] = mapped_column(DateTime, init=False)
     dt_remessa: Mapped[datetime | None] = mapped_column(DateTime, init=False)
+    dt_competencia: Mapped[date | None] = mapped_column(Date, init=False)
     dt_fechamento: Mapped[datetime | None] = mapped_column(
         DateTime,
         init=False,
