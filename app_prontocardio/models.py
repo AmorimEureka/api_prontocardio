@@ -110,6 +110,10 @@ class RegistroGlosa:
         Numeric(12, 2),
         nullable=True,
     )
+    qtd_recebida: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2),
+        nullable=True,
+    )
     observacao_recebimento: Mapped[str | None] = mapped_column(
         String,
         nullable=True,
