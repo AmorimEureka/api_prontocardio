@@ -391,31 +391,27 @@ def consultar_prazos_recurso_convenio(
     for cd_convenio, nm_convenio in convenios:
         prazo = prazos.get(cd_convenio)
         usados.add(cd_convenio)
-        rows.append(
-            {
-                'cd_convenio': cd_convenio,
-                'convenio': nm_convenio,
-                'dias_para_recurso': (
-                    prazo.dias_para_recurso if prazo is not None else None
-                ),
-                'configurado': prazo is not None,
-                'habilitado': prazo.habilitado if prazo is not None else True,
-            }
-        )
+        rows.append({
+            'cd_convenio': cd_convenio,
+            'convenio': nm_convenio,
+            'dias_para_recurso': (
+                prazo.dias_para_recurso if prazo is not None else None
+            ),
+            'configurado': prazo is not None,
+            'habilitado': prazo.habilitado if prazo is not None else True,
+        })
 
     for prazo in sorted(
         (item for key, item in prazos.items() if key not in usados),
         key=lambda item: item.convenio,
     ):
-        rows.append(
-            {
-                'cd_convenio': prazo.cd_convenio,
-                'convenio': prazo.convenio,
-                'dias_para_recurso': prazo.dias_para_recurso,
-                'configurado': True,
-                'habilitado': prazo.habilitado,
-            }
-        )
+        rows.append({
+            'cd_convenio': prazo.cd_convenio,
+            'convenio': prazo.convenio,
+            'dias_para_recurso': prazo.dias_para_recurso,
+            'configurado': True,
+            'habilitado': prazo.habilitado,
+        })
 
     return {'convenios': rows}
 
@@ -460,9 +456,10 @@ def registrar_glosa(
     session: SessionPostgres,
 ):
     registro_glosa = RegistroGlosa(
-        **payload.model_dump(mode='json'),
+        **payload.model_dump(),
         sn_ativo='true',
     )
+    registro_glosa.data_criacao = _data_criacao_sao_paulo()
 
     session.add(registro_glosa)
     session.commit()
@@ -543,7 +540,7 @@ def editar_glosa(
 ):
     registro_glosa = _get_registro_glosa_or_404(glosa_id, session)
 
-    for field_name, value in payload.model_dump(mode='json').items():
+    for field_name, value in payload.model_dump().items():
         setattr(registro_glosa, field_name, value)
     registro_glosa.sn_ativo = 'true'
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
@@ -572,13 +569,20 @@ def registrar_recebimento_glosa(
             detail='Recebimento permitido apenas para recursos de glosa.',
         )
     valor_recursado = registro_glosa.valor_glosado or registro_glosa.valor
+    qtd_recursada = registro_glosa.qtd_glosada or 1
     if payload.valor_recebido > valor_recursado:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail='O valor recebido nao pode exceder o valor recursado.',
         )
+    if payload.qtd_recebida > qtd_recursada:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=
+            'A quantidade recebida nao pode exceder a quantidade recursada.',
+        )
 
-    for field_name, value in payload.model_dump(mode='json').items():
+    for field_name, value in payload.model_dump().items():
         setattr(registro_glosa, field_name, value)
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
 

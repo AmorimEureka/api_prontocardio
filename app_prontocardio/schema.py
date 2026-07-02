@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from pydantic import (
     BaseModel,
@@ -97,6 +98,7 @@ class RegistroGlosaCreate(BaseModel):
     dt_pagamento: date
     dt_recebimento: date | None = None
     valor_recebido: Decimal | None = None
+    qtd_recebida: Decimal | None = None
     observacao_recebimento: str | None = None
     sn_glosado: str = 'true'
 
@@ -115,6 +117,19 @@ class RegistroGlosaCreate(BaseModel):
 
     @model_validator(mode='after')
     def validate_glosa_business_rules(self):
+        today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+        if self.data_glosa > today:
+            raise ValueError(
+                'A data da glosa nao pode ser maior que a data atual.'
+            )
+        if self.dt_pagamento > today:
+            raise ValueError(
+                'A data do pagamento nao pode ser maior que a data atual.'
+            )
+        if self.dt_recurso > today:
+            raise ValueError(
+                'A data do recurso nao pode ser maior que a data atual.'
+            )
         if self.data_glosa > self.dt_pagamento:
             raise ValueError(
                 'A data da glosa deve ser igual ou anterior '
@@ -140,11 +155,10 @@ class RegistroGlosaCreate(BaseModel):
         if self.sn_glosado == 'not' and (
             self.dt_recebimento is not None
             or self.valor_recebido is not None
+            or self.qtd_recebida is not None
             or self.observacao_recebimento
         ):
-            raise ValueError(
-                'Acatos nao podem possuir dados de recebimento.'
-            )
+            raise ValueError('Acatos nao podem possuir dados de recebimento.')
         return self
 
     @field_validator('sn_glosado', mode='before')
@@ -184,6 +198,7 @@ class RegistroGlosaPublic(BaseModel):
     dt_pagamento: date | None = None
     dt_recebimento: date | None = None
     valor_recebido: Decimal | None = None
+    qtd_recebida: Decimal | None = None
     observacao_recebimento: str | None = None
     sn_glosado: str
     sn_ativo: str
@@ -197,6 +212,7 @@ class RegistroGlosas(BaseModel):
 class RegistroGlosaRecebimentoUpdate(BaseModel):
     dt_recebimento: date
     valor_recebido: Decimal = Field(gt=0)
+    qtd_recebida: Decimal = Field(gt=0)
     observacao_recebimento: str | None = None
 
 
