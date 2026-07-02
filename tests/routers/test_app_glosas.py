@@ -186,6 +186,9 @@ def test_rejeita_datas_quantidade_e_valor_invalidos(cliente, token_teste):
     casos = (
         {'data_glosa': '2026-06-12', 'dt_pagamento': '2026-06-11'},
         {'dt_recurso': '2026-06-09'},
+        {'data_glosa': '2999-01-01'},
+        {'dt_pagamento': '2999-01-01'},
+        {'dt_recurso': '2999-01-01'},
         {'qtd_glosada': '3'},
         {'valor_glosado': '103.46'},
     )
@@ -199,6 +202,31 @@ def test_rejeita_datas_quantidade_e_valor_invalidos(cliente, token_teste):
         assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
 
 
+def test_registra_recebimento_com_qtd_recebida(cliente, token_teste):
+    response = cliente.post(
+        '/app_glosas/glosas',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json=registro_glosa_payload(qtd_glosada='2', valor_glosado='12.31'),
+    )
+    assert response.status_code == HTTPStatus.CREATED
+
+    response = cliente.patch(
+        f'/app_glosas/glosas/{response.json()["id"]}/recebimento',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json={
+            'dt_recebimento': '2026-06-20',
+            'valor_recebido': '12.31',
+            'qtd_recebida': '2',
+            'observacao_recebimento': 'Recebido integralmente',
+        },
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.json()['dt_recebimento'] == '2026-06-20'
+    assert response.json()['valor_recebido'] == '12.31'
+    assert response.json()['qtd_recebida'] == '2.00'
+
+
 def test_rejeita_recebimento_em_acato(cliente, token_teste):
     response = cliente.post(
         '/app_glosas/glosas',
@@ -208,11 +236,12 @@ def test_rejeita_recebimento_em_acato(cliente, token_teste):
     assert response.status_code == HTTPStatus.CREATED
 
     response = cliente.patch(
-        f"/app_glosas/glosas/{response.json()['id']}/recebimento",
+        f'/app_glosas/glosas/{response.json()["id"]}/recebimento',
         headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'dt_recebimento': '2026-06-20',
             'valor_recebido': '10.00',
+            'qtd_recebida': '1',
         },
     )
 
@@ -228,15 +257,59 @@ def test_rejeita_valor_recebido_zero(cliente, token_teste):
     assert response.status_code == HTTPStatus.CREATED
 
     response = cliente.patch(
-        f"/app_glosas/glosas/{response.json()['id']}/recebimento",
+        f'/app_glosas/glosas/{response.json()["id"]}/recebimento',
         headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'dt_recebimento': '2026-06-20',
             'valor_recebido': '0',
+            'qtd_recebida': '1',
         },
     )
 
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def test_rejeita_qtd_recebida_zero(cliente, token_teste):
+    response = cliente.post(
+        '/app_glosas/glosas',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json=registro_glosa_payload(),
+    )
+    assert response.status_code == HTTPStatus.CREATED
+
+    response = cliente.patch(
+        f'/app_glosas/glosas/{response.json()["id"]}/recebimento',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json={
+            'dt_recebimento': '2026-06-20',
+            'valor_recebido': '10.00',
+            'qtd_recebida': '0',
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+
+def test_rejeita_recebimento_maior_que_qtd_recursada(cliente, token_teste):
+    response = cliente.post(
+        '/app_glosas/glosas',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json=registro_glosa_payload(qtd_glosada='1'),
+    )
+    assert response.status_code == HTTPStatus.CREATED
+
+    response = cliente.patch(
+        f'/app_glosas/glosas/{response.json()["id"]}/recebimento',
+        headers={'Authorization': f'Bearer {token_teste}'},
+        json={
+            'dt_recebimento': '2026-06-20',
+            'valor_recebido': '10.00',
+            'qtd_recebida': '2',
+        },
+    )
+
+    assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert 'quantidade recursada' in response.json()['detail'].lower()
 
 
 def test_rejeita_recebimento_maior_que_valor_recursado(cliente, token_teste):
@@ -248,11 +321,12 @@ def test_rejeita_recebimento_maior_que_valor_recursado(cliente, token_teste):
     assert response.status_code == HTTPStatus.CREATED
 
     response = cliente.patch(
-        f"/app_glosas/glosas/{response.json()['id']}/recebimento",
+        f'/app_glosas/glosas/{response.json()["id"]}/recebimento',
         headers={'Authorization': f'Bearer {token_teste}'},
         json={
             'dt_recebimento': '2026-06-20',
             'valor_recebido': '12.32',
+            'qtd_recebida': '1',
         },
     )
 
@@ -268,10 +342,12 @@ def test_rejeita_acato_criado_com_recebimento(cliente, token_teste):
             sn_glosado='not',
             dt_recebimento='2026-06-20',
             valor_recebido='10.00',
+            qtd_recebida='1',
         ),
     )
 
     assert response.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
 
 def test_atualizar_glosa_reativa_estado_sujo_do_payload(cliente, token_teste):
     payload = registro_glosa_payload()
