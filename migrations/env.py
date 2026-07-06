@@ -17,7 +17,10 @@ if not settings.DATABASE_URL:
         'DATABASE_URL não configurada para executar migrations.'
     )
 
-config.set_main_option('sqlalchemy.url', settings.DATABASE_URL)
+config.set_main_option(
+    'sqlalchemy.url',
+    settings.DATABASE_URL.replace('%', '%%'),
+)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -62,6 +65,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         include_schemas=True,
         include_object=include_object,
+        version_table_schema=settings.POSTGRES_SCHEMA,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -89,6 +93,7 @@ def run_migrations_online() -> None:
             target_metadata=target_metadata,
             include_schemas=True,
             include_object=include_object,
+            version_table_schema=settings.POSTGRES_SCHEMA,
         )
 
         with context.begin_transaction():
