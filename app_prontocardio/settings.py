@@ -53,7 +53,7 @@ class Settings(BaseSettings):
                 return url
 
         return (
-            f"{self.FRONTEND_BASE_URL.rstrip('/')}"
+            f'{self.FRONTEND_BASE_URL.rstrip("/")}'
             '/autenticacao/redefinir-senha'
         )
 
