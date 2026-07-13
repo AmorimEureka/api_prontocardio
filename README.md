@@ -103,6 +103,199 @@ Exemplo de resposta:
 }
 ```
 
+## Ciclo da tela Conciliação (Fiscal X Faturamento)
+
+A tela de **Conciliacao (Fiscal X Faturamento)** relaciona uma NFS-e a uma ou
+mais remessas do mesmo convenio. A pesquisa e o salvamento executam a mesma
+regra de elegibilidade, de forma que uma chamada direta ao endpoint nao
+consegue contornar as validacoes exibidas na interface.
+
+```mermaid
+flowchart TD
+    A["Selecionar uma NFS-e pendente"] --> B{"Convenio da NFS-e foi localizado?"}
+    B -- "Nao" --> BX["Bloquear: convenio nao identificado"]
+    B -- "Sim" --> C["Pesquisar remessas no Oracle pelo CNPJ do convenio"]
+    C --> D{"Remessa pertence ao mesmo convenio?"}
+    D -- "Nao" --> DX["Excluir a remessa do resultado"]
+    D -- "Sim" --> E{"Existe conciliacao anterior para a remessa?"}
+
+    E -- "Nao" --> F{"Existe apenas acato historico?"}
+    F -- "Sim" --> FX["Bloquear: acato e perda reconhecida e nao gera NFS-e"]
+    F -- "Nao" --> G{"Existe recurso historico ativo, sem pagamento e nao consumido?"}
+    G -- "Nao" --> H["Fluxo inicial: considerar o valor original da remessa"]
+    G -- "Sim" --> I["Considerar somente o recurso disponivel"]
+
+    E -- "Sim" --> J{"Existe recurso ativo, sem pagamento e nao consumido?"}
+    J -- "Nao" --> JX["Bloquear: conciliacao anterior sem novo recurso"]
+    J -- "Sim" --> I
+    I --> IR["Recebimento anterior pode estar ausente, parcial ou integral"]
+
+    H --> N["Adicionar remessa a NFS-e"]
+    N --> O{"GLOSA marcada?"}
+    O -- "Nao" --> P{"Valor glosado esta zerado?"}
+    P -- "Nao" --> PX["Bloquear: remessa sem glosa deve ter valor zero"]
+    P -- "Sim" --> R["Calcular valor conciliado"]
+    O -- "Sim" --> Q{"Valor glosado e maior que zero e nao supera o valor considerado?"}
+    Q -- "Nao" --> QX["Bloquear: valor de glosa invalido"]
+    Q -- "Sim" --> R
+
+    R --> S{"Soma das remessas menos glosas e igual ao valor da NFS-e?"}
+    S -- "Nao" --> SX["Bloquear: totais divergentes"]
+    S -- "Sim" --> T["Revalidar convenio, conciliacao anterior, recurso e glosa no backend"]
+    T --> U{"Revalidacao aprovada?"}
+    U -- "Nao" --> UX["Cancelar a operacao e informar o motivo"]
+    U -- "Sim" --> V["Registrar a conciliacao e consumir o recurso utilizado"]
+
+    V --> W{"Data de recebimento foi informada?"}
+    W -- "Nao" --> WA["Aguardar registro posterior do recebimento"]
+    WA --> WB["Registrar recebimento por remessa e NFS-e"]
+    W -- "Sim" --> X["Registrar valor recebido por remessa e NFS-e"]
+    WB --> Y["Somar todos os recebimentos da remessa"]
+    X --> Y
+    Y --> YV{"Recebimentos superam o total da remessa menos os acatos?"}
+    YV -- "Sim" --> ZX["Rejeitar: recebimento excede o saldo cobravel"]
+    YV -- "Nao" --> Z{"Recebimentos sao iguais ao total da remessa?"}
+    Z -- "Sim" --> ZA["Marcar recebimento integral"]
+    Z -- "Nao" --> ZAA{"Recebimentos mais acatos encerram a remessa?"}
+    ZAA -- "Sim" --> KAX["Encerrar financeiramente sem confundir acato com recebimento"]
+    ZAA -- "Nao" --> ZB["Manter recebimento parcial e saldo em aberto"]
+    ZB --> ZC{"Tratamento do saldo glosado"}
+    ZC -- "Recursar" --> ZD["Cadastrar novo recurso ativo e sem pagamento"]
+    ZD --> A
+    ZC -- "Acatar" --> ZE["Registrar perda aceita e reduzir o saldo cobravel"]
+    ZE --> ZF{"Recebimentos mais acatos encerram a remessa?"}
+    ZF -- "Sim" --> KAX
+    ZF -- "Nao" --> ZD
+```
+
+### Regras e formulas aplicadas
+
+- Somente remessas cujo CNPJ normalizado seja igual ao CNPJ do convenio da
+  NFS-e podem ser selecionadas.
+- O acato e armazenado nos registros de glosa com `sn_glosado = "not"`. Por
+  compatibilidade com o modelo existente, o valor fica na coluna
+  `valor_recursado`, mas semanticamente representa `valor_acatado`.
+- O saldo cobravel da remessa e calculado por:
+
+  ```text
+  saldo_cobravel = valor_total_remessa
+                   - SUM(valor_recebido)
+                   - SUM(valor_acatado)
+  ```
+
+- Uma remessa e integral quando a soma dos recebimentos e exatamente igual ao
+  seu valor total. O acato nao altera `recebimento_integral`, porque nao houve
+  entrada de dinheiro.
+- A remessa fica encerrada financeiramente quando
+  `SUM(valor_recebido) + SUM(valor_acatado) == valor_total_remessa`. Nesse caso,
+  o saldo e zero, mas a API diferencia encerramento financeiro de recebimento
+  integral pelos campos `remessa_encerrada_financeiramente` e
+  `remessa_recebida_integralmente`.
+- Na pesquisa de remessas elegiveis, a API tambem retorna
+  `valor_total_acatado`, `saldo_cobravel`, `valor_elegivel_conciliacao` e
+  `situacao_financeira`. O `saldo_cobravel` continua representando a posicao
+  financeira global da remessa, enquanto `valor_elegivel_conciliacao` e o
+  valor usado nos totais da nova NFS-e.
+- O recebimento das conciliacoes anteriores nao participa da elegibilidade
+  fiscal. Uma remessa com recurso disponivel pode ser conciliada novamente se
+  o recebimento anterior estiver ausente, parcial ou integral.
+- Para evitar duplicidade, uma remessa que ja possui conciliacao anterior e
+  nao possui novo recurso disponivel permanece bloqueada. A API devolve uma
+  `restricao` estruturada com o motivo `conciliacao_sem_recurso`.
+- Recebimentos acima de `valor_total_remessa - SUM(valor_acatado)` sao
+  rejeitados, pois tentariam receber uma parcela ja reconhecida como perda.
+- Para uma remessa com saldo aberto, o recurso disponivel considera somente
+  recursos ativos, marcados como glosados, com processo e data de recurso, sem
+  qualquer pagamento e ainda nao consumidos por outra conciliacao:
+
+  ```text
+  recurso_disponivel = MIN(
+      total_recursado - total_consumido_em_conciliacoes,
+      total_recursado_sem_qualquer_pagamento
+  )
+  ```
+
+- Um recurso com pagamento parcial nao e considerado recurso "sem pagamento".
+  O saldo remanescente desse recurso nao libera uma nova NFS-e.
+- Valores acatados nao entram em `recurso_disponivel`, nao geram nova NFS-e e
+  nao podem possuir dados de recebimento.
+- Nao e exigida igualdade entre `recurso_disponivel` e `saldo_cobravel`. Para
+  uma conciliacao de recurso, vale:
+
+  ```text
+  valor_elegivel_conciliacao = recurso_disponivel
+  ```
+
+  O recurso e validado e consumido independentemente do calendario de
+  recebimentos das NFS-e anteriores.
+- Em uma glosa parcialmente acatada e parcialmente recursada, o acato reduz o
+  saldo cobravel, mas somente a parcela recursada e ainda disponivel participa
+  da nova conciliacao. O recebimento anterior nao precisa ocorrer antes desse
+  novo ciclo fiscal.
+- Para remessas historicas que possuem recurso aberto, mas ainda nao possuem
+  conciliacao anterior no modulo, o recurso sem pagamento e usado como valor
+  elegivel. A falta de controle financeiro historico nao bloqueia a operacao
+  quando o recurso pode ser validado.
+- Quando `GLOSA?` estiver marcada, o valor glosado deve ser maior que zero e
+  menor ou igual ao valor considerado. Sem a marcacao, o valor deve ser zero.
+- Para cada NFS-e, deve ser respeitada a igualdade:
+
+  ```text
+  SUM(valor_considerado_das_remessas) - SUM(valor_glosado) = valor_nfse
+  ```
+
+- Em uma conciliacao de recurso, uma nova glosa reduz o recebimento registrado.
+  O saldo resultante pode ser recursado, exigindo um novo recurso elegivel, ou
+  acatado, encerrando a parcela como perda sem gerar outra NFS-e.
+- O recurso e consumido pela conciliacao fiscal mesmo quando o recebimento
+  financeiro for registrado posteriormente. Isso impede que o mesmo recurso
+  seja associado a duas NFS-e.
+- O backend repete todas as validacoes no `POST`, incluindo convenio,
+  conciliacao anterior, disponibilidade e consumo do recurso, glosa e total da
+  NFS-e. O estado de recebimento e validado apenas nos endpoints financeiros.
+
+### Fila de conciliacoes sem recebimento
+
+O submenu **Financeiro > Conciliacoes sem recebimento** consulta o endpoint
+`GET /app_glosas/financeiro/conciliacao-faturamento/sem-recebimento`.
+
+- A verificacao e feita pelo par `conciliacao_id + cd_remessa` na tabela
+  `recebimentos_remessas`; a data de recebimento existente no cabecalho da
+  conciliacao nao e usada isoladamente para definir a situacao.
+- Uma remessa entra na fila quando
+  `valor_total - valor_glosado > 0` e nao existe recebimento vinculado ao mesmo
+  par conciliacao/remessa.
+- Conciliacoes integralmente glosadas nao entram na fila, pois nao possuem
+  valor esperado de recebimento.
+- Uma conciliacao sem qualquer valor recebido recebe a situacao
+  `sem_recebimento`. Quando existe recebimento em pelo menos uma remessa e
+  outra permanece pendente, recebe `recebimento_parcial`. Remessas sem valor
+  esperado, por terem sido integralmente glosadas, nao alteram essa situacao.
+- O valor pendente e calculado somente sobre as remessas sem recebimento:
+
+  ```text
+  valor_pendente = SUM(valor_total_remessa - valor_glosado)
+  ```
+
+- A tela permite pesquisar por NFS-e, convenio, processo de recebimento ou
+  codigo de uma remessa ainda pendente, possui paginacao e destaca previsoes
+  de recebimento em atraso.
+- Quando todas as remessas com valor esperado possuem registro de recebimento,
+  a conciliacao deixa automaticamente a fila.
+- Cada remessa pendente possui um formulario para registrar o recebimento pelo
+  endpoint `POST /app_glosas/financeiro/conciliacao-faturamento/recebimentos-remessas`.
+  O registro exige data, valor recebido e conta bancaria, e permite informar
+  conta do plano de contas, conta do centro de custo e lancamento do extrato.
+- O valor e preenchido com mascara monetaria e nao pode superar o valor
+  pendente exibido. A API repete a validacao considerando todos os recebimentos
+  e acatos da remessa.
+- Os lancamentos disponiveis sao filtrados pela conta bancaria e pela data do
+  recebimento. Ao confirmar um recebimento vinculado ao extrato, o lancamento
+  e marcado como conciliado na mesma transacao.
+- Depois do registro, a fila e recalculada: a remessa recebida deixa a lista e,
+  se ainda houver outra remessa pendente, a conciliacao permanece com situacao
+  `recebimento_parcial`.
+
 ## Contratos em schema.py e importancia da validacao
 
 O arquivo `app_prontocardio/schema.py` define os contratos de entrada/saida
@@ -157,12 +350,11 @@ ORACLE_DATABASE_URL=oracle+oracledb://usuario:senha@host:1521/?service_name=nome
 DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/banco
 POSTGRES_SCHEMA=api_prontocardio
 SECRET_KEY=gere_uma_chave_forte
-ALGORITHM=HS256
+ALGORITHM=HS25
 FRONTEND_BASE_URL=http://localhost:8080
 FRONTEND_PASSWORD_RESET_URL=http://localhost:8080/autenticacao/redefinir-senha#token={token}
 CORS_ALLOWED_ORIGINS=http://localhost:8080
 ```
-
 ## Testes e objetivos
 
 Os testes ficam em `tests/test_app.py` e os fixtures em `tests/conftest.py`.
