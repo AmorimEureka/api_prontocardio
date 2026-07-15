@@ -29,6 +29,7 @@ from app_prontocardio.schema import (
     ConciliacaoFaturamentoPublic,
     ConciliacoesSemRecebimentoList,
     ContasBancariasRecebimentoList,
+    FollowUpGlosasList,
     LancamentosExtratoBancarioList,
     NfsesPendentesConciliacao,
     RecebimentoRemessaCreate,
@@ -316,6 +317,8 @@ def _consultar_itens_remessas_hpc(
                     Decimal('1.00'),
                 ),
                 'descricao_item': row.descricao,
+                'data_alta': row.dt_alta,
+                'data_lancamento': row.dt_lancamento,
             }
         )
     return itens
@@ -852,6 +855,9 @@ def _registrar_itens_glosa_conciliacao(
             observacao_recebimento=None,
             cd_lancamento=item['cd_lancamento'],
             qtd_registro=item['qtd_registro'],
+            descricao_item=item['descricao_item'],
+            data_alta=item['data_alta'],
+            data_lancamento=item['data_lancamento'],
             conciliacao_remessa_id=remessa_conciliada.id,
             sn_glosado='true',
             sn_ativo='true',
@@ -1527,6 +1533,219 @@ def consultar_recebimentos_remessas(  # noqa: PLR0913
             for item in recebimentos
         ],
         'total': session.scalar(count_query) or 0,
+        'limit': limit,
+        'offset': offset,
+    }
+
+
+def _item_follow_up_glosa(registro: RegistroGlosa) -> dict:
+    return {
+        'cd_paciente': registro.codigo_paciente,
+        'nm_paciente': registro.nm_paciente,
+        'cd_remessa': registro.cd_remessa,
+        'cd_atendimento': registro.cd_atendimento,
+        'cd_reg': registro.conta,
+        'cd_lancamento': registro.cd_lancamento,
+        'cd_prestador': registro.cd_prestador,
+        'nm_prestador': registro.prestador,
+        'cd_convenio': registro.cd_convenio,
+        'nm_convenio': registro.convenio,
+        'tp_atendimento': registro.tp_atendimento,
+        'cd_pro_fat': registro.procedimento,
+        'descricao': registro.descricao_item or registro.descricao_glosa,
+        'nr_guia': registro.guia,
+        'dt_atendimento': registro.data_atendimento,
+        'dt_alta': registro.data_alta,
+        'dt_lancamento': registro.data_lancamento,
+        'qt_lancamento': registro.qtd_registro or Decimal('1.00'),
+        'vl_total_conta': registro.valor,
+        'registro_glosa': registro,
+    }
+
+
+def _pacientes_follow_up_glosa(registros: list[RegistroGlosa]) -> list[dict]:
+    pacientes: dict[tuple[int, str], dict] = {}
+    for registro in registros:
+        nome = registro.nm_paciente or f'Paciente {registro.codigo_paciente}'
+        chave = (registro.codigo_paciente, nome)
+        if chave not in pacientes:
+            pacientes[chave] = {
+                'codigo_paciente': registro.codigo_paciente,
+                'nm_paciente': nome,
+                'itens': [],
+            }
+        pacientes[chave]['itens'].append(_item_follow_up_glosa(registro))
+    return list(pacientes.values())
+
+
+@router.get(
+    '/conciliacao-faturamento/glosas-pendentes',
+    status_code=HTTPStatus.OK,
+    response_model=FollowUpGlosasList,
+)
+def consultar_follow_up_glosas(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    q: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    pendencia = (
+        select(RegistroGlosa.id)
+        .where(
+            RegistroGlosa.conciliacao_remessa_id
+            == ConciliacaoFaturamentoRemessa.id,
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.sn_glosado == 'true',
+            RegistroGlosa.valor_recursado.is_(None),
+            RegistroGlosa.processo_recurso.is_(None),
+            RegistroGlosa.dt_recurso.is_(None),
+        )
+        .exists()
+    )
+    valores_alocados = (
+        select(
+            RegistroGlosa.conciliacao_remessa_id.label(
+                'conciliacao_remessa_id'
+            ),
+            func.sum(RegistroGlosa.valor_recursado).label('valor_alocado'),
+        )
+        .where(
+            RegistroGlosa.conciliacao_remessa_id.is_not(None),
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.valor_recursado.is_not(None),
+        )
+        .group_by(RegistroGlosa.conciliacao_remessa_id)
+        .subquery()
+    )
+    data_entrega = (
+        select(func.min(RegistroGlosa.data_glosa))
+        .where(
+            RegistroGlosa.conciliacao_remessa_id
+            == ConciliacaoFaturamentoRemessa.id
+        )
+        .correlate(ConciliacaoFaturamentoRemessa)
+        .scalar_subquery()
+    )
+    valor_pendente = (
+        ConciliacaoFaturamentoRemessa.valor_glosado
+        - func.coalesce(valores_alocados.c.valor_alocado, 0)
+    )
+    filtros = [
+        ConciliacaoFaturamentoRemessa.sn_glosado == 'true',
+        ConciliacaoFaturamentoRemessa.valor_glosado > 0,
+        pendencia,
+    ]
+    termo = (q or '').strip()
+    if termo:
+        pattern = f'%{termo}%'
+        filtros.append(
+            or_(
+                cast(
+                    ConciliacaoFaturamentoRemessa.cd_remessa,
+                    String,
+                ).ilike(pattern),
+                ConciliacaoFaturamentoRemessa.convenio.ilike(pattern),
+                ConciliacaoFaturamento.numero_nfse.ilike(pattern),
+            )
+        )
+
+    consulta_base = (
+        select(
+            ConciliacaoFaturamentoRemessa,
+            ConciliacaoFaturamento,
+            data_entrega.label('data_entrega'),
+            valor_pendente.label('valor_pendente'),
+        )
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .outerjoin(
+            valores_alocados,
+            valores_alocados.c.conciliacao_remessa_id
+            == ConciliacaoFaturamentoRemessa.id,
+        )
+        .where(*filtros)
+    )
+    total, valor_total_glosado, valor_total_pendente = session.execute(
+        select(
+            func.count(),
+            func.coalesce(
+                func.sum(ConciliacaoFaturamentoRemessa.valor_glosado),
+                0,
+            ),
+            func.coalesce(func.sum(valor_pendente), 0),
+        )
+        .select_from(ConciliacaoFaturamentoRemessa)
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .outerjoin(
+            valores_alocados,
+            valores_alocados.c.conciliacao_remessa_id
+            == ConciliacaoFaturamentoRemessa.id,
+        )
+        .where(*filtros)
+    ).one()
+    rows = session.execute(
+        consulta_base
+        .order_by(data_entrega, ConciliacaoFaturamentoRemessa.id)
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    ids_vinculos = {row[0].id for row in rows}
+    registros_por_vinculo: dict[int, list[RegistroGlosa]] = {
+        vinculo_id: [] for vinculo_id in ids_vinculos
+    }
+    if ids_vinculos:
+        registros = session.scalars(
+            select(RegistroGlosa)
+            .where(
+                RegistroGlosa.conciliacao_remessa_id.in_(ids_vinculos),
+                RegistroGlosa.sn_ativo == 'true',
+            )
+            .order_by(
+                RegistroGlosa.conciliacao_remessa_id,
+                RegistroGlosa.nm_paciente,
+                RegistroGlosa.cd_atendimento,
+                RegistroGlosa.conta,
+                RegistroGlosa.cd_lancamento,
+            )
+        ).all()
+        for registro in registros:
+            registros_por_vinculo[registro.conciliacao_remessa_id].append(
+                registro
+            )
+
+    cards = []
+    for vinculo, conciliacao, entrega, pendente in rows:
+        cards.append(
+            {
+                'conciliacao_remessa_id': vinculo.id,
+                'cd_remessa': vinculo.cd_remessa,
+                'convenio': vinculo.convenio,
+                'data_entrega': entrega or conciliacao.data_criacao.date(),
+                'numero_nfse': conciliacao.numero_nfse,
+                'valor_remessa': _money(vinculo.valor_total),
+                'valor_glosado': _money(vinculo.valor_glosado),
+                'valor_glosa_pendente': max(
+                    _money(pendente),
+                    Decimal('0.00'),
+                ),
+                'pacientes': _pacientes_follow_up_glosa(
+                    registros_por_vinculo[vinculo.id]
+                ),
+            }
+        )
+    return {
+        'cards': cards,
+        'total': int(total),
+        'valor_total_glosado': _money(valor_total_glosado),
+        'valor_total_pendente': _money(valor_total_pendente),
         'limit': limit,
         'offset': offset,
     }

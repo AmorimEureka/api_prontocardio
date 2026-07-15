@@ -94,6 +94,9 @@ class RegistroGlosaCreate(BaseModel):
     motivo_glosa: str
     descricao_glosa: str
     qtd_registro: Decimal = Field(gt=0)
+    descricao_item: str | None = None
+    data_alta: datetime | None = None
+    data_lancamento: datetime | None = None
     qtd_recursado: Decimal = Field(
         gt=0,
         validation_alias=AliasChoices(
@@ -207,6 +210,9 @@ class RegistroGlosaPublic(BaseModel):
     motivo_glosa: str
     descricao_glosa: str
     qtd_registro: Decimal | None = None
+    descricao_item: str | None = None
+    data_alta: datetime | None = None
+    data_lancamento: datetime | None = None
     qtd_recursado: Decimal | None = None
     valor_recursado: Decimal | None = None
     dt_recurso: date | None = None
@@ -603,6 +609,56 @@ class ConciliacoesSemRecebimentoList(BaseModel):
     conciliacoes: list[ConciliacaoSemRecebimentoPublic]
     total: int
     total_remessas_sem_recebimento: int
+    valor_total_pendente: Decimal
+    limit: int
+    offset: int
+
+
+class ItemFollowUpGlosaPublic(BaseModel):
+    cd_paciente: int
+    nm_paciente: str | None = None
+    cd_remessa: int
+    cd_atendimento: int
+    cd_reg: int
+    cd_lancamento: int | None = None
+    cd_prestador: int
+    nm_prestador: str
+    cd_convenio: int
+    nm_convenio: str
+    tp_atendimento: TipoAtendimento
+    cd_pro_fat: str
+    descricao: str | None = None
+    nr_guia: str
+    dt_atendimento: datetime
+    dt_alta: datetime | None = None
+    dt_lancamento: datetime | None = None
+    qt_lancamento: Decimal
+    vl_total_conta: Decimal
+    registro_glosa: RegistroGlosaPublic
+
+
+class PacienteFollowUpGlosaPublic(BaseModel):
+    codigo_paciente: int
+    nm_paciente: str
+    itens: list[ItemFollowUpGlosaPublic]
+
+
+class CardFollowUpGlosaPublic(BaseModel):
+    conciliacao_remessa_id: int
+    cd_remessa: int
+    convenio: str
+    data_entrega: date
+    numero_nfse: str
+    valor_remessa: Decimal
+    valor_glosado: Decimal
+    valor_glosa_pendente: Decimal
+    pacientes: list[PacienteFollowUpGlosaPublic]
+
+
+class FollowUpGlosasList(BaseModel):
+    cards: list[CardFollowUpGlosaPublic]
+    total: int
+    valor_total_glosado: Decimal
     valor_total_pendente: Decimal
     limit: int
     offset: int
