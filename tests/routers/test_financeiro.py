@@ -404,6 +404,7 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
     follow_up = financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
         session=session,
+        session_oracle=object(),
         q=None,
         limit=20,
         offset=0,
@@ -439,6 +440,7 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
     follow_up = financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
         session=session,
+        session_oracle=object(),
         q='987',
         limit=20,
         offset=0,
@@ -463,11 +465,64 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
     follow_up = financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
         session=session,
+        session_oracle=object(),
         q=None,
         limit=20,
         offset=0,
     )
     assert follow_up['cards'] == []
+
+
+def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    configurar_oracle_fake(monkeypatch)
+    vinculo = criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+    )
+    assert session.scalars(
+        select(RegistroGlosa).where(
+            RegistroGlosa.conciliacao_remessa_id == vinculo.id
+        )
+    ).all() == []
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+
+    assert follow_up['total'] == 1
+    assert follow_up['cards'][0]['cd_remessa'] == CD_REMESSA_TESTE
+    assert len(follow_up['cards'][0]['pacientes']) == ITENS_ANALITICOS_TESTE
+    registros = session.scalars(
+        select(RegistroGlosa).where(
+            RegistroGlosa.conciliacao_remessa_id == vinculo.id
+        )
+    ).all()
+    assert len(registros) == ITENS_ANALITICOS_TESTE
+
+    financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+    assert len(
+        session.scalars(
+            select(RegistroGlosa).where(
+                RegistroGlosa.conciliacao_remessa_id == vinculo.id
+            )
+        ).all()
+    ) == ITENS_ANALITICOS_TESTE
 
 
 def test_totaliza_valor_de_todas_nfses_independente_da_paginacao(
