@@ -1578,18 +1578,106 @@ def _pacientes_follow_up_glosa(registros: list[RegistroGlosa]) -> list[dict]:
     return list(pacientes.values())
 
 
+def _sincronizar_itens_glosas_legadas(
+    session_postgres: Session,
+    session_oracle: Session,
+) -> int:
+    possui_registro = (
+        select(RegistroGlosa.id)
+        .where(
+            RegistroGlosa.conciliacao_remessa_id
+            == ConciliacaoFaturamentoRemessa.id
+        )
+        .exists()
+    )
+    rows = session_postgres.execute(
+        select(
+            ConciliacaoFaturamentoRemessa,
+            ConciliacaoFaturamento,
+        )
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .where(
+            ConciliacaoFaturamentoRemessa.sn_glosado == 'true',
+            ConciliacaoFaturamentoRemessa.valor_glosado > 0,
+            ~possui_registro,
+        )
+        .order_by(ConciliacaoFaturamentoRemessa.id)
+        .with_for_update()
+    ).all()
+    if not rows:
+        return 0
+
+    glosas_legadas = []
+    for vinculo, conciliacao in rows:
+        registro_criado = session_postgres.scalar(
+            select(RegistroGlosa.id).where(
+                RegistroGlosa.conciliacao_remessa_id == vinculo.id
+            )
+        )
+        if registro_criado is None:
+            glosas_legadas.append((vinculo, conciliacao))
+    if not glosas_legadas:
+        return 0
+
+    por_cnpj: dict[
+        str,
+        list[
+            tuple[
+                ConciliacaoFaturamentoRemessa,
+                ConciliacaoFaturamento,
+            ]
+        ],
+    ] = {}
+    for vinculo, conciliacao in glosas_legadas:
+        por_cnpj.setdefault(vinculo.cnpj_convenio, []).append(
+            (vinculo, conciliacao)
+        )
+
+    itens_por_vinculo: dict[int, list[dict]] = {}
+    for cnpj_convenio, conciliacoes in por_cnpj.items():
+        ids_remessas = {vinculo.cd_remessa for vinculo, _ in conciliacoes}
+        itens_por_remessa = _carregar_itens_glosa_conciliacao(
+            session_oracle,
+            cnpj_convenio,
+            ids_remessas,
+        )
+        for vinculo, _ in conciliacoes:
+            itens_por_vinculo[vinculo.id] = itens_por_remessa[
+                vinculo.cd_remessa
+            ]
+
+    total_registros = 0
+    for vinculo, conciliacao in glosas_legadas:
+        itens = itens_por_vinculo[vinculo.id]
+        _registrar_itens_glosa_conciliacao(
+            session_postgres,
+            conciliacao,
+            vinculo,
+            itens,
+        )
+        total_registros += len(itens)
+    session_postgres.commit()
+    return total_registros
+
+
 @router.get(
     '/conciliacao-faturamento/glosas-pendentes',
     status_code=HTTPStatus.OK,
     response_model=FollowUpGlosasList,
 )
-def consultar_follow_up_glosas(
+def consultar_follow_up_glosas(  # noqa: PLR0913
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
     q: str | None = Query(default=None, max_length=100),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
+    _sincronizar_itens_glosas_legadas(session, session_oracle)
     pendencia = (
         select(RegistroGlosa.id)
         .where(
