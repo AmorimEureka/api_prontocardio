@@ -31,6 +31,8 @@ CONTA_BANCARIA_TESTE = 7
 ITENS_ANALITICOS_TESTE = 2
 GRU_PRO_DIAGNOSTICO = 10
 GRU_PRO_MEDICAMENTOS = 20
+GRU_FAT_EXAMES = 1
+GRU_FAT_MEDICAMENTOS = 2
 
 
 def criar_nfse(
@@ -104,6 +106,8 @@ def itens_remessas_hpc(*_args, **_kwargs):
             'procedimento': 'PROC-1',
             'cd_gru_pro': GRU_PRO_DIAGNOSTICO,
             'ds_gru_pro': 'Diagnostico',
+            'cd_gru_fat': GRU_FAT_EXAMES,
+            'ds_gru_fat': 'EXAMES E DIAGNOSTICOS',
             'convenio': 'Convenio Teste',
             'guia': 'GUIA-1',
             'prestador': 'Prestador Um',
@@ -127,6 +131,8 @@ def itens_remessas_hpc(*_args, **_kwargs):
             'procedimento': 'PROC-2',
             'cd_gru_pro': GRU_PRO_MEDICAMENTOS,
             'ds_gru_pro': 'Medicamentos',
+            'cd_gru_fat': GRU_FAT_MEDICAMENTOS,
+            'ds_gru_fat': 'MEDICAMENTOS',
             'convenio': 'Convenio Teste',
             'guia': 'GUIA-2',
             'prestador': 'Prestador Dois',
@@ -436,6 +442,8 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
     assert primeiro_item['descricao'] == 'Item analitico um'
     assert primeiro_item['cd_gru_pro'] == GRU_PRO_DIAGNOSTICO
     assert primeiro_item['ds_gru_pro'] == 'Diagnostico'
+    assert primeiro_item['cd_gru_fat'] == GRU_FAT_EXAMES
+    assert primeiro_item['ds_gru_fat'] == 'EXAMES E DIAGNOSTICOS'
     assert primeiro_item['dt_alta'] == datetime(2026, 6, 1, 12, 0)
     assert primeiro_item['dt_lancamento'] == datetime(2026, 6, 1, 8, 30)
 
@@ -518,6 +526,10 @@ def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
     assert {registro.cd_gru_pro for registro in registros} == {
         GRU_PRO_DIAGNOSTICO,
         GRU_PRO_MEDICAMENTOS,
+    }
+    assert {registro.cd_gru_fat for registro in registros} == {
+        GRU_FAT_EXAMES,
+        GRU_FAT_MEDICAMENTOS,
     }
 
     financeiro.consultar_follow_up_glosas(

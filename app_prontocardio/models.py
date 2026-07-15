@@ -152,6 +152,11 @@ class RegistroGlosa:
         String,
         default=None,
     )
+    cd_gru_fat: Mapped[int | None] = mapped_column(default=None)
+    ds_gru_fat: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.'
