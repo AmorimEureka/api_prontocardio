@@ -1,19 +1,23 @@
+from __future__ import annotations
+
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Numeric,
     String,
     UniqueConstraint,
     func,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, registry
+from sqlalchemy.orm import Mapped, mapped_column, registry, relationship
 
 from app_prontocardio.settings import Settings
 
@@ -70,7 +74,15 @@ class TokenRedefinicaoSenha:
 @table_registry.mapped_as_dataclass
 class RegistroGlosa:
     __tablename__ = 'registros_glosa'
-    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+    __table_args__ = (
+        UniqueConstraint(
+            'conciliacao_remessa_id',
+            'conta',
+            'cd_lancamento',
+            name='uq_registro_glosa_conciliacao_item',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, init=False)
     codigo_paciente: Mapped[int]
@@ -95,11 +107,11 @@ class RegistroGlosa:
     data_glosa: Mapped[date] = mapped_column(Date)
     motivo_glosa: Mapped[str] = mapped_column(String)
     descricao_glosa: Mapped[str] = mapped_column(String)
-    qtd_glosada: Mapped[Decimal | None] = mapped_column(
+    qtd_recursado: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2),
         nullable=True,
     )
-    valor_glosado: Mapped[Decimal | None] = mapped_column(
+    valor_recursado: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2),
         nullable=True,
     )
@@ -118,12 +130,55 @@ class RegistroGlosa:
         String,
         nullable=True,
     )
+    cd_lancamento: Mapped[int | None] = mapped_column(default=None)
+    qtd_registro: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 2),
+        default=None,
+    )
+    conciliacao_remessa_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.'
+            'conciliacoes_faturamento_remessas.id',
+            ondelete='SET NULL',
+        ),
+        default=None,
+    )
     sn_glosado: Mapped[str] = mapped_column(String, default='true')
     sn_ativo: Mapped[str] = mapped_column(String, default='true')
     data_criacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
     )
+    conciliacao_remessa: Mapped[ConciliacaoFaturamentoRemessa | None] = (
+        relationship(
+            back_populates='registros_glosa',
+            init=False,
+        )
+    )
+
+    @property
+    def valor_glosa_origem(self) -> Decimal | None:
+        if self.conciliacao_remessa is None:
+            return None
+        return self.conciliacao_remessa.valor_glosado
+
+    @property
+    def valor_glosa_pendente(self) -> Decimal | None:
+        if self.conciliacao_remessa is None:
+            return None
+        valor_alocado = sum(
+            (
+                registro.valor_recursado
+                for registro in self.conciliacao_remessa.registros_glosa
+                if registro.sn_ativo == 'true'
+                and registro.valor_recursado is not None
+            ),
+            start=Decimal('0.00'),
+        )
+        return max(
+            self.conciliacao_remessa.valor_glosado - valor_alocado,
+            Decimal('0.00'),
+        )
 
 
 @table_registry.mapped_as_dataclass
@@ -146,6 +201,264 @@ class PrazoRecursoConvenio:
     data_atualizacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class NfseXml:
+    """Nota fiscal importada pelo pipeline do ISS Fortaleza."""
+
+    __tablename__ = 'nfse_xml'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    row_hash: Mapped[str] = mapped_column(String, primary_key=True, init=False)
+    data_hora: Mapped[datetime | None] = mapped_column(DateTime, init=False)
+    numero_nfse: Mapped[str | None] = mapped_column(String, init=False)
+    prestador_cnpj: Mapped[str | None] = mapped_column(String, init=False)
+    prestador_razao_social: Mapped[str | None] = mapped_column(
+        String,
+        init=False,
+    )
+    tomador_cnpj: Mapped[str | None] = mapped_column(String, init=False)
+    tomador_razao_social: Mapped[str | None] = mapped_column(
+        String,
+        init=False,
+    )
+    valor_pis: Mapped[str | None] = mapped_column(String, init=False)
+    valor_cofins: Mapped[str | None] = mapped_column(String, init=False)
+    valor_csll: Mapped[str | None] = mapped_column(String, init=False)
+    valor_ir: Mapped[str | None] = mapped_column(String, init=False)
+    outras_retencoes: Mapped[str | None] = mapped_column(String, init=False)
+    valor_liquido_nfse: Mapped[str | None] = mapped_column(String, init=False)
+    cancelamento_codigo: Mapped[str | None] = mapped_column(String, init=False)
+
+
+@table_registry.mapped_as_dataclass
+class LancamentoExtratoBancario:
+    __tablename__ = 'lancamentos_extrato_bancario'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    conta_bancaria_id: Mapped[int]
+    data_lancamento: Mapped[date] = mapped_column(Date)
+    valor: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    descricao: Mapped[str | None] = mapped_column(String, default=None)
+    documento: Mapped[str | None] = mapped_column(String, default=None)
+    conciliado: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text('false'),
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class ConciliacaoFaturamento:
+    __tablename__ = 'conciliacoes_faturamento'
+    __table_args__ = (
+        UniqueConstraint(
+            'nfse_row_hash',
+            name='uq_conciliacoes_faturamento_nfse',
+        ),
+        UniqueConstraint(
+            'numero_nfse',
+            name='uq_conciliacoes_faturamento_numero_nfse',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    nfse_row_hash: Mapped[str] = mapped_column(String)
+    numero_nfse: Mapped[str] = mapped_column(String)
+    cnpj_convenio: Mapped[str] = mapped_column(String)
+    convenio: Mapped[str] = mapped_column(String)
+    valor_nfse: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    impostos: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    processo_recebimento: Mapped[str] = mapped_column(String)
+    data_previsao_recebimento: Mapped[date] = mapped_column(Date)
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    data_recebimento: Mapped[date | None] = mapped_column(
+        Date,
+        default=None,
+    )
+    conta_bancaria_id: Mapped[int | None] = mapped_column(default=None)
+    conta_plano_contas: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    conta_centro_custo: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    lancamento_extrato_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.lancamentos_extrato_bancario.id'
+        ),
+        default=None,
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class ConciliacaoFaturamentoRemessa:
+    __tablename__ = 'conciliacoes_faturamento_remessas'
+    __table_args__ = (
+        UniqueConstraint(
+            'conciliacao_id',
+            'cd_remessa',
+            name='uq_conciliacoes_remessas_conciliacao_remessa',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    conciliacao_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento.id',
+            ondelete='CASCADE',
+        )
+    )
+    cd_remessa: Mapped[int]
+    convenio: Mapped[str] = mapped_column(String)
+    cnpj_convenio: Mapped[str] = mapped_column(String)
+    valor_total: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    sn_glosado: Mapped[str] = mapped_column(
+        String,
+        default='not',
+        server_default=text("'not'"),
+    )
+    valor_glosado: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2),
+        default=Decimal('0.00'),
+        server_default=text('0'),
+    )
+    tp_conciliacao: Mapped[str] = mapped_column(
+        String,
+        default='faturamento',
+        server_default=text("'faturamento'"),
+    )
+    registros_glosa: Mapped[list[RegistroGlosa]] = relationship(
+        back_populates='conciliacao_remessa',
+        init=False,
+    )
+
+
+@table_registry.mapped_as_dataclass
+class RemessaFinanceira:
+    __tablename__ = 'remessas_financeiras'
+    __table_args__ = (
+        CheckConstraint(
+            'valor_total >= 0',
+            name='ck_remessas_financeiras_valor_total',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    cd_remessa: Mapped[int] = mapped_column(
+        primary_key=True,
+        autoincrement=False,
+    )
+    convenio: Mapped[str] = mapped_column(String)
+    cnpj_convenio: Mapped[str] = mapped_column(String)
+    valor_total: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    recebimento_integral: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text('false'),
+    )
+    data_registro: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    recebimentos: Mapped[list['RecebimentoRemessa']] = relationship(
+        back_populates='remessa',
+        init=False,
+    )
+
+
+@table_registry.mapped_as_dataclass
+class RecebimentoRemessa:
+    __tablename__ = 'recebimentos_remessas'
+    __table_args__ = (
+        CheckConstraint(
+            'valor_recebido > 0',
+            name='ck_recebimentos_remessas_valor_positivo',
+        ),
+        ForeignKeyConstraint(
+            ['conciliacao_id', 'cd_remessa'],
+            [
+                f'{settings.POSTGRES_SCHEMA}.'
+                'conciliacoes_faturamento_remessas.conciliacao_id',
+                f'{settings.POSTGRES_SCHEMA}.'
+                'conciliacoes_faturamento_remessas.cd_remessa',
+            ],
+            name='fk_recebimento_conciliacao_remessa',
+            ondelete='CASCADE',
+        ),
+        UniqueConstraint(
+            'conciliacao_id',
+            'cd_remessa',
+            name='uq_recebimento_conciliacao_remessa',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cd_remessa: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.remessas_financeiras.cd_remessa'
+        )
+    )
+    conciliacao_id: Mapped[int]
+    numero_nfse: Mapped[str] = mapped_column(String)
+    data_recebimento: Mapped[date] = mapped_column(Date)
+    valor_recebido: Mapped[Decimal] = mapped_column(Numeric(14, 2))
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    conta_bancaria_id: Mapped[int]
+    recebimento_integral: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=text('false'),
+    )
+    conta_plano_contas: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    conta_centro_custo: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    lancamento_extrato_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.lancamentos_extrato_bancario.id'
+        ),
+        default=None,
+    )
+    data_registro: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    remessa: Mapped[RemessaFinanceira] = relationship(
+        back_populates='recebimentos',
+        init=False,
+    )
+    conciliacao_remessa: Mapped[ConciliacaoFaturamentoRemessa] = relationship(
+        init=False,
+        viewonly=True,
+    )
+    usuario: Mapped[Usuario] = relationship(init=False)
+    lancamento_extrato: Mapped[LancamentoExtratoBancario | None] = (
+        relationship(init=False)
     )
 
 
@@ -179,6 +492,32 @@ class ModelConvenio:
 
 
 @table_registry.mapped_as_dataclass
+class ModelHpcConvenio:
+    __tablename__ = 'HPC_V_CONVENIOS'
+    __table_args__ = {'schema': 'DBAMV'}
+
+    cd_convenio: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cnpj_convenio: Mapped[str | None] = mapped_column(String, init=False)
+    nm_convenio: Mapped[str] = mapped_column(String, init=False)
+
+
+@table_registry.mapped_as_dataclass
+class ModelHpcContaBancaria:
+    __tablename__ = 'HPC_V_CONTAS_BANCARIAS'
+    __table_args__ = {'schema': 'DBAMV'}
+
+    cd_con_cor: Mapped[int] = mapped_column(primary_key=True, init=False)
+    ds_con_cor: Mapped[str] = mapped_column(String, init=False)
+    cd_agencia: Mapped[str] = mapped_column(String, init=False)
+    cd_digito_agencia: Mapped[str | None] = mapped_column(String, init=False)
+    nr_conta: Mapped[str] = mapped_column(String, init=False)
+    cd_digito_conta_corrente: Mapped[str | None] = mapped_column(
+        String,
+        init=False,
+    )
+
+
+@table_registry.mapped_as_dataclass
 class ModelContaAtendimento:
     __tablename__ = 'HPC_V_CONTA_ATENDIMENTO'
     __table_args__ = {'schema': 'DBAMV'}
@@ -192,12 +531,13 @@ class ModelContaAtendimento:
     cd_regra: Mapped[int | None] = mapped_column(init=False)
     ds_regra: Mapped[str | None] = mapped_column(String, init=False)
     cd_convenio: Mapped[int | None] = mapped_column(init=False)
+    cnpj_convenio: Mapped[str | None] = mapped_column(String, init=False)
     nm_convenio: Mapped[str | None] = mapped_column(String, init=False)
     cd_gru_fat: Mapped[int | None] = mapped_column(init=False)
     ds_gru_fat: Mapped[str | None] = mapped_column(String, init=False)
-    cd_pro_fat: Mapped[int | None] = mapped_column(init=False)
+    cd_pro_fat: Mapped[str | None] = mapped_column(String, init=False)
     descricao: Mapped[str | None] = mapped_column(String, init=False)
-    nr_guia: Mapped[int | None] = mapped_column(init=False)
+    nr_guia: Mapped[str | None] = mapped_column(String, init=False)
     cd_senha: Mapped[str | None] = mapped_column(String, init=False)
     dt_atendimento: Mapped[datetime | None] = mapped_column(
         DateTime,
@@ -231,7 +571,7 @@ class ModelContaAtendimento:
     )
     vl_acrescimo: Mapped[Decimal | None] = mapped_column(Numeric, init=False)
     vl_desconto: Mapped[Decimal | None] = mapped_column(Numeric, init=False)
-    cd_ati_med: Mapped[int | None] = mapped_column(init=False)
+    cd_ati_med: Mapped[str | None] = mapped_column(String, init=False)
     ds_ati_med: Mapped[str | None] = mapped_column(String, init=False)
     cd_usuario: Mapped[str | None] = mapped_column(String, init=False)
     nm_usuario: Mapped[str | None] = mapped_column(String, init=False)
