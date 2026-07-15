@@ -1751,6 +1751,8 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
     q: str | None = Query(default=None, max_length=100),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    conciliacao_remessa_id: Annotated[int | None, Query(ge=1)] = None,
+    incluir_detalhes: bool = True,
 ):
     _sincronizar_itens_follow_up(session, session_oracle)
     pendencia = (
@@ -1799,6 +1801,10 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
         ConciliacaoFaturamentoRemessa.valor_glosado > 0,
         pendencia,
     ]
+    if conciliacao_remessa_id is not None:
+        filtros.append(
+            ConciliacaoFaturamentoRemessa.id == conciliacao_remessa_id
+        )
     termo = (q or '').strip()
     if termo:
         pattern = f'%{termo}%'
@@ -1864,7 +1870,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
     registros_por_vinculo: dict[int, list[RegistroGlosa]] = {
         vinculo_id: [] for vinculo_id in ids_vinculos
     }
-    if ids_vinculos:
+    if incluir_detalhes and ids_vinculos:
         registros = session.scalars(
             select(RegistroGlosa)
             .where(
@@ -1899,8 +1905,12 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
                     _money(pendente),
                     Decimal('0.00'),
                 ),
-                'pacientes': _pacientes_follow_up_glosa(
-                    registros_por_vinculo[vinculo.id]
+                'pacientes': (
+                    _pacientes_follow_up_glosa(
+                        registros_por_vinculo[vinculo.id]
+                    )
+                    if incluir_detalhes
+                    else []
                 ),
             }
         )
