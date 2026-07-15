@@ -318,6 +318,8 @@ def _consultar_itens_remessas_hpc(
                 'procedimento': str(row.cd_pro_fat or '-'),
                 'cd_gru_pro': int(cd_gru_pro or 0),
                 'ds_gru_pro': ds_gru_pro or 'Grupo nao informado',
+                'cd_gru_fat': int(row.cd_gru_fat or 0),
+                'ds_gru_fat': row.ds_gru_fat or 'Grupo nao informado',
                 'convenio': row.nm_convenio or 'Convenio nao informado',
                 'guia': str(row.nr_guia or '-'),
                 'prestador': row.nm_prestador or 'Prestador nao informado',
@@ -877,6 +879,8 @@ def _registrar_itens_glosa_conciliacao(
             data_lancamento=item['data_lancamento'],
             cd_gru_pro=item['cd_gru_pro'],
             ds_gru_pro=item['ds_gru_pro'],
+            cd_gru_fat=item['cd_gru_fat'],
+            ds_gru_fat=item['ds_gru_fat'],
             conciliacao_remessa_id=remessa_conciliada.id,
             sn_glosado='true',
             sn_ativo='true',
@@ -1573,6 +1577,8 @@ def _item_follow_up_glosa(registro: RegistroGlosa) -> dict:
         'cd_pro_fat': registro.procedimento,
         'cd_gru_pro': registro.cd_gru_pro,
         'ds_gru_pro': registro.ds_gru_pro,
+        'cd_gru_fat': registro.cd_gru_fat,
+        'ds_gru_fat': registro.ds_gru_fat,
         'descricao': registro.descricao_item or registro.descricao_glosa,
         'nr_guia': registro.guia,
         'dt_atendimento': registro.data_atendimento,
@@ -1619,6 +1625,8 @@ def _sincronizar_itens_follow_up(  # noqa: PLR0912
             or_(
                 RegistroGlosa.cd_gru_pro.is_(None),
                 RegistroGlosa.ds_gru_pro.is_(None),
+                RegistroGlosa.cd_gru_fat.is_(None),
+                RegistroGlosa.ds_gru_fat.is_(None),
             ),
         )
         .exists()
@@ -1652,7 +1660,10 @@ def _sincronizar_itens_follow_up(  # noqa: PLR0912
             )
         ).all()
         if not registros or any(
-            registro.cd_gru_pro is None or registro.ds_gru_pro is None
+            registro.cd_gru_pro is None
+            or registro.ds_gru_pro is None
+            or registro.cd_gru_fat is None
+            or registro.ds_gru_fat is None
             for registro in registros
         ):
             vinculos_sincronizar.append((vinculo, conciliacao, registros))
@@ -1712,6 +1723,10 @@ def _sincronizar_itens_follow_up(  # noqa: PLR0912
             registro.cd_gru_pro = item['cd_gru_pro'] if item else 0
             registro.ds_gru_pro = (
                 item['ds_gru_pro'] if item else 'Grupo nao informado'
+            )
+            registro.cd_gru_fat = item['cd_gru_fat'] if item else 0
+            registro.ds_gru_fat = (
+                item['ds_gru_fat'] if item else 'Grupo nao informado'
             )
             if item and not registro.descricao_item:
                 registro.descricao_item = item['descricao_item']
