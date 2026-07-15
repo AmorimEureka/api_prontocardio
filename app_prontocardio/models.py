@@ -135,6 +135,18 @@ class RegistroGlosa:
         Numeric(12, 2),
         default=None,
     )
+    descricao_item: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    data_alta: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        default=None,
+    )
+    data_lancamento: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        default=None,
+    )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.'

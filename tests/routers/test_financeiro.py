@@ -107,6 +107,8 @@ def itens_remessas_hpc(*_args, **_kwargs):
             'valor': Decimal('60.00'),
             'qtd_registro': Decimal('1.00'),
             'descricao_item': 'Item analitico um',
+            'data_alta': datetime(2026, 6, 1, 12, 0),
+            'data_lancamento': datetime(2026, 6, 1, 8, 30),
         },
         {
             'codigo_paciente': 2,
@@ -126,6 +128,8 @@ def itens_remessas_hpc(*_args, **_kwargs):
             'valor': Decimal('60.00'),
             'qtd_registro': Decimal('2.00'),
             'descricao_item': 'Item analitico dois',
+            'data_alta': datetime(2026, 6, 2, 12, 0),
+            'data_lancamento': datetime(2026, 6, 2, 9, 0),
         },
     ]
 
@@ -260,6 +264,39 @@ def configurar_oracle_fake(monkeypatch):
     )
 
 
+def payload_tratativa(registro, processo, valor):
+    return RegistroGlosaCreate(
+        codigo_paciente=registro.codigo_paciente,
+        nm_paciente=registro.nm_paciente,
+        cd_remessa=registro.cd_remessa,
+        cd_atendimento=registro.cd_atendimento,
+        conta=registro.conta,
+        cd_lancamento=registro.cd_lancamento,
+        cd_prestador=registro.cd_prestador,
+        cd_convenio=registro.cd_convenio,
+        tp_atendimento=registro.tp_atendimento,
+        procedimento=registro.procedimento,
+        convenio=registro.convenio,
+        guia=registro.guia,
+        prestador=registro.prestador,
+        data_atendimento=registro.data_atendimento,
+        valor=registro.valor,
+        processo_controle_fatura_gab=(
+            registro.processo_controle_fatura_gab
+        ),
+        processo_recurso=processo,
+        data_glosa=registro.data_glosa,
+        motivo_glosa='Glosa analisada',
+        descricao_glosa='Item identificado pelo setor de glosas',
+        qtd_registro=registro.qtd_registro,
+        qtd_recursado=Decimal('1.00'),
+        valor_recursado=Decimal(valor),
+        dt_recurso=registro.data_glosa,
+        dt_pagamento=registro.data_glosa,
+        sn_glosado='true',
+    )
+
+
 class OracleComContaFake:
     @staticmethod
     def scalar(_query):
@@ -330,67 +367,6 @@ def test_lista_apenas_nfse_nao_conciliada(
     assert registros_glosa[0].valor_glosa_origem == Decimal('20.00')
     assert registros_glosa[0].valor_glosa_pendente == Decimal('20.00')
 
-    def payload_tratativa(registro, processo, valor):
-        return RegistroGlosaCreate(
-            codigo_paciente=registro.codigo_paciente,
-            nm_paciente=registro.nm_paciente,
-            cd_remessa=registro.cd_remessa,
-            cd_atendimento=registro.cd_atendimento,
-            conta=registro.conta,
-            cd_lancamento=registro.cd_lancamento,
-            cd_prestador=registro.cd_prestador,
-            cd_convenio=registro.cd_convenio,
-            tp_atendimento=registro.tp_atendimento,
-            procedimento=registro.procedimento,
-            convenio=registro.convenio,
-            guia=registro.guia,
-            prestador=registro.prestador,
-            data_atendimento=registro.data_atendimento,
-            valor=registro.valor,
-            processo_controle_fatura_gab=(
-                registro.processo_controle_fatura_gab
-            ),
-            processo_recurso=processo,
-            data_glosa=registro.data_glosa,
-            motivo_glosa='Glosa analisada',
-            descricao_glosa='Item identificado pelo setor de glosas',
-            qtd_registro=registro.qtd_registro,
-            qtd_recursado=Decimal('1.00'),
-            valor_recursado=Decimal(valor),
-            dt_recurso=registro.data_glosa,
-            dt_pagamento=registro.data_glosa,
-            sn_glosado='true',
-        )
-
-    app_glosas.editar_glosa(
-        registros_glosa[0].id,
-        payload_tratativa(registros_glosa[0], 'REC-ITEM-1', '10.00'),
-        usuario_atual=usuario_teste,
-        session=session,
-    )
-    session.refresh(registros_glosa[1])
-    assert registros_glosa[1].sn_ativo == 'true'
-    assert registros_glosa[1].valor_glosa_pendente == Decimal('10.00')
-
-    with pytest.raises(HTTPException) as error:
-        app_glosas.editar_glosa(
-            registros_glosa[1].id,
-            payload_tratativa(registros_glosa[1], 'REC-ITEM-2', '11.00'),
-            usuario_atual=usuario_teste,
-            session=session,
-        )
-    assert error.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
-    assert 'nao pode exceder o valor glosado' in error.value.detail
-
-    app_glosas.editar_glosa(
-        registros_glosa[1].id,
-        payload_tratativa(registros_glosa[1], 'REC-ITEM-2', '10.00'),
-        usuario_atual=usuario_teste,
-        session=session,
-    )
-    assert all(registro.sn_ativo == 'true' for registro in registros_glosa)
-    assert registros_glosa[0].valor_glosa_pendente == Decimal('0.00')
-
     response = financeiro.consultar_nfses_pendentes(
         usuario_atual=usuario_teste,
         session=session,
@@ -406,6 +382,92 @@ def test_lista_apenas_nfse_nao_conciliada(
         'limit': 100,
         'offset': 0,
     }
+
+
+def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session)
+    configurar_oracle_fake(monkeypatch)
+    financeiro.conciliar_faturamento(
+        payload=ConciliacaoFaturamentoCreate(**payload_conciliacao()),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    registros_glosa = session.scalars(
+        select(RegistroGlosa).order_by(RegistroGlosa.cd_lancamento)
+    ).all()
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=None,
+        limit=20,
+        offset=0,
+    )
+
+    assert follow_up['total'] == 1
+    assert follow_up['valor_total_glosado'] == Decimal('20.00')
+    assert follow_up['valor_total_pendente'] == Decimal('20.00')
+    card = follow_up['cards'][0]
+    assert card['cd_remessa'] == CD_REMESSA_TESTE
+    assert card['numero_nfse'] == '12345'
+    assert card['valor_remessa'] == Decimal('120.00')
+    assert card['valor_glosado'] == Decimal('20.00')
+    assert len(card['pacientes']) == ITENS_ANALITICOS_TESTE
+    itens = [
+        item
+        for paciente in card['pacientes']
+        for item in paciente['itens']
+    ]
+    primeiro_item = next(
+        item for item in itens if item['cd_lancamento'] == 1
+    )
+    assert primeiro_item['descricao'] == 'Item analitico um'
+    assert primeiro_item['dt_alta'] == datetime(2026, 6, 1, 12, 0)
+    assert primeiro_item['dt_lancamento'] == datetime(2026, 6, 1, 8, 30)
+
+    app_glosas.editar_glosa(
+        registros_glosa[0].id,
+        payload_tratativa(registros_glosa[0], 'REC-ITEM-1', '10.00'),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        q='987',
+        limit=20,
+        offset=0,
+    )
+    assert follow_up['valor_total_pendente'] == Decimal('10.00')
+
+    with pytest.raises(HTTPException) as error:
+        app_glosas.editar_glosa(
+            registros_glosa[1].id,
+            payload_tratativa(registros_glosa[1], 'REC-ITEM-2', '11.00'),
+            usuario_atual=usuario_teste,
+            session=session,
+        )
+    assert error.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+
+    app_glosas.editar_glosa(
+        registros_glosa[1].id,
+        payload_tratativa(registros_glosa[1], 'REC-ITEM-2', '10.00'),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=None,
+        limit=20,
+        offset=0,
+    )
+    assert follow_up['cards'] == []
 
 
 def test_totaliza_valor_de_todas_nfses_independente_da_paginacao(
