@@ -29,6 +29,8 @@ from app_prontocardio.schema import (
 CD_REMESSA_TESTE = 987
 CONTA_BANCARIA_TESTE = 7
 ITENS_ANALITICOS_TESTE = 2
+GRU_PRO_DIAGNOSTICO = 10
+GRU_PRO_MEDICAMENTOS = 20
 
 
 def criar_nfse(
@@ -100,6 +102,8 @@ def itens_remessas_hpc(*_args, **_kwargs):
             'cd_convenio': 10,
             'tp_atendimento': TipoAtendimento.AMBULATORIO.value,
             'procedimento': 'PROC-1',
+            'cd_gru_pro': GRU_PRO_DIAGNOSTICO,
+            'ds_gru_pro': 'Diagnostico',
             'convenio': 'Convenio Teste',
             'guia': 'GUIA-1',
             'prestador': 'Prestador Um',
@@ -121,6 +125,8 @@ def itens_remessas_hpc(*_args, **_kwargs):
             'cd_convenio': 10,
             'tp_atendimento': TipoAtendimento.INTERNACAO.value,
             'procedimento': 'PROC-2',
+            'cd_gru_pro': GRU_PRO_MEDICAMENTOS,
+            'ds_gru_pro': 'Medicamentos',
             'convenio': 'Convenio Teste',
             'guia': 'GUIA-2',
             'prestador': 'Prestador Dois',
@@ -428,6 +434,8 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
         item for item in itens if item['cd_lancamento'] == 1
     )
     assert primeiro_item['descricao'] == 'Item analitico um'
+    assert primeiro_item['cd_gru_pro'] == GRU_PRO_DIAGNOSTICO
+    assert primeiro_item['ds_gru_pro'] == 'Diagnostico'
     assert primeiro_item['dt_alta'] == datetime(2026, 6, 1, 12, 0)
     assert primeiro_item['dt_lancamento'] == datetime(2026, 6, 1, 8, 30)
 
@@ -507,6 +515,10 @@ def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
         )
     ).all()
     assert len(registros) == ITENS_ANALITICOS_TESTE
+    assert {registro.cd_gru_pro for registro in registros} == {
+        GRU_PRO_DIAGNOSTICO,
+        GRU_PRO_MEDICAMENTOS,
+    }
 
     financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
