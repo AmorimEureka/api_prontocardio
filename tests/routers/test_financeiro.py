@@ -447,6 +447,19 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
     assert primeiro_item['dt_alta'] == datetime(2026, 6, 1, 12, 0)
     assert primeiro_item['dt_lancamento'] == datetime(2026, 6, 1, 8, 30)
 
+    resumo = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+        conciliacao_remessa_id=card['conciliacao_remessa_id'],
+        incluir_detalhes=False,
+    )
+    assert resumo['total'] == 1
+    assert resumo['cards'][0]['pacientes'] == []
+
     app_glosas.editar_glosa(
         registros_glosa[0].id,
         payload_tratativa(registros_glosa[0], 'REC-ITEM-1', '10.00'),
