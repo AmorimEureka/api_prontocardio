@@ -15,8 +15,10 @@ from app_prontocardio.models import (
     ConciliacaoFaturamentoRemessa,
     LancamentoExtratoBancario,
     ModelContaAtendimento,
+    ModelGruPro,
     ModelHpcContaBancaria,
     ModelHpcConvenio,
+    ModelProFat,
     NfseXml,
     RecebimentoRemessa,
     RegistroGlosa,
@@ -262,7 +264,20 @@ def _consultar_itens_remessas_hpc(
 
     cnpj_normalizado = _normalize_cnpj(cnpj_convenio)
     query = (
-        select(ModelContaAtendimento)
+        select(
+            ModelContaAtendimento,
+            ModelGruPro.cd_gru_pro,
+            ModelGruPro.ds_gru_pro,
+        )
+        .select_from(ModelContaAtendimento)
+        .outerjoin(
+            ModelProFat,
+            ModelProFat.cd_pro_fat == ModelContaAtendimento.cd_pro_fat,
+        )
+        .outerjoin(
+            ModelGruPro,
+            ModelGruPro.cd_gru_pro == ModelProFat.cd_gru_pro,
+        )
         .where(
             ModelContaAtendimento.cd_remessa.in_(cd_remessas),
             func.regexp_replace(
@@ -279,10 +294,10 @@ def _consultar_itens_remessas_hpc(
             ModelContaAtendimento.cd_lancamento,
         )
     )
-    rows = session_oracle.scalars(query).all()
+    rows = session_oracle.execute(query).all()
     itens = []
     chaves_adicionadas = set()
-    for row in rows:
+    for row, cd_gru_pro, ds_gru_pro in rows:
         chave = (int(row.cd_remessa), int(row.cd_reg), int(row.cd_lancamento))
         if chave in chaves_adicionadas:
             continue
@@ -301,6 +316,8 @@ def _consultar_itens_remessas_hpc(
                     row.tp_atendimento or TipoAtendimento.EXTERNO.value
                 ),
                 'procedimento': str(row.cd_pro_fat or '-'),
+                'cd_gru_pro': int(cd_gru_pro or 0),
+                'ds_gru_pro': ds_gru_pro or 'Grupo nao informado',
                 'convenio': row.nm_convenio or 'Convenio nao informado',
                 'guia': str(row.nr_guia or '-'),
                 'prestador': row.nm_prestador or 'Prestador nao informado',
@@ -858,6 +875,8 @@ def _registrar_itens_glosa_conciliacao(
             descricao_item=item['descricao_item'],
             data_alta=item['data_alta'],
             data_lancamento=item['data_lancamento'],
+            cd_gru_pro=item['cd_gru_pro'],
+            ds_gru_pro=item['ds_gru_pro'],
             conciliacao_remessa_id=remessa_conciliada.id,
             sn_glosado='true',
             sn_ativo='true',
@@ -1552,6 +1571,8 @@ def _item_follow_up_glosa(registro: RegistroGlosa) -> dict:
         'nm_convenio': registro.convenio,
         'tp_atendimento': registro.tp_atendimento,
         'cd_pro_fat': registro.procedimento,
+        'cd_gru_pro': registro.cd_gru_pro,
+        'ds_gru_pro': registro.ds_gru_pro,
         'descricao': registro.descricao_item or registro.descricao_glosa,
         'nr_guia': registro.guia,
         'dt_atendimento': registro.data_atendimento,
@@ -1578,7 +1599,7 @@ def _pacientes_follow_up_glosa(registros: list[RegistroGlosa]) -> list[dict]:
     return list(pacientes.values())
 
 
-def _sincronizar_itens_glosas_legadas(
+def _sincronizar_itens_follow_up(  # noqa: PLR0912
     session_postgres: Session,
     session_oracle: Session,
 ) -> int:
@@ -1587,6 +1608,18 @@ def _sincronizar_itens_glosas_legadas(
         .where(
             RegistroGlosa.conciliacao_remessa_id
             == ConciliacaoFaturamentoRemessa.id
+        )
+        .exists()
+    )
+    registro_sem_grupo = (
+        select(RegistroGlosa.id)
+        .where(
+            RegistroGlosa.conciliacao_remessa_id
+            == ConciliacaoFaturamentoRemessa.id,
+            or_(
+                RegistroGlosa.cd_gru_pro.is_(None),
+                RegistroGlosa.ds_gru_pro.is_(None),
+            ),
         )
         .exists()
     )
@@ -1603,7 +1636,7 @@ def _sincronizar_itens_glosas_legadas(
         .where(
             ConciliacaoFaturamentoRemessa.sn_glosado == 'true',
             ConciliacaoFaturamentoRemessa.valor_glosado > 0,
-            ~possui_registro,
+            or_(~possui_registro, registro_sem_grupo),
         )
         .order_by(ConciliacaoFaturamentoRemessa.id)
         .with_for_update()
@@ -1611,16 +1644,19 @@ def _sincronizar_itens_glosas_legadas(
     if not rows:
         return 0
 
-    glosas_legadas = []
+    vinculos_sincronizar = []
     for vinculo, conciliacao in rows:
-        registro_criado = session_postgres.scalar(
-            select(RegistroGlosa.id).where(
+        registros = session_postgres.scalars(
+            select(RegistroGlosa).where(
                 RegistroGlosa.conciliacao_remessa_id == vinculo.id
             )
-        )
-        if registro_criado is None:
-            glosas_legadas.append((vinculo, conciliacao))
-    if not glosas_legadas:
+        ).all()
+        if not registros or any(
+            registro.cd_gru_pro is None or registro.ds_gru_pro is None
+            for registro in registros
+        ):
+            vinculos_sincronizar.append((vinculo, conciliacao, registros))
+    if not vinculos_sincronizar:
         return 0
 
     por_cnpj: dict[
@@ -1629,39 +1665,63 @@ def _sincronizar_itens_glosas_legadas(
             tuple[
                 ConciliacaoFaturamentoRemessa,
                 ConciliacaoFaturamento,
+                list[RegistroGlosa],
             ]
         ],
     ] = {}
-    for vinculo, conciliacao in glosas_legadas:
+    for vinculo, conciliacao, registros in vinculos_sincronizar:
         por_cnpj.setdefault(vinculo.cnpj_convenio, []).append(
-            (vinculo, conciliacao)
+            (vinculo, conciliacao, registros)
         )
 
     itens_por_vinculo: dict[int, list[dict]] = {}
     for cnpj_convenio, conciliacoes in por_cnpj.items():
-        ids_remessas = {vinculo.cd_remessa for vinculo, _ in conciliacoes}
+        ids_remessas = {
+            vinculo.cd_remessa for vinculo, _, _ in conciliacoes
+        }
         itens_por_remessa = _carregar_itens_glosa_conciliacao(
             session_oracle,
             cnpj_convenio,
             ids_remessas,
         )
-        for vinculo, _ in conciliacoes:
+        for vinculo, _, _ in conciliacoes:
             itens_por_vinculo[vinculo.id] = itens_por_remessa[
                 vinculo.cd_remessa
             ]
 
-    total_registros = 0
-    for vinculo, conciliacao in glosas_legadas:
+    total_alteracoes = 0
+    for vinculo, conciliacao, registros in vinculos_sincronizar:
         itens = itens_por_vinculo[vinculo.id]
-        _registrar_itens_glosa_conciliacao(
-            session_postgres,
-            conciliacao,
-            vinculo,
-            itens,
-        )
-        total_registros += len(itens)
+        if not registros:
+            _registrar_itens_glosa_conciliacao(
+                session_postgres,
+                conciliacao,
+                vinculo,
+                itens,
+            )
+            total_alteracoes += len(itens)
+            continue
+
+        itens_por_chave = {
+            (item['conta'], item['cd_lancamento']): item for item in itens
+        }
+        for registro in registros:
+            item = itens_por_chave.get(
+                (registro.conta, registro.cd_lancamento)
+            )
+            registro.cd_gru_pro = item['cd_gru_pro'] if item else 0
+            registro.ds_gru_pro = (
+                item['ds_gru_pro'] if item else 'Grupo nao informado'
+            )
+            if item and not registro.descricao_item:
+                registro.descricao_item = item['descricao_item']
+            if item and registro.data_alta is None:
+                registro.data_alta = item['data_alta']
+            if item and registro.data_lancamento is None:
+                registro.data_lancamento = item['data_lancamento']
+            total_alteracoes += 1
     session_postgres.commit()
-    return total_registros
+    return total_alteracoes
 
 
 @router.get(
@@ -1677,7 +1737,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ):
-    _sincronizar_itens_glosas_legadas(session, session_oracle)
+    _sincronizar_itens_follow_up(session, session_oracle)
     pendencia = (
         select(RegistroGlosa.id)
         .where(

@@ -97,6 +97,8 @@ class RegistroGlosaCreate(BaseModel):
     descricao_item: str | None = None
     data_alta: datetime | None = None
     data_lancamento: datetime | None = None
+    cd_gru_pro: int | None = None
+    ds_gru_pro: str | None = None
     qtd_recursado: Decimal = Field(
         gt=0,
         validation_alias=AliasChoices(
@@ -213,6 +215,8 @@ class RegistroGlosaPublic(BaseModel):
     descricao_item: str | None = None
     data_alta: datetime | None = None
     data_lancamento: datetime | None = None
+    cd_gru_pro: int | None = None
+    ds_gru_pro: str | None = None
     qtd_recursado: Decimal | None = None
     valor_recursado: Decimal | None = None
     dt_recurso: date | None = None
@@ -627,6 +631,8 @@ class ItemFollowUpGlosaPublic(BaseModel):
     nm_convenio: str
     tp_atendimento: TipoAtendimento
     cd_pro_fat: str
+    cd_gru_pro: int | None = None
+    ds_gru_pro: str | None = None
     descricao: str | None = None
     nr_guia: str
     dt_atendimento: datetime

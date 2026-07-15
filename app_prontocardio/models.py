@@ -147,6 +147,11 @@ class RegistroGlosa:
         DateTime,
         default=None,
     )
+    cd_gru_pro: Mapped[int | None] = mapped_column(default=None)
+    ds_gru_pro: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.'
@@ -527,6 +532,28 @@ class ModelHpcContaBancaria:
         String,
         init=False,
     )
+
+
+@table_registry.mapped_as_dataclass
+class ModelProFat:
+    __tablename__ = 'PRO_FAT'
+    __table_args__ = {'schema': 'DBAMV'}
+
+    cd_pro_fat: Mapped[str] = mapped_column(
+        String,
+        primary_key=True,
+        init=False,
+    )
+    cd_gru_pro: Mapped[int | None] = mapped_column(init=False)
+
+
+@table_registry.mapped_as_dataclass
+class ModelGruPro:
+    __tablename__ = 'GRU_PRO'
+    __table_args__ = {'schema': 'DBAMV'}
+
+    cd_gru_pro: Mapped[int] = mapped_column(primary_key=True, init=False)
+    ds_gru_pro: Mapped[str | None] = mapped_column(String, init=False)
 
 
 @table_registry.mapped_as_dataclass
