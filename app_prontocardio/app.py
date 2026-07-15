@@ -11,6 +11,7 @@ from app_prontocardio.database import (
 from app_prontocardio.routers import (
     app_glosas,
     autenticacao,
+    financeiro,
     livre,
     usuarios,
 )
@@ -42,3 +43,4 @@ app.include_router(autenticacao.router)
 app.include_router(livre.router)
 app.include_router(usuarios.router)
 app.include_router(app_glosas.router)
+app.include_router(financeiro.router)

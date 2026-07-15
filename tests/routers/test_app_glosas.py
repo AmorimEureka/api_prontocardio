@@ -1,17 +1,25 @@
 from copy import deepcopy
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from http import HTTPStatus
+
+import pytest
+from fastapi import HTTPException
 
 from app_prontocardio.models import PrazoRecursoConvenio, RegistroGlosa
 from app_prontocardio.routers.app_glosas import (
     consultar_convenios,
     consultar_glosas_registradas,
+    registrar_glosa,
+    registrar_recebimento_glosa,
     salvar_prazos_recurso_convenio,
 )
 from app_prontocardio.schema import (
+    Atendimento,
     FilterSearch,
     PrazoRecursoConvenioInput,
     RegistroGlosaCreate,
+    RegistroGlosaRecebimentoUpdate,
 )
 
 
@@ -53,6 +61,21 @@ def registro_glosa_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def test_atendimento_aceita_identificadores_alfanumericos_da_view():
+    atendimento = Atendimento(
+        cd_reg=1,
+        cd_lancamento=2,
+        cd_pro_fat='U370796',
+        nr_guia='GUIA-ABC',
+        cd_ati_med='AT-01',
+        cnpj_convenio='39427632000171',
+    )
+
+    assert atendimento.cd_pro_fat == 'U370796'
+    assert atendimento.nr_guia == 'GUIA-ABC'
+    assert atendimento.cd_ati_med == 'AT-01'
 
 
 def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
@@ -225,6 +248,121 @@ def test_registra_recebimento_com_qtd_recebida(cliente, token_teste):
     assert response.json()['dt_recebimento'] == '2026-06-20'
     assert response.json()['valor_recebido'] == '12.31'
     assert response.json()['qtd_recebida'] == '2.00'
+
+
+def test_permite_registrar_recebimento_parcial(session, usuario_teste):
+    registro = registrar_glosa(
+        payload=RegistroGlosaCreate(
+            **registro_glosa_payload(
+                qtd_glosada='2',
+                valor_glosado='12.31',
+            )
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    registro = registrar_recebimento_glosa(
+        glosa_id=registro.id,
+        payload=RegistroGlosaRecebimentoUpdate(
+            dt_recebimento=date(2026, 6, 20),
+            valor_recebido=Decimal('5.00'),
+            qtd_recebida=Decimal('1.00'),
+            observacao_recebimento='Recebimento parcial',
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    assert registro.valor_recebido == Decimal('5.00')
+    assert registro.qtd_recebida == Decimal('1.00')
+
+    registro = registrar_recebimento_glosa(
+        glosa_id=registro.id,
+        payload=RegistroGlosaRecebimentoUpdate(
+            dt_recebimento=date(2026, 6, 21),
+            valor_recebido=Decimal('12.31'),
+            qtd_recebida=Decimal('2.00'),
+            observacao_recebimento='Recebimento integral acumulado',
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    assert registro.valor_recebido == Decimal('12.31')
+    assert registro.qtd_recebida == Decimal('2.00')
+
+
+def test_rejeita_reducao_do_recebimento_acumulado(session, usuario_teste):
+    registro = registrar_glosa(
+        payload=RegistroGlosaCreate(
+            **registro_glosa_payload(
+                qtd_glosada='2',
+                valor_glosado='12.31',
+            )
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    registrar_recebimento_glosa(
+        glosa_id=registro.id,
+        payload=RegistroGlosaRecebimentoUpdate(
+            dt_recebimento=date(2026, 6, 20),
+            valor_recebido=Decimal('5.00'),
+            qtd_recebida=Decimal('1.00'),
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registrar_recebimento_glosa(
+            glosa_id=registro.id,
+            payload=RegistroGlosaRecebimentoUpdate(
+                dt_recebimento=date(2026, 6, 20),
+                valor_recebido=Decimal('4.00'),
+                qtd_recebida=Decimal('1.00'),
+            ),
+            usuario_atual=usuario_teste,
+            session=session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert 'acumulado' in exc_info.value.detail
+
+
+@pytest.mark.parametrize(
+    ('dt_recebimento', 'mensagem'),
+    [
+        ('2099-01-01', 'maior que a data atual'),
+        ('2026-06-15', 'anterior ao recurso'),
+    ],
+)
+def test_rejeita_data_invalida_no_recebimento(
+    session,
+    usuario_teste,
+    dt_recebimento,
+    mensagem,
+):
+    registro = registrar_glosa(
+        payload=RegistroGlosaCreate(**registro_glosa_payload()),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        registrar_recebimento_glosa(
+            glosa_id=registro.id,
+            payload=RegistroGlosaRecebimentoUpdate(
+                dt_recebimento=date.fromisoformat(dt_recebimento),
+                valor_recebido=Decimal('5.00'),
+                qtd_recebida=Decimal('1.00'),
+            ),
+            usuario_atual=usuario_teste,
+            session=session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert mensagem in exc_info.value.detail
 
 
 def test_rejeita_recebimento_em_acato(cliente, token_teste):

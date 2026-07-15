@@ -1,4 +1,5 @@
 from datetime import datetime
+from decimal import Decimal
 from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
@@ -6,10 +7,11 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
+    ConciliacaoFaturamentoRemessa,
     ModelContaAtendimento,
     ModelConvenio,
     PrazoRecursoConvenio,
@@ -71,6 +73,89 @@ def _get_registro_glosa_or_404(
 
 def _data_criacao_sao_paulo():
     return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
+
+
+def _registros_da_glosa_conciliada(
+    registro_glosa: RegistroGlosa,
+    session: Session,
+) -> tuple[ConciliacaoFaturamentoRemessa, list[RegistroGlosa]] | None:
+    if registro_glosa.conciliacao_remessa_id is None:
+        return None
+    conciliacao_remessa = session.get(
+        ConciliacaoFaturamentoRemessa,
+        registro_glosa.conciliacao_remessa_id,
+    )
+    if conciliacao_remessa is None:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A origem da glosa na conciliacao nao foi encontrada.',
+        )
+    registros = session.scalars(
+        select(RegistroGlosa).where(
+            RegistroGlosa.conciliacao_remessa_id
+            == registro_glosa.conciliacao_remessa_id
+        )
+    ).all()
+    return conciliacao_remessa, registros
+
+
+def _validar_alocacao_glosa_conciliada(
+    registro_glosa: RegistroGlosa,
+    payload: RegistroGlosaCreate,
+    session: Session,
+) -> tuple[list[RegistroGlosa], Decimal] | None:
+    origem = _registros_da_glosa_conciliada(registro_glosa, session)
+    if origem is None:
+        return None
+    conciliacao_remessa, registros = origem
+    if (
+        payload.cd_remessa != registro_glosa.cd_remessa
+        or payload.conta != registro_glosa.conta
+        or payload.cd_lancamento != registro_glosa.cd_lancamento
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'Remessa, conta e lancamento do item de origem nao podem '
+                'ser alterados.'
+            ),
+        )
+
+    valor_outros_itens = sum(
+        (
+            item.valor_recursado
+            for item in registros
+            if item.id != registro_glosa.id
+            and item.sn_ativo == 'true'
+            and item.valor_recursado is not None
+        ),
+        start=Decimal('0.00'),
+    )
+    valor_alocado = valor_outros_itens + payload.valor_recursado
+    if valor_alocado > conciliacao_remessa.valor_glosado:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A soma dos itens tratados nao pode exceder o valor glosado '
+                'da remessa na conciliacao.'
+            ),
+        )
+    return registros, valor_alocado
+
+
+def _sincronizar_itens_pendentes_glosa(
+    registros: list[RegistroGlosa],
+    valor_alocado: Decimal,
+    valor_glosado: Decimal,
+) -> None:
+    tratativa_concluida = valor_alocado == valor_glosado
+    for registro in registros:
+        if (
+            registro.valor_recursado is None
+            and registro.processo_recurso is None
+            and registro.dt_recurso is None
+        ):
+            registro.sn_ativo = 'not' if tratativa_concluida else 'true'
 
 
 def _aplicar_filtros_conta_atendimento(query, filtros: dict):
@@ -262,7 +347,11 @@ def consultar_glosas_registradas(
     if tp_atendimento is not None:
         filtros['tp_atendimento'] = tp_atendimento
 
-    query = select(RegistroGlosa)
+    query = select(RegistroGlosa).options(
+        selectinload(RegistroGlosa.conciliacao_remessa).selectinload(
+            ConciliacaoFaturamentoRemessa.registros_glosa
+        )
+    )
     if not incluir_inativos:
         query = query.where(RegistroGlosa.sn_ativo == 'true')
     query = query.where(
@@ -539,11 +628,29 @@ def editar_glosa(
     session: SessionPostgres,
 ):
     registro_glosa = _get_registro_glosa_or_404(glosa_id, session)
+    alocacao = _validar_alocacao_glosa_conciliada(
+        registro_glosa,
+        payload,
+        session,
+    )
 
     for field_name, value in payload.model_dump().items():
         setattr(registro_glosa, field_name, value)
     registro_glosa.sn_ativo = 'true'
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
+    if alocacao is not None:
+        registros, valor_alocado = alocacao
+        conciliacao_remessa = registro_glosa.conciliacao_remessa
+        if conciliacao_remessa is None:
+            conciliacao_remessa = session.get(
+                ConciliacaoFaturamentoRemessa,
+                registro_glosa.conciliacao_remessa_id,
+            )
+        _sincronizar_itens_pendentes_glosa(
+            registros,
+            valor_alocado,
+            conciliacao_remessa.valor_glosado,
+        )
 
     session.commit()
     session.refresh(registro_glosa)
@@ -568,8 +675,57 @@ def registrar_recebimento_glosa(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail='Recebimento permitido apenas para recursos de glosa.',
         )
-    valor_recursado = registro_glosa.valor_glosado or registro_glosa.valor
-    qtd_recursada = registro_glosa.qtd_glosada or 1
+    today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+    if payload.dt_recebimento > today:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A data do recebimento nao pode ser maior que a data atual.'
+            ),
+        )
+    if (
+        registro_glosa.dt_recurso is not None
+        and payload.dt_recebimento < registro_glosa.dt_recurso
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='A data do recebimento nao pode ser anterior ao recurso.',
+        )
+    if (
+        registro_glosa.dt_recebimento is not None
+        and payload.dt_recebimento < registro_glosa.dt_recebimento
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A data do recebimento acumulado nao pode ser anterior '
+                'a data ja registrada.'
+            ),
+        )
+    valor_recursado = registro_glosa.valor_recursado or registro_glosa.valor
+    qtd_recursada = registro_glosa.qtd_recursado or 1
+    if (
+        registro_glosa.valor_recebido is not None
+        and payload.valor_recebido < registro_glosa.valor_recebido
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'O valor recebido acumulado nao pode ser menor que o valor '
+                'ja registrado.'
+            ),
+        )
+    if (
+        registro_glosa.qtd_recebida is not None
+        and payload.qtd_recebida < registro_glosa.qtd_recebida
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A quantidade recebida acumulada nao pode ser menor que a '
+                'quantidade ja registrada.'
+            ),
+        )
     if payload.valor_recebido > valor_recursado:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -578,8 +734,10 @@ def registrar_recebimento_glosa(
     if payload.qtd_recebida > qtd_recursada:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
-            detail=
-            'A quantidade recebida nao pode exceder a quantidade recursada.',
+            detail=(
+                'A quantidade recebida nao pode exceder a quantidade '
+                'recursada.'
+            ),
         )
 
     for field_name, value in payload.model_dump().items():
@@ -606,6 +764,24 @@ def deletar_glosa(
 
     registro_glosa.sn_ativo = 'not'
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
+    origem = _registros_da_glosa_conciliada(registro_glosa, session)
+    if origem is not None:
+        conciliacao_remessa, registros = origem
+        valor_alocado = sum(
+            (
+                item.valor_recursado
+                for item in registros
+                if item.id != registro_glosa.id
+                and item.sn_ativo == 'true'
+                and item.valor_recursado is not None
+            ),
+            start=Decimal('0.00'),
+        )
+        _sincronizar_itens_pendentes_glosa(
+            registros,
+            valor_alocado,
+            conciliacao_remessa.valor_glosado,
+        )
     session.commit()
 
     return {'message': 'Registro de glosa desfeito!'}
