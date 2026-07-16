@@ -1796,6 +1796,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
         ConciliacaoFaturamentoRemessa.valor_glosado
         - func.coalesce(valores_alocados.c.valor_alocado, 0)
     )
+    valor_tratado = func.coalesce(valores_alocados.c.valor_alocado, 0)
     filtros = [
         ConciliacaoFaturamentoRemessa.sn_glosado == 'true',
         ConciliacaoFaturamentoRemessa.valor_glosado > 0,
@@ -1825,6 +1826,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
             ConciliacaoFaturamento,
             data_entrega.label('data_entrega'),
             valor_pendente.label('valor_pendente'),
+            valor_tratado.label('valor_tratado'),
         )
         .join(
             ConciliacaoFaturamento,
@@ -1838,7 +1840,12 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
         )
         .where(*filtros)
     )
-    total, valor_total_glosado, valor_total_pendente = session.execute(
+    (
+        total,
+        valor_total_glosado,
+        valor_total_pendente,
+        valor_total_tratado,
+    ) = session.execute(
         select(
             func.count(),
             func.coalesce(
@@ -1846,6 +1853,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
                 0,
             ),
             func.coalesce(func.sum(valor_pendente), 0),
+            func.coalesce(func.sum(valor_tratado), 0),
         )
         .select_from(ConciliacaoFaturamentoRemessa)
         .join(
@@ -1891,7 +1899,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
             )
 
     cards = []
-    for vinculo, conciliacao, entrega, pendente in rows:
+    for vinculo, conciliacao, entrega, pendente, tratado in rows:
         cards.append(
             {
                 'conciliacao_remessa_id': vinculo.id,
@@ -1905,6 +1913,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
                     _money(pendente),
                     Decimal('0.00'),
                 ),
+                'valor_total_tratado': _money(tratado),
                 'pacientes': (
                     _pacientes_follow_up_glosa(
                         registros_por_vinculo[vinculo.id]
@@ -1919,6 +1928,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
         'total': int(total),
         'valor_total_glosado': _money(valor_total_glosado),
         'valor_total_pendente': _money(valor_total_pendente),
+        'valor_total_tratado': _money(valor_total_tratado),
         'limit': limit,
         'offset': offset,
     }
