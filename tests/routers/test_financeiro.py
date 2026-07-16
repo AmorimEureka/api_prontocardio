@@ -425,11 +425,13 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
     assert follow_up['total'] == 1
     assert follow_up['valor_total_glosado'] == Decimal('20.00')
     assert follow_up['valor_total_pendente'] == Decimal('20.00')
+    assert follow_up['valor_total_tratado'] == Decimal('0.00')
     card = follow_up['cards'][0]
     assert card['cd_remessa'] == CD_REMESSA_TESTE
     assert card['numero_nfse'] == '12345'
     assert card['valor_remessa'] == Decimal('120.00')
     assert card['valor_glosado'] == Decimal('20.00')
+    assert card['valor_total_tratado'] == Decimal('0.00')
     assert len(card['pacientes']) == ITENS_ANALITICOS_TESTE
     itens = [
         item
@@ -475,6 +477,8 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
         offset=0,
     )
     assert follow_up['valor_total_pendente'] == Decimal('10.00')
+    assert follow_up['valor_total_tratado'] == Decimal('10.00')
+    assert follow_up['cards'][0]['valor_total_tratado'] == Decimal('10.00')
 
     with pytest.raises(HTTPException) as error:
         app_glosas.editar_glosa(

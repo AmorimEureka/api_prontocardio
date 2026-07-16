@@ -664,6 +664,7 @@ class CardFollowUpGlosaPublic(BaseModel):
     valor_remessa: Decimal
     valor_glosado: Decimal
     valor_glosa_pendente: Decimal
+    valor_total_tratado: Decimal
     pacientes: list[PacienteFollowUpGlosaPublic]
 
 
@@ -672,5 +673,6 @@ class FollowUpGlosasList(BaseModel):
     total: int
     valor_total_glosado: Decimal
     valor_total_pendente: Decimal
+    valor_total_tratado: Decimal
     limit: int
     offset: int
