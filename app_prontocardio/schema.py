@@ -404,6 +404,157 @@ class RemessasConciliacaoList(BaseModel):
     restricao: RestricaoRemessaConciliacaoPublic | None = None
 
 
+class HistoricoNfseRemessaPublic(BaseModel):
+    id: int
+    numero_nfse: str
+    data_emissao: datetime | None = None
+    valor_nfse: Decimal
+    valor_alocado: Decimal
+    valor_glosado: Decimal
+    tipo_conciliacao: str
+    data_previsao_recebimento: date
+    data_recebimento: date | None = None
+    conta_bancaria_id: int | None = None
+    data_conciliacao: datetime
+
+
+class RemessaFaturamentoCardPublic(BaseModel):
+    cd_remessa: int
+    data_competencia: date | None = None
+    convenio: str
+    cnpj_convenio: str
+    valor_remessa: Decimal
+    valor_conciliado: Decimal
+    valor_acatado: Decimal
+    valor_nao_conciliado: Decimal
+    valor_recurso_disponivel: Decimal
+    valor_disponivel_conciliacao: Decimal
+    processo_recebimento: str | None = None
+    historico: list[HistoricoNfseRemessaPublic]
+
+
+class RemessasFaturamentoList(BaseModel):
+    remessas: list[RemessaFaturamentoCardPublic]
+    total: int
+    valor_total_nao_conciliado: Decimal
+    limit: int
+    offset: int
+
+
+class NfseSaldoRemessaPublic(BaseModel):
+    row_hash: str
+    numero_nfse: str
+    data_emissao: datetime | None = None
+    convenio: str
+    cnpj_convenio: str
+    valor_nfse: Decimal
+    valor_utilizado: Decimal
+    saldo_nfse: Decimal
+    valor_sugerido: Decimal
+
+
+class NfsesSaldoRemessaList(BaseModel):
+    notas: list[NfseSaldoRemessaPublic]
+    message: str | None = None
+    valor_disponivel_remessa: Decimal
+
+
+class NfseConciliacaoRemessaInput(BaseModel):
+    nfse_row_hash: str = Field(min_length=1, max_length=256)
+    valor_alocado: Decimal = Field(gt=0)
+    sn_glosado: bool = False
+    valor_glosado: Decimal = Field(default=Decimal('0.00'), ge=0)
+    data_previsao_recebimento: date
+    data_recebimento: date | None = None
+    conta_bancaria_id: int | None = Field(default=None, gt=0)
+    conta_plano_contas: str | None = Field(default=None, max_length=255)
+    conta_centro_custo: str | None = Field(default=None, max_length=255)
+    lancamento_extrato_id: int | None = Field(default=None, gt=0)
+
+    @field_validator('nfse_row_hash', mode='before')
+    @classmethod
+    def validate_nfse_row_hash(cls, value):
+        normalized = str(value or '').strip()
+        if not normalized:
+            raise ValueError('campo obrigatorio')
+        return normalized
+
+    @field_validator('conta_plano_contas', 'conta_centro_custo')
+    @classmethod
+    def normalize_optional_text(cls, value):
+        normalized = str(value or '').strip()
+        return normalized or None
+
+    @model_validator(mode='after')
+    def validate_glosa_e_recebimento(self):
+        if self.sn_glosado and self.valor_glosado <= 0:
+            raise ValueError(
+                'Informe um valor de glosa maior que zero para a NFS-e.'
+            )
+        if not self.sn_glosado and self.valor_glosado != 0:
+            raise ValueError(
+                'NFS-e sem glosa deve possuir valor glosado igual a zero.'
+            )
+        if (
+            self.data_recebimento is not None
+            and self.conta_bancaria_id is None
+        ):
+            raise ValueError(
+                'Selecione a conta bancaria quando a data de recebimento '
+                'for informada.'
+            )
+        if self.data_recebimento is None and (
+            self.conta_bancaria_id is not None
+            or self.lancamento_extrato_id is not None
+        ):
+            raise ValueError(
+                'Informe a data de recebimento para vincular conta bancaria '
+                'ou lancamento do extrato.'
+            )
+        today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+        if (
+            self.data_recebimento is not None
+            and self.data_recebimento > today
+        ):
+            raise ValueError(
+                'A data do recebimento nao pode ser maior que a data atual.'
+            )
+        return self
+
+
+class ConciliacaoRemessaCreate(BaseModel):
+    processo_recebimento: str = Field(min_length=1, max_length=255)
+    notas: list[NfseConciliacaoRemessaInput] = Field(min_length=1)
+
+    @field_validator('processo_recebimento', mode='before')
+    @classmethod
+    def validate_processo_recebimento(cls, value):
+        normalized = str(value or '').strip()
+        if not normalized:
+            raise ValueError('campo obrigatorio')
+        return normalized
+
+    @model_validator(mode='after')
+    def validate_notas_unicas(self):
+        hashes = [nota.nfse_row_hash for nota in self.notas]
+        if len(hashes) != len(set(hashes)):
+            raise ValueError(
+                'Uma mesma NFS-e nao pode ser adicionada mais de uma vez.'
+            )
+        return self
+
+
+class ConciliacaoRemessaPublic(BaseModel):
+    processo_remessa_id: int
+    cd_remessa: int
+    processo_recebimento: str
+    quantidade_notas: int
+    valor_alocado: Decimal
+    valor_glosado: Decimal
+    valor_nao_conciliado: Decimal
+    message: str
+
+
 class ContaBancariaRecebimentoPublic(BaseModel):
     id: int
     banco: str
@@ -521,6 +672,7 @@ class ConciliacaoFaturamentoPublic(BaseModel):
 
 
 class RecebimentoRemessaCreate(BaseModel):
+    conciliacao_id: int | None = Field(default=None, gt=0)
     cd_remessa: int = Field(gt=0)
     numero_nfse: str = Field(min_length=1, max_length=255)
     data_recebimento: date

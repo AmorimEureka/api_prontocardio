@@ -20,6 +20,7 @@ from app_prontocardio.models import (
     ModelHpcConvenio,
     ModelProFat,
     NfseXml,
+    ProcessoConciliacaoRemessa,
     RecebimentoRemessa,
     RegistroGlosa,
     RemessaFinanceira,
@@ -29,15 +30,20 @@ from app_prontocardio.models import (
 from app_prontocardio.schema import (
     ConciliacaoFaturamentoCreate,
     ConciliacaoFaturamentoPublic,
+    ConciliacaoRemessaCreate,
+    ConciliacaoRemessaPublic,
     ConciliacoesSemRecebimentoList,
     ContasBancariasRecebimentoList,
     FollowUpGlosasList,
     LancamentosExtratoBancarioList,
+    NfseConciliacaoRemessaInput,
     NfsesPendentesConciliacao,
+    NfsesSaldoRemessaList,
     RecebimentoRemessaCreate,
     RecebimentoRemessaPublic,
     RecebimentosRemessaList,
     RemessasConciliacaoList,
+    RemessasFaturamentoList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
 
@@ -252,6 +258,132 @@ def _consultar_remessas_hpc(  # noqa: PLR0913
         }
         for row in session_oracle.execute(query).all()
     ]
+
+
+def _consultar_cards_remessas_hpc(  # noqa: PLR0913
+    session_oracle: Session,
+    cd_remessas_encerradas: set[int],
+    q: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    cnpj_convenio = func.coalesce(
+        ModelHpcConvenio.cnpj_convenio,
+        ModelContaAtendimento.cnpj_convenio,
+    )
+    nome_convenio = func.coalesce(
+        ModelHpcConvenio.nm_convenio,
+        ModelContaAtendimento.nm_convenio,
+    )
+    contas_distintas = (
+        select(
+            ModelContaAtendimento.cd_remessa.label('cd_remessa'),
+            ModelContaAtendimento.cd_convenio.label('cd_convenio'),
+            cnpj_convenio.label('cnpj_convenio'),
+            nome_convenio.label('convenio'),
+            ModelContaAtendimento.cd_reg.label('cd_reg'),
+            ModelContaAtendimento.vl_total_conta.label('valor_conta'),
+            ModelContaAtendimento.dt_competencia.label('data_competencia'),
+        )
+        .select_from(ModelContaAtendimento)
+        .outerjoin(
+            ModelHpcConvenio,
+            ModelHpcConvenio.cd_convenio
+            == ModelContaAtendimento.cd_convenio,
+        )
+        .where(ModelContaAtendimento.cd_remessa.is_not(None))
+        .distinct()
+    )
+    if cd_remessas_encerradas:
+        remessas_ordenadas = sorted(cd_remessas_encerradas)
+        for chunk_offset in range(
+            0,
+            len(remessas_ordenadas),
+            ORACLE_IN_CHUNK_SIZE,
+        ):
+            chunk = remessas_ordenadas[
+                chunk_offset : chunk_offset + ORACLE_IN_CHUNK_SIZE
+            ]
+            contas_distintas = contas_distintas.where(
+                ModelContaAtendimento.cd_remessa.not_in(chunk)
+            )
+    termo_pesquisa = (q or '').strip()
+    if termo_pesquisa:
+        if termo_pesquisa.isdigit():
+            contas_distintas = contas_distintas.where(
+                ModelContaAtendimento.cd_remessa == int(termo_pesquisa)
+            )
+        else:
+            pattern = f'%{termo_pesquisa}%'
+            contas_distintas = contas_distintas.where(
+                or_(
+                    nome_convenio.ilike(pattern),
+                    cnpj_convenio.ilike(pattern),
+                )
+            )
+
+    contas_distintas = contas_distintas.subquery()
+    agrupadas = (
+        select(
+            contas_distintas.c.cd_remessa,
+            contas_distintas.c.cd_convenio,
+            contas_distintas.c.cnpj_convenio,
+            contas_distintas.c.convenio,
+            func.max(contas_distintas.c.data_competencia).label(
+                'data_competencia'
+            ),
+            func.sum(func.coalesce(contas_distintas.c.valor_conta, 0)).label(
+                'valor_total'
+            ),
+        )
+        .group_by(
+            contas_distintas.c.cd_remessa,
+            contas_distintas.c.cd_convenio,
+            contas_distintas.c.cnpj_convenio,
+            contas_distintas.c.convenio,
+        )
+        .subquery()
+    )
+    total = int(
+        session_oracle.scalar(select(func.count()).select_from(agrupadas))
+        or 0
+    )
+    rows = session_oracle.execute(
+        select(agrupadas)
+        .order_by(agrupadas.c.cd_remessa.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    return (
+        [
+            {
+                'cd_remessa': int(row.cd_remessa),
+                'cd_convenio': (
+                    int(row.cd_convenio)
+                    if row.cd_convenio is not None
+                    else None
+                ),
+                'convenio': row.convenio or 'Convenio nao informado',
+                'cnpj_convenio': _normalize_cnpj(row.cnpj_convenio),
+                'data_competencia': row.data_competencia,
+                'valor_total': _money(row.valor_total),
+            }
+            for row in rows
+        ],
+        total,
+    )
+
+
+def _valor_alocado_vinculo(
+    vinculo: ConciliacaoFaturamentoRemessa,
+) -> Decimal:
+    valor_alocado = _money(vinculo.valor_alocado_nfse)
+    if valor_alocado > 0:
+        return valor_alocado
+    return max(
+        _money(vinculo.valor_total) - _money(vinculo.valor_glosado),
+        Decimal('0.00'),
+    )
 
 
 def _consultar_itens_remessas_hpc(
@@ -653,9 +785,16 @@ def _recursos_abertos_por_remessa(
     consumidos_query = (
         select(
             ConciliacaoFaturamentoRemessa.cd_remessa,
-            func.sum(ConciliacaoFaturamentoRemessa.valor_total).label(
-                'valor_consumido'
-            ),
+            func.sum(
+                case(
+                    (
+                        ConciliacaoFaturamentoRemessa.valor_alocado_nfse > 0,
+                        ConciliacaoFaturamentoRemessa.valor_alocado_nfse
+                        + ConciliacaoFaturamentoRemessa.valor_glosado,
+                    ),
+                    else_=ConciliacaoFaturamentoRemessa.valor_total,
+                )
+            ).label('valor_consumido'),
         )
         .where(
             ConciliacaoFaturamentoRemessa.tp_conciliacao == 'recurso',
@@ -730,7 +869,11 @@ def _enriquecer_remessas_com_recurso(
 
 
 def _validar_dados_bancarios(
-    payload: ConciliacaoFaturamentoCreate | RecebimentoRemessaCreate,
+    payload: (
+        ConciliacaoFaturamentoCreate
+        | RecebimentoRemessaCreate
+        | NfseConciliacaoRemessaInput
+    ),
     session_postgres: Session,
     session_oracle: Session,
 ) -> LancamentoExtratoBancario | None:
@@ -808,6 +951,7 @@ def _obter_ou_criar_remessa_financeira(
             convenio=remessa['convenio'],
             cnpj_convenio=remessa['cnpj_convenio'],
             valor_total=valor_total,
+            data_competencia=remessa.get('data_competencia'),
         )
         remessa_financeira.data_registro = datetime.now(
             ZoneInfo('America/Sao_Paulo')
@@ -818,12 +962,52 @@ def _obter_ou_criar_remessa_financeira(
 
     remessa_financeira.convenio = remessa['convenio']
     remessa_financeira.cnpj_convenio = remessa['cnpj_convenio']
+    if remessa.get('data_competencia') is not None:
+        remessa_financeira.data_competencia = remessa['data_competencia']
     if valor_total > _money(remessa_financeira.valor_total):
         remessa_financeira.valor_total = valor_total
         remessa_financeira.recebimento_integral = (
             _total_recebido_remessa(session, cd_remessa) == valor_total
         )
     return remessa_financeira
+
+
+def _obter_ou_criar_processo_remessa(
+    session: Session,
+    remessa: RemessaFinanceira,
+    processo_recebimento: str,
+    usuario_id: int,
+) -> ProcessoConciliacaoRemessa:
+    processo = session.scalar(
+        select(ProcessoConciliacaoRemessa)
+        .where(
+            ProcessoConciliacaoRemessa.cd_remessa == remessa.cd_remessa
+        )
+        .with_for_update()
+    )
+    if processo is not None:
+        if processo.processo_recebimento != processo_recebimento:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail=(
+                    f'A remessa {remessa.cd_remessa} ja utiliza o processo '
+                    f'de recebimento {processo.processo_recebimento}. Todas '
+                    'as NFS-e da remessa devem usar o mesmo processo.'
+                ),
+            )
+        return processo
+
+    processo = ProcessoConciliacaoRemessa(
+        cd_remessa=remessa.cd_remessa,
+        processo_recebimento=processo_recebimento,
+        usuario_id=usuario_id,
+    )
+    processo.data_criacao = datetime.now(
+        ZoneInfo('America/Sao_Paulo')
+    ).replace(tzinfo=None)
+    session.add(processo)
+    session.flush()
+    return processo
 
 
 def _registrar_itens_glosa_conciliacao(
@@ -1215,6 +1399,705 @@ def _nfses_unicas_query(query):
         .join(ranking, ranking.c.row_hash == NfseXml.row_hash)
         .where(ranking.c.ordem_duplicidade == 1)
     )
+
+
+def _resumos_remessas(
+    session: Session,
+    cd_remessas: set[int] | None = None,
+) -> dict[int, dict]:
+    query = (
+        select(
+            ConciliacaoFaturamentoRemessa,
+            ConciliacaoFaturamento,
+            ProcessoConciliacaoRemessa,
+        )
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .outerjoin(
+            ProcessoConciliacaoRemessa,
+            ProcessoConciliacaoRemessa.id
+            == ConciliacaoFaturamentoRemessa.processo_remessa_id,
+        )
+    )
+    if cd_remessas is not None:
+        if not cd_remessas:
+            return {}
+        query = query.where(
+            ConciliacaoFaturamentoRemessa.cd_remessa.in_(cd_remessas)
+        )
+    rows = session.execute(
+        query.order_by(
+            ConciliacaoFaturamentoRemessa.cd_remessa,
+            ConciliacaoFaturamento.data_criacao.desc(),
+            ConciliacaoFaturamentoRemessa.id.desc(),
+        )
+    ).all()
+    resumos: dict[int, dict] = {}
+    for vinculo, conciliacao, processo in rows:
+        resumo = resumos.setdefault(
+            int(vinculo.cd_remessa),
+            {
+                'valor_conciliado': Decimal('0.00'),
+                'valor_glosado': Decimal('0.00'),
+                'valor_recurso_consumido': Decimal('0.00'),
+                'processo_recebimento': None,
+                'historico': [],
+                'numeros_nfse': set(),
+            },
+        )
+        valor_alocado = _valor_alocado_vinculo(vinculo)
+        valor_glosado = _money(vinculo.valor_glosado)
+        resumo['valor_conciliado'] += valor_alocado
+        resumo['valor_glosado'] += valor_glosado
+        if vinculo.tp_conciliacao == 'recurso':
+            resumo['valor_recurso_consumido'] += (
+                valor_alocado + valor_glosado
+            )
+        resumo['processo_recebimento'] = (
+            resumo['processo_recebimento']
+            or (
+                processo.processo_recebimento
+                if processo is not None
+                else conciliacao.processo_recebimento
+            )
+        )
+        resumo['numeros_nfse'].add(conciliacao.numero_nfse)
+        resumo['historico'].append(
+            {
+                'id': vinculo.id,
+                'numero_nfse': conciliacao.numero_nfse,
+                'data_emissao': session.scalar(
+                    select(NfseXml.data_hora).where(
+                        NfseXml.row_hash == conciliacao.nfse_row_hash
+                    )
+                ),
+                'valor_nfse': _money(conciliacao.valor_nfse),
+                'valor_alocado': valor_alocado,
+                'valor_glosado': valor_glosado,
+                'tipo_conciliacao': vinculo.tp_conciliacao,
+                'data_previsao_recebimento': (
+                    conciliacao.data_previsao_recebimento
+                ),
+                'data_recebimento': conciliacao.data_recebimento,
+                'conta_bancaria_id': conciliacao.conta_bancaria_id,
+                'data_conciliacao': conciliacao.data_criacao,
+            }
+        )
+
+    processo_query = select(ProcessoConciliacaoRemessa)
+    if cd_remessas is not None:
+        processo_query = processo_query.where(
+            ProcessoConciliacaoRemessa.cd_remessa.in_(cd_remessas)
+        )
+    for processo in session.scalars(processo_query):
+        resumo = resumos.setdefault(
+            processo.cd_remessa,
+            {
+                'valor_conciliado': Decimal('0.00'),
+                'valor_glosado': Decimal('0.00'),
+                'valor_recurso_consumido': Decimal('0.00'),
+                'processo_recebimento': None,
+                'historico': [],
+                'numeros_nfse': set(),
+            },
+        )
+        resumo['processo_recebimento'] = processo.processo_recebimento
+    return resumos
+
+
+def _posicao_remessa(
+    remessa: dict,
+    resumo: dict | None,
+    valor_acatado: Decimal,
+    recurso_disponivel: Decimal,
+) -> dict:
+    resumo = resumo or {}
+    valor_remessa = _money(remessa['valor_total'])
+    valor_conciliado = _money(resumo.get('valor_conciliado'))
+    valor_glosado = _money(resumo.get('valor_glosado'))
+    recurso_consumido = _money(resumo.get('valor_recurso_consumido'))
+    valor_nao_conciliado = max(
+        valor_remessa - valor_conciliado - valor_acatado,
+        Decimal('0.00'),
+    )
+    glosa_sem_recurso = max(
+        valor_glosado - recurso_consumido - valor_acatado,
+        Decimal('0.00'),
+    )
+    valor_livre = max(
+        valor_nao_conciliado - glosa_sem_recurso,
+        Decimal('0.00'),
+    )
+    valor_disponivel = min(
+        valor_nao_conciliado,
+        valor_livre + min(glosa_sem_recurso, recurso_disponivel),
+    )
+    return {
+        'cd_remessa': remessa['cd_remessa'],
+        'data_competencia': remessa.get('data_competencia'),
+        'convenio': remessa['convenio'],
+        'cnpj_convenio': remessa['cnpj_convenio'],
+        'valor_remessa': valor_remessa,
+        'valor_conciliado': valor_conciliado,
+        'valor_acatado': _money(valor_acatado),
+        'valor_nao_conciliado': _money(valor_nao_conciliado),
+        'valor_recurso_disponivel': _money(recurso_disponivel),
+        'valor_disponivel_conciliacao': _money(valor_disponivel),
+        'processo_recebimento': resumo.get('processo_recebimento'),
+        'historico': resumo.get('historico', []),
+    }
+
+
+def _codigos_remessas_encerradas(session: Session) -> set[int]:
+    remessas = list(session.scalars(select(RemessaFinanceira)))
+    if not remessas:
+        return set()
+    ids = {remessa.cd_remessa for remessa in remessas}
+    resumos = _resumos_remessas(session, ids)
+    acatados = _valores_acatados_por_remessa(session, ids)
+    return {
+        remessa.cd_remessa
+        for remessa in remessas
+        if (
+            _money(resumos.get(remessa.cd_remessa, {}).get('valor_conciliado'))
+            + acatados.get(remessa.cd_remessa, Decimal('0.00'))
+        )
+        >= _money(remessa.valor_total)
+    }
+
+
+def _valores_utilizados_nfse(
+    session: Session,
+) -> dict[tuple[str, str], Decimal]:
+    rows = session.execute(
+        select(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamentoRemessa,
+        ).join(
+            ConciliacaoFaturamentoRemessa,
+            ConciliacaoFaturamentoRemessa.conciliacao_id
+            == ConciliacaoFaturamento.id,
+        )
+    ).all()
+    utilizados: dict[tuple[str, str], Decimal] = {}
+    for conciliacao, vinculo in rows:
+        chave = (
+            str(conciliacao.numero_nfse),
+            _normalize_cnpj(conciliacao.cnpj_convenio),
+        )
+        utilizados[chave] = utilizados.get(
+            chave,
+            Decimal('0.00'),
+        ) + _valor_alocado_vinculo(vinculo)
+    return utilizados
+
+
+def _consultar_nfses_com_saldo_para_remessa(  # noqa: PLR0913
+    session: Session,
+    remessa: dict,
+    resumo: dict,
+    valor_disponivel: Decimal,
+    q: str | None,
+    limit: int,
+) -> list[dict]:
+    cnpj = _normalize_cnpj(remessa['cnpj_convenio'])
+    query = select(NfseXml).where(
+        or_(
+            NfseXml.cancelamento_codigo.is_(None),
+            NfseXml.cancelamento_codigo == '',
+        ),
+        or_(
+            func.regexp_replace(
+                NfseXml.prestador_cnpj,
+                '[^0-9]',
+                '',
+                'g',
+            )
+            == cnpj,
+            func.regexp_replace(
+                NfseXml.tomador_cnpj,
+                '[^0-9]',
+                '',
+                'g',
+            )
+            == cnpj,
+        ),
+    )
+    termo = (q or '').strip()
+    if termo:
+        query = query.where(
+            or_(
+                NfseXml.numero_nfse.ilike(f'%{termo}%'),
+                NfseXml.tomador_razao_social.ilike(f'%{termo}%'),
+            )
+        )
+    notas = session.scalars(
+        _nfses_unicas_query(query).order_by(
+            NfseXml.data_hora.desc(),
+            NfseXml.numero_nfse.desc(),
+        )
+    ).all()
+    utilizados = _valores_utilizados_nfse(session)
+    numeros_ja_usados = resumo.get('numeros_nfse', set())
+    resultado = []
+    for nota in notas:
+        numero_nfse = str(nota.numero_nfse or '-')
+        if numero_nfse in numeros_ja_usados:
+            continue
+        valor_nfse = _money(nota.valor_liquido_nfse)
+        valor_utilizado = utilizados.get(
+            (numero_nfse, cnpj),
+            Decimal('0.00'),
+        )
+        saldo_nfse = max(
+            valor_nfse - valor_utilizado,
+            Decimal('0.00'),
+        )
+        if saldo_nfse <= 0:
+            continue
+        resultado.append(
+            {
+                'row_hash': nota.row_hash,
+                'numero_nfse': numero_nfse,
+                'data_emissao': nota.data_hora,
+                'convenio': remessa['convenio'],
+                'cnpj_convenio': cnpj,
+                'valor_nfse': valor_nfse,
+                'valor_utilizado': _money(valor_utilizado),
+                'saldo_nfse': _money(saldo_nfse),
+                'valor_sugerido': _money(
+                    min(saldo_nfse, valor_disponivel)
+                ),
+            }
+        )
+        if len(resultado) >= limit:
+            break
+    return resultado
+
+
+@router.get(
+    '/conciliacao-faturamento/remessas',
+    status_code=HTTPStatus.OK,
+    response_model=RemessasFaturamentoList,
+)
+def consultar_remessas_faturamento(  # noqa: PLR0913
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+    q: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    try:
+        remessas, total = _consultar_cards_remessas_hpc(
+            session_oracle,
+            _codigos_remessas_encerradas(session_postgres),
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Nao foi possivel consultar a HPC_V_CONTA_ATENDIMENTO.',
+        ) from exc
+    ids = {remessa['cd_remessa'] for remessa in remessas}
+    resumos = _resumos_remessas(session_postgres, ids)
+    acatados = _valores_acatados_por_remessa(session_postgres, ids)
+    recursos = _recursos_abertos_por_remessa(session_postgres, ids)
+    cards = [
+        _posicao_remessa(
+            remessa,
+            resumos.get(remessa['cd_remessa']),
+            acatados.get(remessa['cd_remessa'], Decimal('0.00')),
+            recursos.get(remessa['cd_remessa'], Decimal('0.00')),
+        )
+        for remessa in remessas
+    ]
+    return {
+        'remessas': cards,
+        'total': total,
+        'valor_total_nao_conciliado': _money(
+            sum(
+                (card['valor_nao_conciliado'] for card in cards),
+                Decimal('0.00'),
+            )
+        ),
+        'limit': limit,
+        'offset': offset,
+    }
+
+
+@router.get(
+    '/conciliacao-faturamento/remessas/{cd_remessa}/notas',
+    status_code=HTTPStatus.OK,
+    response_model=NfsesSaldoRemessaList,
+)
+def consultar_nfses_para_remessa(  # noqa: PLR0913
+    cd_remessa: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+    q: str | None = Query(default=None, max_length=100),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    try:
+        remessas, _ = _consultar_cards_remessas_hpc(
+            session_oracle,
+            set(),
+            q=str(cd_remessa),
+            limit=1,
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Nao foi possivel consultar a HPC_V_CONTA_ATENDIMENTO.',
+        ) from exc
+    remessa = next(
+        (
+            item
+            for item in remessas
+            if int(item['cd_remessa']) == cd_remessa
+        ),
+        None,
+    )
+    if remessa is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Remessa nao encontrada na HPC_V_CONTA_ATENDIMENTO.',
+        )
+    resumo = _resumos_remessas(session_postgres, {cd_remessa}).get(
+        cd_remessa,
+        {},
+    )
+    posicao = _posicao_remessa(
+        remessa,
+        resumo,
+        _valores_acatados_por_remessa(
+            session_postgres,
+            {cd_remessa},
+        ).get(cd_remessa, Decimal('0.00')),
+        _recursos_abertos_por_remessa(
+            session_postgres,
+            {cd_remessa},
+        ).get(cd_remessa, Decimal('0.00')),
+    )
+    valor_disponivel = posicao['valor_disponivel_conciliacao']
+    if valor_disponivel <= 0:
+        message = (
+            f'A remessa {cd_remessa} possui glosa ainda sem recurso '
+            'disponivel. Trate a glosa e registre o recurso antes de '
+            'vincular uma nova NFS-e.'
+        )
+        return {
+            'notas': [],
+            'message': message,
+            'valor_disponivel_remessa': Decimal('0.00'),
+        }
+    notas = _consultar_nfses_com_saldo_para_remessa(
+        session_postgres,
+        remessa,
+        resumo,
+        valor_disponivel,
+        q,
+        limit,
+    )
+    return {
+        'notas': notas,
+        'message': (
+            None
+            if notas
+            else 'Nenhuma NFS-e com saldo disponivel para este convenio.'
+        ),
+        'valor_disponivel_remessa': valor_disponivel,
+    }
+
+
+@router.post(
+    '/conciliacao-faturamento/remessas/{cd_remessa}/conciliar',
+    status_code=HTTPStatus.CREATED,
+    response_model=ConciliacaoRemessaPublic,
+)
+def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
+    cd_remessa: int,
+    payload: ConciliacaoRemessaCreate,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    try:
+        remessas, _ = _consultar_cards_remessas_hpc(
+            session_oracle,
+            set(),
+            q=str(cd_remessa),
+            limit=1,
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Nao foi possivel validar a remessa no Oracle.',
+        ) from exc
+    remessa = next(
+        (
+            item
+            for item in remessas
+            if int(item['cd_remessa']) == cd_remessa
+        ),
+        None,
+    )
+    if remessa is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Remessa nao encontrada na HPC_V_CONTA_ATENDIMENTO.',
+        )
+
+    resumo = _resumos_remessas(session_postgres, {cd_remessa}).get(
+        cd_remessa,
+        {},
+    )
+    valor_acatado = _valores_acatados_por_remessa(
+        session_postgres,
+        {cd_remessa},
+    ).get(cd_remessa, Decimal('0.00'))
+    recurso_disponivel = _recursos_abertos_por_remessa(
+        session_postgres,
+        {cd_remessa},
+    ).get(cd_remessa, Decimal('0.00'))
+    posicao = _posicao_remessa(
+        remessa,
+        resumo,
+        valor_acatado,
+        recurso_disponivel,
+    )
+    valor_disponivel = posicao['valor_disponivel_conciliacao']
+    if valor_disponivel <= 0:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                f'A remessa {cd_remessa} possui glosa ainda sem recurso '
+                'disponivel. Trate a glosa e registre o recurso antes de '
+                'vincular uma nova NFS-e.'
+            ),
+        )
+
+    total_alocado = sum(
+        (_money(item.valor_alocado) for item in payload.notas),
+        Decimal('0.00'),
+    )
+    total_glosado = sum(
+        (_money(item.valor_glosado) for item in payload.notas),
+        Decimal('0.00'),
+    )
+    valor_comprometido = total_alocado + total_glosado
+    if valor_comprometido > valor_disponivel:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A soma dos valores alocados e glosados nao pode exceder '
+                f'o saldo disponivel da remessa '
+                f'({_valor_reais_mensagem(valor_disponivel)}).'
+            ),
+        )
+
+    utilizados_nfse = _valores_utilizados_nfse(session_postgres)
+    notas_validadas = []
+    numeros_nfse = set()
+    lancamentos = []
+    cnpj_remessa = _normalize_cnpj(remessa['cnpj_convenio'])
+    for item in payload.notas:
+        nota = session_postgres.get(NfseXml, item.nfse_row_hash)
+        if nota is None or nota.cancelamento_codigo not in (None, ''):
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail='Uma das NFS-e informadas nao existe ou foi cancelada.',
+            )
+        cnpjs_nota = {
+            _normalize_cnpj(nota.prestador_cnpj),
+            _normalize_cnpj(nota.tomador_cnpj),
+        }
+        if cnpj_remessa not in cnpjs_nota:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail=(
+                    f'A NFS-e {nota.numero_nfse or "-"} nao pertence ao '
+                    'convenio da remessa.'
+                ),
+            )
+        numero_nfse = str(nota.numero_nfse or '-')
+        if numero_nfse in numeros_nfse:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail='Uma mesma NFS-e nao pode ser informada duas vezes.',
+            )
+        if numero_nfse in resumo.get('numeros_nfse', set()):
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail=(
+                    f'A NFS-e {numero_nfse} ja esta vinculada a remessa '
+                    f'{cd_remessa}.'
+                ),
+            )
+        numeros_nfse.add(numero_nfse)
+        valor_nfse = _money(nota.valor_liquido_nfse)
+        valor_utilizado = utilizados_nfse.get(
+            (numero_nfse, cnpj_remessa),
+            Decimal('0.00'),
+        )
+        saldo_nfse = max(
+            valor_nfse - valor_utilizado,
+            Decimal('0.00'),
+        )
+        if _money(item.valor_alocado) > saldo_nfse:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail=(
+                    f'O valor alocado da NFS-e {numero_nfse} nao pode '
+                    f'exceder seu saldo de '
+                    f'{_valor_reais_mensagem(saldo_nfse)}.'
+                ),
+            )
+        lancamento = _validar_dados_bancarios(
+            item,
+            session_postgres,
+            session_oracle,
+        )
+        if lancamento is not None:
+            lancamentos.append(lancamento)
+        notas_validadas.append((item, nota, valor_nfse))
+    itens_glosa = (
+        _carregar_itens_glosa_conciliacao(
+            session_oracle,
+            cnpj_remessa,
+            {cd_remessa},
+        )
+        if any(item.sn_glosado for item in payload.notas)
+        else {cd_remessa: []}
+    )
+    tipo_conciliacao = (
+        'recurso'
+        if recurso_disponivel > 0 and resumo.get('valor_glosado', 0) > 0
+        else 'faturamento'
+    )
+
+    try:
+        remessa_financeira = _obter_ou_criar_remessa_financeira(
+            session_postgres,
+            remessa,
+        )
+        processo = _obter_ou_criar_processo_remessa(
+            session_postgres,
+            remessa_financeira,
+            payload.processo_recebimento,
+            usuario_atual.id,
+        )
+        agora = datetime.now(ZoneInfo('America/Sao_Paulo')).replace(
+            tzinfo=None
+        )
+        for item, nota, valor_nfse in notas_validadas:
+            nota_publica = _nota_publica(
+                nota,
+                {
+                    'convenio': remessa['convenio'],
+                    'cnpj_convenio': cnpj_remessa,
+                },
+            )
+            conciliacao = ConciliacaoFaturamento(
+                nfse_row_hash=nota.row_hash,
+                numero_nfse=nota_publica['numero_nfse'],
+                cnpj_convenio=cnpj_remessa,
+                convenio=remessa['convenio'],
+                valor_nfse=valor_nfse,
+                impostos=nota_publica['impostos'],
+                processo_recebimento=processo.processo_recebimento,
+                data_previsao_recebimento=(
+                    item.data_previsao_recebimento
+                ),
+                usuario_id=usuario_atual.id,
+                data_recebimento=item.data_recebimento,
+                conta_bancaria_id=item.conta_bancaria_id,
+                conta_plano_contas=item.conta_plano_contas,
+                conta_centro_custo=item.conta_centro_custo,
+                lancamento_extrato_id=item.lancamento_extrato_id,
+            )
+            conciliacao.data_criacao = agora
+            session_postgres.add(conciliacao)
+            session_postgres.flush()
+            valor_glosado = _money(item.valor_glosado)
+            vinculo = ConciliacaoFaturamentoRemessa(
+                conciliacao_id=conciliacao.id,
+                cd_remessa=cd_remessa,
+                convenio=remessa['convenio'],
+                cnpj_convenio=cnpj_remessa,
+                valor_total=_money(item.valor_alocado) + valor_glosado,
+                sn_glosado='true' if item.sn_glosado else 'not',
+                valor_glosado=valor_glosado,
+                tp_conciliacao=tipo_conciliacao,
+                processo_remessa_id=processo.id,
+                valor_alocado_nfse=_money(item.valor_alocado),
+            )
+            session_postgres.add(vinculo)
+            session_postgres.flush()
+            if item.sn_glosado:
+                _registrar_itens_glosa_conciliacao(
+                    session_postgres,
+                    conciliacao,
+                    vinculo,
+                    itens_glosa[cd_remessa],
+                )
+            if item.data_recebimento is not None:
+                if item.conta_bancaria_id is None:
+                    raise HTTPException(
+                        status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                        detail=(
+                            'Selecione a conta bancaria para registrar o '
+                            'recebimento da NFS-e.'
+                        ),
+                    )
+                _registrar_recebimento_remessa(
+                    session=session_postgres,
+                    remessa=remessa_financeira,
+                    conciliacao_id=conciliacao.id,
+                    numero_nfse=conciliacao.numero_nfse,
+                    data_recebimento=item.data_recebimento,
+                    valor_recebido=item.valor_alocado,
+                    usuario_id=usuario_atual.id,
+                    conta_bancaria_id=item.conta_bancaria_id,
+                    conta_plano_contas=item.conta_plano_contas,
+                    conta_centro_custo=item.conta_centro_custo,
+                    lancamento_extrato_id=item.lancamento_extrato_id,
+                )
+        for lancamento in lancamentos:
+            lancamento.conciliado = True
+        session_postgres.commit()
+        session_postgres.refresh(processo)
+    except HTTPException:
+        session_postgres.rollback()
+        raise
+    except IntegrityError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A remessa ou uma das NFS-e ja possui este vinculo.',
+        ) from exc
+
+    return {
+        'processo_remessa_id': processo.id,
+        'cd_remessa': cd_remessa,
+        'processo_recebimento': processo.processo_recebimento,
+        'quantidade_notas': len(notas_validadas),
+        'valor_alocado': _money(total_alocado),
+        'valor_glosado': _money(total_glosado),
+        'valor_nao_conciliado': _money(
+            max(
+                posicao['valor_nao_conciliado'] - total_alocado,
+                Decimal('0.00'),
+            )
+        ),
+        'message': 'Remessa conciliada com as NFS-e informadas.',
+    }
 
 
 @router.get(
@@ -1946,9 +2829,15 @@ def consultar_conciliacoes_sem_recebimento(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    valor_pendente = (
-        ConciliacaoFaturamentoRemessa.valor_total
-        - ConciliacaoFaturamentoRemessa.valor_glosado
+    valor_pendente = case(
+        (
+            ConciliacaoFaturamentoRemessa.valor_alocado_nfse > 0,
+            ConciliacaoFaturamentoRemessa.valor_alocado_nfse,
+        ),
+        else_=(
+            ConciliacaoFaturamentoRemessa.valor_total
+            - ConciliacaoFaturamentoRemessa.valor_glosado
+        ),
     )
     remessas_pendentes = (
         select(
@@ -1971,7 +2860,13 @@ def consultar_conciliacoes_sem_recebimento(
         )
         .where(
             RecebimentoRemessa.id.is_(None),
+            ConciliacaoFaturamento.data_recebimento.is_(None),
             valor_pendente > 0,
+        )
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
         )
         .group_by(ConciliacaoFaturamentoRemessa.conciliacao_id)
         .subquery()
@@ -1999,11 +2894,8 @@ def consultar_conciliacoes_sem_recebimento(
                     pattern
                 ),
                 RecebimentoRemessa.id.is_(None),
-                (
-                    ConciliacaoFaturamentoRemessa.valor_total
-                    - ConciliacaoFaturamentoRemessa.valor_glosado
-                )
-                > 0,
+                ConciliacaoFaturamento.data_recebimento.is_(None),
+                valor_pendente > 0,
             )
             .exists()
         )
@@ -2101,10 +2993,7 @@ def consultar_conciliacoes_sem_recebimento(
         for remessa, recebimento in vinculos:
             valor_remessa = _money(remessa.valor_total)
             valor_glosado = _money(remessa.valor_glosado)
-            previsto_remessa = max(
-                valor_remessa - valor_glosado,
-                Decimal('0.00'),
-            )
+            previsto_remessa = _valor_alocado_vinculo(remessa)
             valor_total_remessas += valor_remessa
             valor_total_glosas += valor_glosado
             valor_previsto_recebimento += previsto_remessa
@@ -2180,7 +3069,7 @@ def registrar_recebimento_remessa(
     session_postgres: SessionPostgres,
     session_oracle: Session = Depends(get_session_oracle),
 ):
-    vinculo = session_postgres.execute(
+    vinculo_query = (
         select(
             ConciliacaoFaturamento,
             ConciliacaoFaturamentoRemessa,
@@ -2195,6 +3084,13 @@ def registrar_recebimento_remessa(
             ConciliacaoFaturamentoRemessa.cd_remessa
             == payload.cd_remessa,
         )
+    )
+    if payload.conciliacao_id is not None:
+        vinculo_query = vinculo_query.where(
+            ConciliacaoFaturamento.id == payload.conciliacao_id
+        )
+    vinculo = session_postgres.execute(
+        vinculo_query.order_by(ConciliacaoFaturamento.id.desc()).limit(1)
     ).one_or_none()
     if vinculo is None:
         raise HTTPException(
@@ -2203,9 +3099,7 @@ def registrar_recebimento_remessa(
         )
 
     conciliacao, remessa_conciliada = vinculo
-    valor_esperado = _money(
-        remessa_conciliada.valor_total - remessa_conciliada.valor_glosado
-    )
+    valor_esperado = _valor_alocado_vinculo(remessa_conciliada)
     if _money(payload.valor_recebido) != valor_esperado:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -2250,6 +3144,11 @@ def registrar_recebimento_remessa(
             conta_centro_custo=payload.conta_centro_custo,
             lancamento_extrato_id=payload.lancamento_extrato_id,
         )
+        conciliacao.data_recebimento = payload.data_recebimento
+        conciliacao.conta_bancaria_id = payload.conta_bancaria_id
+        conciliacao.conta_plano_contas = payload.conta_plano_contas
+        conciliacao.conta_centro_custo = payload.conta_centro_custo
+        conciliacao.lancamento_extrato_id = payload.lancamento_extrato_id
         if lancamento is not None:
             lancamento.conciliado = True
         session_postgres.commit()

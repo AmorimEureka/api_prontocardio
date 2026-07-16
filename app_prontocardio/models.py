@@ -280,17 +280,7 @@ class LancamentoExtratoBancario:
 @table_registry.mapped_as_dataclass
 class ConciliacaoFaturamento:
     __tablename__ = 'conciliacoes_faturamento'
-    __table_args__ = (
-        UniqueConstraint(
-            'nfse_row_hash',
-            name='uq_conciliacoes_faturamento_nfse',
-        ),
-        UniqueConstraint(
-            'numero_nfse',
-            name='uq_conciliacoes_faturamento_numero_nfse',
-        ),
-        {'schema': settings.POSTGRES_SCHEMA},
-    )
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
 
     id: Mapped[int] = mapped_column(primary_key=True, init=False)
     nfse_row_hash: Mapped[str] = mapped_column(String)
@@ -322,6 +312,33 @@ class ConciliacaoFaturamento:
             f'{settings.POSTGRES_SCHEMA}.lancamentos_extrato_bancario.id'
         ),
         default=None,
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class ProcessoConciliacaoRemessa:
+    __tablename__ = 'processos_conciliacao_remessa'
+    __table_args__ = (
+        UniqueConstraint(
+            'cd_remessa',
+            name='uq_processos_conciliacao_remessa_codigo',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cd_remessa: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.remessas_financeiras.cd_remessa'
+        )
+    )
+    processo_recebimento: Mapped[str] = mapped_column(String)
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
     )
     data_criacao: Mapped[datetime] = mapped_column(
         init=False,
@@ -367,6 +384,18 @@ class ConciliacaoFaturamentoRemessa:
         default='faturamento',
         server_default=text("'faturamento'"),
     )
+    processo_remessa_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.processos_conciliacao_remessa.id',
+            ondelete='CASCADE',
+        ),
+        default=None,
+    )
+    valor_alocado_nfse: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2),
+        default=Decimal('0.00'),
+        server_default=text('0'),
+    )
     registros_glosa: Mapped[list[RegistroGlosa]] = relationship(
         back_populates='conciliacao_remessa',
         init=False,
@@ -395,6 +424,10 @@ class RemessaFinanceira:
         Boolean,
         default=False,
         server_default=text('false'),
+    )
+    data_competencia: Mapped[date | None] = mapped_column(
+        Date,
+        default=None,
     )
     data_registro: Mapped[datetime] = mapped_column(
         init=False,
