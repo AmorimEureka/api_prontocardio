@@ -103,245 +103,136 @@ Exemplo de resposta:
 }
 ```
 
-## Ciclo da tela Conciliação (Fiscal X Faturamento)
+## Ciclo da tela Conciliação (Faturamento X Fiscal)
 
-A tela de **Conciliacao (Fiscal X Faturamento)** relaciona uma NFS-e a uma ou
-mais remessas do mesmo convenio. A pesquisa e o salvamento executam a mesma
-regra de elegibilidade, de forma que uma chamada direta ao endpoint nao
-consegue contornar as validacoes exibidas na interface.
+A tela foi invertida para representar o fluxo operacional correto: a
+**remessa MV** e o registro principal e as **NFS-e emitidas** sao alocadas
+dentro dela. O card permanece na lista enquanto houver valor nao conciliado,
+inclusive quando uma glosa depende de tratamento ou de recurso.
 
 ```mermaid
 flowchart TD
-    subgraph PESQUISA["Pesquisa e elegibilidade atuais"]
-        A["Selecionar NFS-e nao cancelada e ainda nao conciliada"] --> B{"Convenio localizado na HPC_V_CONVENIOS?"}
-        B -- "Nao" --> BX["Bloquear: convenio da NFS-e nao identificado"]
-        B -- "Sim" --> C["Pesquisar no Oracle remessas com o mesmo CNPJ"]
-        C --> D{"Remessa possui conciliacao anterior?"}
-        D -- "Nao" --> E{"Existe recurso elegivel ou apenas acato historico?"}
-        E -- "Apenas acato" --> EX["Bloquear: perda acatada nao gera nova NFS-e"]
-        E -- "Recurso elegivel" --> G["Usar somente o valor disponivel do recurso"]
-        E -- "Nenhum dos dois" --> F["Usar o valor original da remessa"]
-        D -- "Sim" --> H{"Existe recurso elegivel e ainda nao consumido?"}
-        H -- "Nao" --> HX["Excluir do resultado; na busca numerica exata, informar conciliacao sem recurso"]
-        H -- "Sim" --> G
-        G --> GI["O recebimento das NFS-e anteriores nao bloqueia este novo ciclo fiscal"]
-    end
-
-    subgraph CONCILIACAO["Conciliação Fiscal X Faturamento"]
-        F --> I["Adicionar uma ou mais remessas da mesma operadora"]
-        GI --> I
-        I --> J{"GLOSA marcada?"}
-        J -- "Nao" --> K{"Valor glosado igual a zero?"}
-        K -- "Nao" --> KX["Bloquear: remessa sem glosa deve ter valor zero"]
-        K -- "Sim" --> M["Calcular valor considerado menos glosa"]
-        J -- "Sim" --> L{"Glosa maior que zero e menor ou igual ao valor considerado?"}
-        L -- "Nao" --> LX["Bloquear: valor de glosa invalido"]
-        L -- "Sim" --> M
-        M --> N{"Soma dos valores considerados menos glosas igual ao valor liquido da NFS-e?"}
-        N -- "Nao" --> NX["Bloquear: totais divergentes"]
-        N -- "Sim" --> O["Revalidar NFS-e, convenio, remessas, recurso, glosa e totais no POST"]
-        O --> P{"Data de recebimento informada?"}
-        P -- "Nao" --> Q["Plano de contas, centro de custo e lancamento ficam normalmente ausentes"]
-        P -- "Sim" --> R["Exigir conta bancaria; plano de contas, centro de custo e lancamento sao opcionais"]
-        R --> S["Validar data nao futura, conta no Oracle e, se informado, lancamento compativel com conta e data"]
-        Q --> T["Gravar cabecalho e vinculos conciliacao/remessa"]
-        S --> T
-        T --> U["Se o tipo for recurso, consumir seu valor fiscal mesmo sem recebimento financeiro"]
-    end
-
-    subgraph GLOSA["Glosa analitica e recurso"]
-        U --> V{"Algum vinculo foi glosado?"}
-        V -- "Nao" --> W["Nenhum registro de glosa e criado"]
-        V -- "Sim" --> X["Carregar no Oracle os itens e atendimentos da remessa"]
-        X --> Y{"Foram encontrados itens analiticos?"}
-        Y -- "Nao" --> YX["Bloquear a conciliacao para nao criar glosa sem item"]
-        Y -- "Sim" --> Z["Criar um RegistroGlosa pendente por conta e lancamento, ligado ao vinculo conciliacao/remessa"]
-        Z --> ZA["Agrupar os itens no follow-up Acompanhamento sem duplicar o valor financeiro da glosa"]
-        ZA --> ZB["Setor de glosas pesquisa a remessa e trata cada item como acato ou recurso"]
-        ZB --> ZC{"Soma dos itens tratados atingiu o valor glosado da remessa?"}
-        ZC -- "Nao" --> ZA
-        ZC -- "Excedeu" --> ZCX["Bloquear: alocacao analitica maior que a glosa de origem"]
-        ZC -- "Sim" --> ZD["Encerrar candidatos pendentes; manter ativos somente os itens tratados"]
-        ZD --> ZE{"Tratamento do item"}
-        ZE -- "Acato" --> ZF["Reconhecer a perda; nao liberar nova NFS-e"]
-        ZE -- "Recurso" --> ZG["Exigir processo, data, quantidade e valor recursado"]
-        ZG --> ZH["Recurso elegivel: ativo, sem pagamento e com saldo nao consumido"]
-        ZH --> A
-    end
-
-    subgraph RECEBIMENTO["Recebimento imediato ou follow-up"]
-        U --> AB{"Data de recebimento foi informada na conciliacao?"}
-        AB -- "Sim" --> AC["Criar um recebimento por remessa com valor considerado menos glosa"]
-        AC --> AD["O par conciliacao + remessa nao entra na fila sem recebimento"]
-        AB -- "Nao" --> AE{"Valor considerado menos glosa e maior que zero?"}
-        AE -- "Nao" --> AF["Glosa integral: nao criar recebimento e nao listar na fila"]
-        AE -- "Sim" --> AG["Listar o par em Conciliações sem recebimento"]
-        AG --> AH["Informar data, valor exato e conta bancaria; demais dados sao opcionais"]
-        AH --> AI{"Valor e exatamente igual ao total da remessa menos a glosa?"}
-        AI -- "Nao" --> AIX["Rejeitar recebimento menor ou maior que o esperado"]
-        AI -- "Sim" --> AJ["Criar o unico recebimento permitido para o par conciliacao + remessa"]
-        AJ --> AK["Remover a remessa da fila"]
-        AK --> AL{"Ainda existe outra remessa sem registro de recebimento?"}
-        AL -- "Sim" --> AM["Manter conciliacao na fila como recebimento parcial"]
-        AL -- "Nao" --> AN["Remover conciliacao da fila"]
-    end
+    A["Listar remessas da HPC_V_CONTA_ATENDIMENTO"] --> B["Exibir numero, competencia, convenio, valor, conciliado e nao conciliado"]
+    B --> C["Expandir a remessa"]
+    C --> D["Exibir processo unico e historico das NFS-e ja vinculadas"]
+    D --> E["Pesquisar NFS-e do mesmo CNPJ com saldo fiscal"]
+    E --> F{"Ha glosa anterior sem recurso?"}
+    F -- "Sim" --> FX["Bloquear nova NFS-e e orientar o tratamento/recurso"]
+    F -- "Nao" --> G["Adicionar uma ou mais NFS-e"]
+    G --> H["Informar valor utilizado, previsao e recebimento por NFS-e"]
+    H --> I{"Glosar nesta NFS-e?"}
+    I -- "Sim" --> J["Informar o valor glosado da remessa nesta nota"]
+    I -- "Nao" --> K["Valor glosado igual a zero"]
+    J --> L["Validar saldos da remessa, do recurso e da NFS-e"]
+    K --> L
+    L --> M["Gravar um vinculo fiscal por NFS-e e um processo por remessa"]
+    M --> N{"Data de recebimento informada?"}
+    N -- "Sim" --> O["Validar conta, data e lancamento; registrar recebimento"]
+    N -- "Nao" --> P["Enviar a NFS-e para Conciliações sem Recebimento"]
+    M --> Q{"Existe glosa?"}
+    Q -- "Sim" --> R["Criar itens em registros_glosa e notificar o setor de glosas"]
+    Q -- "Nao" --> S["Atualizar o saldo da remessa"]
+    R --> T{"Tratamento interno"}
+    T -- "Acatar" --> U["Reconhecer a perda e reduzir o saldo financeiro"]
+    T -- "Recursar" --> V["Liberar o valor recursado para uma futura NFS-e"]
+    V --> E
+    U --> W{"Remessa encerrada?"}
+    S --> W
+    O --> W
+    P --> W
+    W -- "Nao" --> B
+    W -- "Sim" --> X["Remover o card da listagem principal"]
 ```
 
-### Regras e formulas aplicadas
+### Persistencia e relacionamentos
 
-- Somente remessas cujo CNPJ normalizado seja igual ao CNPJ do convenio da
-  NFS-e podem ser selecionadas.
-- O acato e armazenado nos registros de glosa com `sn_glosado = "not"`. Por
-  compatibilidade com o modelo existente, o valor fica na coluna
-  `valor_recursado`, mas semanticamente representa `valor_acatado`.
-- O saldo cobravel da remessa e calculado por:
+- `processos_conciliacao_remessa` guarda um unico
+  `processo_recebimento` por remessa. Todas as NFS-e adicionadas ao mesmo
+  card reutilizam esse processo.
+- `conciliacoes_faturamento` continua sendo o registro fiscal e bancario da
+  NFS-e. Por isso `data_previsao_recebimento`, `data_recebimento`, conta
+  bancaria, plano de contas, centro de custo e lancamento do extrato sao
+  independentes para cada nota.
+- `conciliacoes_faturamento_remessas` representa a alocacao entre uma NFS-e
+  e uma remessa. O campo `valor_alocado_nfse` informa quanto do saldo da nota
+  foi usado nesse vinculo.
+- A unicidade global de `nfse_row_hash` e `numero_nfse` foi removida. A
+  mesma NFS-e pode pagar remessas distintas, desde que a soma das alocacoes nao
+  ultrapasse o valor liquido da nota.
+- Os registros antigos sao preservados. A migracao calcula
+  `valor_alocado_nfse = valor_total - valor_glosado` e agrupa o historico
+  existente por remessa.
 
-  ```text
-  saldo_cobravel = valor_total_remessa
-                   - SUM(valor_recebido)
-                   - SUM(valor_acatado)
-  ```
+### Saldos e validacoes
 
-- Uma remessa e integral quando a soma dos recebimentos e exatamente igual ao
-  seu valor total. O acato nao altera `recebimento_integral`, porque nao houve
-  entrada de dinheiro.
-- A remessa fica encerrada financeiramente quando
-  `SUM(valor_recebido) + SUM(valor_acatado) == valor_total_remessa`. Nesse caso,
-  o saldo e zero, mas a API diferencia encerramento financeiro de recebimento
-  integral pelos campos `remessa_encerrada_financeiramente` e
-  `remessa_recebida_integralmente`.
-- Na pesquisa de remessas elegiveis, a API tambem retorna
-  `valor_total_acatado`, `saldo_cobravel`, `valor_elegivel_conciliacao` e
-  `situacao_financeira`. O `saldo_cobravel` continua representando a posicao
-  financeira global da remessa, enquanto `valor_elegivel_conciliacao` e o
-  valor usado nos totais da nova NFS-e.
-- O recebimento das conciliacoes anteriores nao participa da elegibilidade
-  fiscal. Uma remessa com recurso disponivel pode ser conciliada novamente se
-  o recebimento anterior estiver ausente, parcial ou integral.
-- Para evitar duplicidade, uma remessa que ja possui conciliacao anterior e
-  nao possui novo recurso disponivel permanece bloqueada. A API devolve uma
-  `restricao` estruturada com o motivo `conciliacao_sem_recurso`.
-- Recebimentos acima de `valor_total_remessa - SUM(valor_acatado)` sao
-  rejeitados, pois tentariam receber uma parcela ja reconhecida como perda.
-- Para uma remessa com saldo aberto, o recurso disponivel considera somente
-  recursos ativos, marcados como glosados, com processo e data de recurso, sem
-  qualquer pagamento e ainda nao consumidos por outra conciliacao:
+O saldo fiscal da NFS-e e compartilhado entre todas as remessas:
 
-  ```text
-  recurso_disponivel = MIN(
-      total_recursado - total_consumido_em_conciliacoes,
-      total_recursado_sem_qualquer_pagamento
-  )
-  ```
+```text
+saldo_nfse = valor_liquido_nfse
+             - SUM(valor_alocado_nfse em todas as remessas)
+```
 
-  A consulta de elegibilidade atual nao verifica `qtd_recursado`; esse campo e
-  exigido na criacao normal de `RegistroGlosa`, mas um registro legado com
-  quantidade nula ainda pode liberar a remessa se atender aos demais filtros.
+A posicao exibida no card da remessa e calculada por:
 
-- Um recurso com pagamento parcial nao e considerado recurso "sem pagamento".
-  O saldo remanescente desse recurso nao libera uma nova NFS-e.
-- Valores acatados nao entram em `recurso_disponivel`, nao geram nova NFS-e e
-  nao podem possuir dados de recebimento.
-- Nao e exigida igualdade entre `recurso_disponivel` e `saldo_cobravel`. Para
-  uma conciliacao de recurso, vale:
+```text
+valor_conciliado = SUM(valor_alocado_nfse)
+valor_nao_conciliado = valor_total_remessa
+                       - valor_conciliado
+                       - valor_acatado
+```
 
-  ```text
-  valor_elegivel_conciliacao = recurso_disponivel
-  ```
+- O valor alocado deve ser maior que zero e menor ou igual ao saldo atual da
+  NFS-e.
+- A soma de `valor_alocado_nfse + valor_glosado` da operacao nao pode
+  ultrapassar o valor disponivel da remessa.
+- A glosa nao consome saldo da NFS-e, pois representa um valor contestado e
+  ainda nao recebido. Ela mantem a remessa aberta e cria itens analiticos no
+  follow-up de glosas.
+- Uma glosa ainda nao tratada bloqueia uma nova conciliacao apenas na parcela
+  glosada. Se houver uma parcela livre da remessa, ela continua disponivel.
+- O acato reconhece a perda e reduz o valor nao conciliado sem criar
+  recebimento.
+- O recurso exige processo, data, quantidade e valor recursado em
+  `registros_glosa`. Somente o saldo recursado ativo, sem pagamento e ainda
+  nao consumido pode ser associado a uma nova NFS-e.
+- Quando uma conciliacao de recurso sofre nova glosa, a nova parcela volta ao
+  follow-up e somente podera receber outra NFS-e depois de novo recurso.
 
-  O recurso e validado e consumido independentemente do calendario de
-  recebimentos das NFS-e anteriores.
-- Em uma glosa parcialmente acatada e parcialmente recursada, o acato reduz o
-  saldo cobravel, mas somente a parcela recursada e ainda disponivel participa
-  da nova conciliacao. O recebimento anterior nao precisa ocorrer antes desse
-  novo ciclo fiscal.
-- Para remessas historicas que possuem recurso aberto, mas ainda nao possuem
-  conciliacao anterior no modulo, o recurso sem pagamento e usado como valor
-  elegivel. A falta de controle financeiro historico nao bloqueia a operacao
-  quando o recurso pode ser validado.
-- Quando `GLOSA?` estiver marcada, o valor glosado deve ser maior que zero e
-  menor ou igual ao valor considerado. Sem a marcacao, o valor deve ser zero.
-- Para cada NFS-e, deve ser respeitada a igualdade:
+### Recebimento bancario por NFS-e
 
-  ```text
-  SUM(valor_considerado_das_remessas) - SUM(valor_glosado) = valor_nfse
-  ```
+- A data de previsao e obrigatoria em cada NFS-e adicionada.
+- A data de recebimento e opcional. Quando informada, a conta bancaria da
+  `DBAMV.HPC_V_CONTAS_BANCARIAS` torna-se obrigatoria; plano de contas,
+  centro de custo e lancamento do extrato continuam opcionais.
+- A data de recebimento nao pode ser futura.
+- O valor do recebimento e exatamente o `valor_alocado_nfse`. A glosa nao
+  integra o deposito bancario.
+- Um lancamento do extrato, quando selecionado, precisa pertencer a conta e a
+  data informadas e e marcado como conciliado na mesma transacao.
 
-- Em uma conciliacao de recurso, uma nova glosa reduz o recebimento registrado.
-  O saldo resultante inicia outra tratativa analitica e somente participa de
-  outro ciclo depois que os itens recursados se tornam elegiveis.
-- A marcacao `GLOSA?` continua registrada no vinculo
-  `conciliacoes_faturamento_remessas`, que representa o valor financeiro da
-  glosa. A relacao `conciliacao_remessa_id` e de um vinculo para muitos
-  `registros_glosa`: cada registro permanece orientado ao item/atendimento e e
-  identificado tambem por `cd_lancamento`.
-- Ao concluir uma conciliacao glosada, a API consulta os itens analiticos da
-  remessa no Oracle. A operacao e rejeitada se nenhum item for encontrado; caso
-  contrario, cria candidatos pendentes em `registros_glosa` e os envia ao
-  follow-up **Acompanhamento**.
-- O follow-up agrupa os candidatos pelo vinculo da conciliacao para exibir uma
-  unica vez o valor financeiro ainda pendente, mas a acao **Tratar itens** abre
-  a pesquisa da remessa na tela de contas. Acato e recurso continuam sendo
-  gravados individualmente por conta e lancamento.
-- A soma dos valores acatados e recursados dos itens nao pode superar
-  `conciliacoes_faturamento_remessas.valor_glosado`. Quando atinge exatamente
-  esse valor, os candidatos nao selecionados sao encerrados; se uma tratativa
-  for desfeita, os candidatos pendentes voltam a ficar ativos.
-- O recurso e consumido pela conciliacao fiscal mesmo quando o recebimento
-  financeiro for registrado posteriormente. Isso impede que o mesmo recurso
-  seja associado a duas NFS-e.
-- Quando a data de recebimento e informada na conciliacao, somente a conta
-  bancaria e obrigatoria. Conta do plano de contas, conta do centro de custo e
-  lancamento do extrato sao opcionais tanto na API quanto nas duas telas.
-- O backend repete todas as validacoes no `POST`, incluindo convenio,
-  conciliacao anterior, disponibilidade e consumo do recurso, glosa e total da
-  NFS-e. O estado de recebimento e validado apenas nos endpoints financeiros.
+### Follow-up Conciliações sem Recebimento
 
-### Fila de conciliacoes sem recebimento
+O submenu lista cada NFS-e conciliada cuja `data_recebimento` ainda nao foi
+informada. A fila usa o vinculo exato `conciliacao_id + cd_remessa` e permite
+preencher posteriormente data, conta bancaria, plano de contas, centro de
+custo e lancamento.
 
-O submenu **Financeiro > Conciliacoes sem recebimento** consulta o endpoint
-`GET /app_glosas/financeiro/conciliacao-faturamento/sem-recebimento`.
+Depois do registro, os dados bancarios sao atualizados em
+`conciliacoes_faturamento`, o recebimento e gravado em
+`recebimentos_remessas` e a NFS-e deixa a fila.
 
-- A verificacao e feita pelo par `conciliacao_id + cd_remessa` na tabela
-  `recebimentos_remessas`; a data de recebimento existente no cabecalho da
-  conciliacao nao e usada isoladamente para definir a situacao.
-- Uma remessa entra na fila quando
-  `valor_total - valor_glosado > 0` e nao existe recebimento vinculado ao mesmo
-  par conciliacao/remessa.
-- Conciliacoes integralmente glosadas nao entram na fila, pois nao possuem
-  valor esperado de recebimento.
-- Uma conciliacao sem qualquer valor recebido recebe a situacao
-  `sem_recebimento`. Quando existe recebimento em pelo menos uma remessa e
-  outra permanece pendente, recebe `recebimento_parcial`. Remessas sem valor
-  esperado, por terem sido integralmente glosadas, nao alteram essa situacao.
-- O valor pendente e calculado somente sobre as remessas sem recebimento:
+### Endpoints do fluxo
 
-  ```text
-  valor_pendente = SUM(valor_total_remessa - valor_glosado)
-  ```
-
-- A tela permite pesquisar por NFS-e, convenio, processo de recebimento ou
-  codigo de uma remessa ainda pendente, possui paginacao e destaca previsoes
-  de recebimento em atraso.
-- Quando todas as remessas com valor esperado possuem registro de recebimento,
-  a conciliacao deixa automaticamente a fila.
-- Cada remessa pendente possui um formulario para registrar o recebimento pelo
-  endpoint `POST /app_glosas/financeiro/conciliacao-faturamento/recebimentos-remessas`.
-  O registro exige data, valor recebido e conta bancaria, e permite informar
-  conta do plano de contas, conta do centro de custo e lancamento do extrato.
-- O valor e preenchido com mascara monetaria, permanece somente para leitura na
-  tela e deve ser exatamente igual a `valor_total - valor_glosado`. A API
-  repete a igualdade e rejeita tanto valores menores quanto maiores.
-- A restricao unica de `conciliacao_id + cd_remessa` permanece. Antes, um valor
-  parcial criava o unico registro permitido e um complemento para o mesmo par
-  era bloqueado; com a exigencia de valor exato, o recebimento e concluido em
-  um unico registro e nao existe complemento a inserir.
-- Os lancamentos disponiveis sao filtrados pela conta bancaria e pela data do
-  recebimento. Ao confirmar um recebimento vinculado ao extrato, o lancamento
-  e marcado como conciliado na mesma transacao.
-- Depois do registro, a fila e recalculada: a remessa recebida deixa a lista e,
-  se ainda houver outra remessa pendente, a conciliacao permanece com situacao
-  `recebimento_parcial`.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/remessas`: cards das
+  remessas ainda nao encerradas, com saldos e historico.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/remessas/{cd_remessa}/notas`:
+  NFS-e do mesmo convenio com saldo disponivel.
+- `POST /app_glosas/financeiro/conciliacao-faturamento/remessas/{cd_remessa}/conciliar`:
+  grava o processo unico e uma ou mais alocacoes de NFS-e.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/sem-recebimento`:
+  follow-up das NFS-e sem recebimento bancario.
+- `POST /app_glosas/financeiro/conciliacao-faturamento/recebimentos-remessas`:
+  completa o recebimento da NFS-e pendente.
 
 ## Contratos em schema.py e importancia da validacao
 

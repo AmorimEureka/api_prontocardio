@@ -14,6 +14,7 @@ from app_prontocardio.models import (
     ConciliacaoFaturamentoRemessa,
     LancamentoExtratoBancario,
     NfseXml,
+    ProcessoConciliacaoRemessa,
     RecebimentoRemessa,
     RegistroGlosa,
     RemessaFinanceira,
@@ -22,6 +23,7 @@ from app_prontocardio.models import (
 from app_prontocardio.routers import app_glosas, financeiro
 from app_prontocardio.schema import (
     ConciliacaoFaturamentoCreate,
+    ConciliacaoRemessaCreate,
     RecebimentoRemessaCreate,
     RegistroGlosaCreate,
 )
@@ -29,6 +31,7 @@ from app_prontocardio.schema import (
 CD_REMESSA_TESTE = 987
 CONTA_BANCARIA_TESTE = 7
 ITENS_ANALITICOS_TESTE = 2
+CONCILIACOES_DISTRIBUIDAS = 2
 GRU_PRO_DIAGNOSTICO = 10
 GRU_PRO_MEDICAMENTOS = 20
 GRU_FAT_EXAMES = 1
@@ -89,6 +92,23 @@ def remessas_hpc(*_args, **_kwargs):
             'valor_total': '120.00',
         }
     ]
+
+
+def cards_remessas_hpc(*_args, **kwargs):
+    codigo = int(kwargs.get('q') or CD_REMESSA_TESTE)
+    return (
+        [
+            {
+                'cd_remessa': codigo,
+                'cd_convenio': 10,
+                'convenio': 'Convenio Teste',
+                'cnpj_convenio': '98765432000110',
+                'data_competencia': date(2026, 7, 1),
+                'valor_total': Decimal('120.00'),
+            }
+        ],
+        1,
+    )
 
 
 def itens_remessas_hpc(*_args, **_kwargs):
@@ -273,6 +293,14 @@ def configurar_oracle_fake(monkeypatch):
         financeiro,
         '_consultar_itens_remessas_hpc',
         itens_remessas_hpc,
+    )
+
+
+def configurar_cards_oracle_fake(monkeypatch):
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_cards_remessas_hpc',
+        cards_remessas_hpc,
     )
 
 
@@ -1280,6 +1308,144 @@ def test_recurso_independente_do_saldo_financeiro_libera_conciliacao(
     )
 
     assert conciliacao['total_remessas'] == Decimal(valor_recurso)
+
+
+def test_lista_remessa_com_saldo_e_historico_centrados_no_faturamento(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    configurar_cards_oracle_fake(monkeypatch)
+
+    response = financeiro.consultar_remessas_faturamento(
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+        q=None,
+        limit=100,
+        offset=0,
+    )
+
+    assert response['total'] == 1
+    assert response['remessas'][0] == {
+        'cd_remessa': CD_REMESSA_TESTE,
+        'data_competencia': date(2026, 7, 1),
+        'convenio': 'Convenio Teste',
+        'cnpj_convenio': '98765432000110',
+        'valor_remessa': Decimal('120.00'),
+        'valor_conciliado': Decimal('0.00'),
+        'valor_acatado': Decimal('0.00'),
+        'valor_nao_conciliado': Decimal('120.00'),
+        'valor_recurso_disponivel': Decimal('0.00'),
+        'valor_disponivel_conciliacao': Decimal('120.00'),
+        'processo_recebimento': None,
+        'historico': [],
+    }
+
+
+def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    payload_primeira = ConciliacaoRemessaCreate(
+        processo_recebimento='PROC-REM-987',
+        notas=[
+            {
+                'nfse_row_hash': 'nfse-1',
+                'valor_alocado': '60.00',
+                'data_previsao_recebimento': '2026-08-10',
+            }
+        ],
+    )
+
+    primeira = financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=987,
+        payload=payload_primeira,
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    segunda = financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=988,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-REM-988',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '40.00',
+                    'data_previsao_recebimento': '2026-08-11',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+
+    assert primeira['valor_alocado'] == Decimal('60.00')
+    assert segunda['valor_alocado'] == Decimal('40.00')
+    assert (
+        session.query(ConciliacaoFaturamento).count()
+        == CONCILIACOES_DISTRIBUIDAS
+    )
+    assert (
+        session.query(ProcessoConciliacaoRemessa).count()
+        == CONCILIACOES_DISTRIBUIDAS
+    )
+    assert sorted(
+        session.scalars(
+            select(ConciliacaoFaturamentoRemessa.valor_alocado_nfse)
+        )
+    ) == [Decimal('40.00'), Decimal('60.00')]
+
+
+def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='80.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_itens_remessas_hpc',
+        itens_remessas_hpc,
+    )
+
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-GLOSA-987',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '80.00',
+                    'sn_glosado': True,
+                    'valor_glosado': '40.00',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    response = financeiro.consultar_nfses_para_remessa(
+        cd_remessa=CD_REMESSA_TESTE,
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+        q=None,
+        limit=50,
+    )
+
+    assert response['notas'] == []
+    assert response['valor_disponivel_remessa'] == Decimal('0.00')
+    assert 'glosa ainda sem recurso' in response['message']
+    assert session.query(RegistroGlosa).count() == ITENS_ANALITICOS_TESTE
 
 
 def test_concilia_recurso_usando_valor_recursado_como_total_da_remessa(
