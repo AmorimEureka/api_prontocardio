@@ -555,9 +555,16 @@ class ConciliacaoRemessaPublic(BaseModel):
     message: str
 
 
+class ValorConciliacaoRemessaUpdate(BaseModel):
+    cd_remessa: int = Field(gt=0)
+    valor_glosado: Decimal = Field(ge=0)
+    valor_recebido: Decimal = Field(gt=0)
+
+
 class ConciliacaoFaturamentoUpdate(BaseModel):
     processo_recebimento: str | None = Field(default=None, max_length=255)
     data_previsao_recebimento: date | None = None
+    remessas: list[ValorConciliacaoRemessaUpdate] | None = None
 
     @field_validator('processo_recebimento', mode='before')
     @classmethod
@@ -574,8 +581,15 @@ class ConciliacaoFaturamentoUpdate(BaseModel):
         if (
             self.processo_recebimento is None
             and self.data_previsao_recebimento is None
+            and not self.remessas
         ):
             raise ValueError('Informe ao menos um campo para atualizar.')
+        if self.remessas:
+            codigos = [item.cd_remessa for item in self.remessas]
+            if len(codigos) != len(set(codigos)):
+                raise ValueError(
+                    'Uma remessa nao pode ser informada mais de uma vez.'
+                )
         return self
 
 
@@ -587,6 +601,7 @@ class UsuarioOperacaoFinanceiraPublic(BaseModel):
 
 class AuditoriaConciliacaoPublic(BaseModel):
     id: int
+    conciliacao_origem_id: int
     acao: str
     usuario: UsuarioOperacaoFinanceiraPublic
     dados_anteriores: dict | None = None

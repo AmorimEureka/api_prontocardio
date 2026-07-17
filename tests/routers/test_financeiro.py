@@ -1345,6 +1345,40 @@ def test_lista_remessa_com_saldo_e_historico_centrados_no_faturamento(
     }
 
 
+def test_saldo_da_remessa_trata_glosa_como_parte_da_pendencia():
+    remessa = {
+        'cd_remessa': 10386,
+        'data_competencia': date(2024, 11, 1),
+        'convenio': 'BRADESCO',
+        'cnpj_convenio': '00000000000000',
+        'valor_total': Decimal('2349.21'),
+    }
+    resumo = {
+        'valor_conciliado': Decimal('2275.41'),
+        'valor_glosado': Decimal('36.90'),
+        'valor_recurso_consumido': Decimal('0.00'),
+        'historico': [],
+    }
+
+    sem_recurso = financeiro._posicao_remessa(
+        remessa,
+        resumo,
+        valor_acatado=Decimal('0.00'),
+        recurso_disponivel=Decimal('0.00'),
+    )
+    com_recurso = financeiro._posicao_remessa(
+        remessa,
+        resumo,
+        valor_acatado=Decimal('0.00'),
+        recurso_disponivel=Decimal('20.00'),
+    )
+
+    assert sem_recurso['valor_nao_conciliado'] == Decimal('36.90')
+    assert sem_recurso['valor_disponivel_conciliacao'] == Decimal('0.00')
+    assert com_recurso['valor_nao_conciliado'] == Decimal('36.90')
+    assert com_recurso['valor_disponivel_conciliacao'] == Decimal('20.00')
+
+
 def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
     session,
     usuario_teste,
@@ -1417,7 +1451,7 @@ def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
         itens_remessas_hpc,
     )
 
-    financeiro.conciliar_remessa_com_nfses(
+    conciliacao = financeiro.conciliar_remessa_com_nfses(
         cd_remessa=CD_REMESSA_TESTE,
         payload=ConciliacaoRemessaCreate(
             processo_recebimento='PROC-GLOSA-987',
@@ -1446,11 +1480,101 @@ def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
 
     assert response['notas'] == []
     assert response['valor_disponivel_remessa'] == Decimal('0.00')
+    assert conciliacao['valor_nao_conciliado'] == Decimal('40.00')
     assert 'glosa ainda sem recurso' in response['message']
     assert session.query(RegistroGlosa).count() == ITENS_ANALITICOS_TESTE
 
 
 def test_edita_e_inativa_conciliacao_sem_recebimento_com_auditoria(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_itens_remessas_hpc',
+        itens_remessas_hpc,
+    )
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-ORIGINAL',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '100.00',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    conciliacao = session.scalar(select(ConciliacaoFaturamento))
+
+    editada = financeiro.editar_conciliacao_faturamento(
+        conciliacao_id=conciliacao.id,
+        payload=ConciliacaoFaturamentoUpdate(
+            processo_recebimento='PROC-CORRIGIDO',
+            data_previsao_recebimento=date(2026, 8, 20),
+            remessas=[
+                {
+                    'cd_remessa': CD_REMESSA_TESTE,
+                    'valor_recebido': '90.00',
+                    'valor_glosado': '10.00',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+    )
+
+    assert editada['processo_recebimento'] == 'PROC-CORRIGIDO'
+    assert editada['usuario_operacao_id'] == usuario_teste.id
+    assert conciliacao.usuario_atualizacao_id == usuario_teste.id
+    assert conciliacao.data_previsao_recebimento == date(2026, 8, 20)
+    processo = session.scalar(select(ProcessoConciliacaoRemessa))
+    assert processo.processo_recebimento == 'PROC-CORRIGIDO'
+    assert processo.usuario_atualizacao_id == usuario_teste.id
+    vinculo = session.scalar(select(ConciliacaoFaturamentoRemessa))
+    assert vinculo.valor_alocado_nfse == Decimal('90.00')
+    assert vinculo.valor_glosado == Decimal('10.00')
+    assert vinculo.valor_total == Decimal('100.00')
+    assert vinculo.sn_glosado == 'true'
+    assert session.query(RegistroGlosa).count() == ITENS_ANALITICOS_TESTE
+    assert {
+        registro.processo_controle_fatura_gab
+        for registro in session.scalars(select(RegistroGlosa))
+    } == {'PROC-CORRIGIDO'}
+
+    inativada = financeiro.inativar_conciliacao_faturamento(
+        conciliacao_id=conciliacao.id,
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    assert inativada['ativo'] is False
+    assert conciliacao.usuario_inativacao_id == usuario_teste.id
+    assert [
+        auditoria.acao
+        for auditoria in session.scalars(
+            select(AuditoriaConciliacaoFaturamento).order_by(
+                AuditoriaConciliacaoFaturamento.id
+            )
+        )
+    ] == ['criacao', 'edicao', 'inativacao']
+    assert financeiro._valores_utilizados_nfse(session) == {}
+    assert financeiro._resumos_remessas(
+        session,
+        {CD_REMESSA_TESTE},
+    ) == {}
+
+
+def test_edicao_de_valores_respeita_saldo_da_nfse(
     session,
     usuario_teste,
     monkeypatch,
@@ -1475,45 +1599,85 @@ def test_edita_e_inativa_conciliacao_sem_recebimento_com_auditoria(
     )
     conciliacao = session.scalar(select(ConciliacaoFaturamento))
 
-    editada = financeiro.editar_conciliacao_faturamento(
+    with pytest.raises(HTTPException) as error:
+        financeiro.editar_conciliacao_faturamento(
+            conciliacao_id=conciliacao.id,
+            payload=ConciliacaoFaturamentoUpdate(
+                remessas=[
+                    {
+                        'cd_remessa': CD_REMESSA_TESTE,
+                        'valor_recebido': '101.00',
+                        'valor_glosado': '0.00',
+                    }
+                ]
+            ),
+            usuario_atual=usuario_teste,
+            session=session,
+            session_oracle=object(),
+        )
+
+    assert error.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert 'saldo disponivel da NFS-e' in error.value.detail
+
+
+def test_edicao_do_valor_recebido_preserva_glosa_ja_tratada(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='80.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_itens_remessas_hpc',
+        itens_remessas_hpc,
+    )
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-GLOSA',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '80.00',
+                    'valor_glosado': '40.00',
+                    'sn_glosado': True,
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    conciliacao = session.scalar(select(ConciliacaoFaturamento))
+    registro = session.scalar(select(RegistroGlosa))
+    registro.processo_recurso = 'REC-TRATADO'
+    registro.dt_recurso = date(2026, 8, 12)
+    registro.valor_recursado = Decimal('20.00')
+    session.commit()
+
+    financeiro.editar_conciliacao_faturamento(
         conciliacao_id=conciliacao.id,
         payload=ConciliacaoFaturamentoUpdate(
-            processo_recebimento='PROC-CORRIGIDO',
-            data_previsao_recebimento=date(2026, 8, 20),
+            remessas=[
+                {
+                    'cd_remessa': CD_REMESSA_TESTE,
+                    'valor_recebido': '70.00',
+                    'valor_glosado': '40.00',
+                }
+            ]
         ),
         usuario_atual=usuario_teste,
         session=session,
+        session_oracle=object(),
     )
 
-    assert editada['processo_recebimento'] == 'PROC-CORRIGIDO'
-    assert editada['usuario_operacao_id'] == usuario_teste.id
-    assert conciliacao.usuario_atualizacao_id == usuario_teste.id
-    assert conciliacao.data_previsao_recebimento == date(2026, 8, 20)
-    processo = session.scalar(select(ProcessoConciliacaoRemessa))
-    assert processo.processo_recebimento == 'PROC-CORRIGIDO'
-    assert processo.usuario_atualizacao_id == usuario_teste.id
-
-    inativada = financeiro.inativar_conciliacao_faturamento(
-        conciliacao_id=conciliacao.id,
-        usuario_atual=usuario_teste,
-        session=session,
-    )
-
-    assert inativada['ativo'] is False
-    assert conciliacao.usuario_inativacao_id == usuario_teste.id
-    assert [
-        auditoria.acao
-        for auditoria in session.scalars(
-            select(AuditoriaConciliacaoFaturamento).order_by(
-                AuditoriaConciliacaoFaturamento.id
-            )
-        )
-    ] == ['criacao', 'edicao', 'inativacao']
-    assert financeiro._valores_utilizados_nfse(session) == {}
-    assert financeiro._resumos_remessas(
-        session,
-        {CD_REMESSA_TESTE},
-    ) == {}
+    session.refresh(registro)
+    assert registro.sn_ativo == 'true'
+    assert registro.sn_glosado == 'true'
+    assert registro.processo_recurso == 'REC-TRATADO'
+    assert registro.valor_recursado == Decimal('20.00')
 
 
 def test_consulta_gerencial_exibe_conciliacao_recebimento_e_usuarios(
@@ -1557,6 +1721,75 @@ def test_consulta_gerencial_exibe_conciliacao_recebimento_e_usuarios(
     assert card['remessas'][0]['cd_remessa'] == CD_REMESSA_TESTE
     assert card['recebimentos'][0]['usuario']['id'] == usuario_teste.id
     assert card['auditoria'][0]['acao'] == 'criacao'
+
+
+def test_consulta_gerencial_reune_historico_de_conciliacao_recriada(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-LINHA-DO-TEMPO',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '60.00',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    conciliacao_anterior = session.scalar(select(ConciliacaoFaturamento))
+    financeiro.inativar_conciliacao_faturamento(
+        conciliacao_id=conciliacao_anterior.id,
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-LINHA-DO-TEMPO',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '50.00',
+                    'data_previsao_recebimento': '2026-08-20',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+
+    response = financeiro.consultar_conciliacoes_faturamento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        situacao=None,
+        incluir_inativas=False,
+        limit=25,
+        offset=0,
+    )
+
+    assert response['total'] == 1
+    card = response['conciliacoes'][0]
+    assert card['id'] != conciliacao_anterior.id
+    assert [evento['acao'] for evento in card['auditoria']] == [
+        'criacao',
+        'inativacao',
+        'criacao',
+    ]
+    assert {
+        evento['conciliacao_origem_id'] for evento in card['auditoria']
+    } == {conciliacao_anterior.id, card['id']}
 
 
 def test_nao_inativa_conciliacao_com_recebimento(
