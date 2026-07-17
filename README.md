@@ -162,6 +162,16 @@ flowchart TD
 - Os registros antigos sao preservados. A migracao calcula
   `valor_alocado_nfse = valor_total - valor_glosado` e agrupa o historico
   existente por remessa.
+- A origem dos itens em `registros_glosa` e classificada como `triagem` para
+  os registros historicos sem vinculo fiscal e como `conciliacao` para os
+  itens criados a partir de `conciliacoes_faturamento_remessas`. A restricao
+  de integridade impede que um item vinculado seja classificado como origem
+  da Triagem, sem apagar a procedencia quando o vinculo deixar de existir.
+- Para manter o contrato consumido pelos Indicadores, a API fornece
+  `status_tratativa` e `valor_indicador`. Registros historicos continuam
+  usando o valor recursado ou acatado; uma glosa ainda nao tratada da
+  conciliacao contabiliza apenas o saldo do vinculo, uma unica vez, mesmo
+  quando possui varios itens analiticos.
 
 ### Saldos e validacoes
 

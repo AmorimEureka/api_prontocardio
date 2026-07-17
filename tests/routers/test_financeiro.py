@@ -209,6 +209,12 @@ def criar_recurso_aberto(
         'sn_ativo': 'true',
     }
     values.update(overrides)
+    values.setdefault(
+        'origem_registro',
+        'conciliacao'
+        if values.get('conciliacao_remessa_id') is not None
+        else 'triagem',
+    )
     registro = RegistroGlosa(**values)
     registro.data_criacao = datetime(2026, 6, 3, 10, 0)
     session.add(registro)
@@ -409,6 +415,18 @@ def test_lista_apenas_nfse_nao_conciliada(
     assert all(
         registro.valor_recursado is None for registro in registros_glosa
     )
+    assert {
+        registro.origem_registro for registro in registros_glosa
+    } == {'conciliacao'}
+    assert {
+        registro.status_tratativa for registro in registros_glosa
+    } == {'pendente'}
+    assert sum(
+        registro.valor_indicador for registro in registros_glosa
+    ) == Decimal('20.00')
+    assert sum(
+        registro.valor_indicador > 0 for registro in registros_glosa
+    ) == 1
     assert registros_glosa[0].valor_glosa_origem == Decimal('20.00')
     assert registros_glosa[0].valor_glosa_pendente == Decimal('20.00')
 
