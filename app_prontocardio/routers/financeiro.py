@@ -1636,21 +1636,26 @@ def _posicao_remessa(
     valor_conciliado = _money(resumo.get('valor_conciliado'))
     valor_glosado = _money(resumo.get('valor_glosado'))
     recurso_consumido = _money(resumo.get('valor_recurso_consumido'))
-    valor_nao_conciliado = max(
-        valor_remessa - valor_conciliado - valor_acatado,
+    saldo_base = max(
+        valor_remessa
+        - valor_conciliado
+        - valor_glosado
+        - valor_acatado,
         Decimal('0.00'),
     )
-    glosa_sem_recurso = max(
+    glosa_pendente = max(
         valor_glosado - recurso_consumido - valor_acatado,
         Decimal('0.00'),
     )
-    valor_livre = max(
-        valor_nao_conciliado - glosa_sem_recurso,
+    valor_nao_conciliado = max(
+        saldo_base,
+        glosa_pendente,
         Decimal('0.00'),
     )
+    valor_livre = max(saldo_base - glosa_pendente, Decimal('0.00'))
     valor_disponivel = min(
         valor_nao_conciliado,
-        valor_livre + min(glosa_sem_recurso, recurso_disponivel),
+        valor_livre + min(glosa_pendente, recurso_disponivel),
     )
     return {
         'cd_remessa': remessa['cd_remessa'],
@@ -1675,14 +1680,23 @@ def _codigos_remessas_encerradas(session: Session) -> set[int]:
     ids = {remessa.cd_remessa for remessa in remessas}
     resumos = _resumos_remessas(session, ids)
     acatados = _valores_acatados_por_remessa(session, ids)
+    recursos = _recursos_abertos_por_remessa(session, ids)
     return {
         remessa.cd_remessa
         for remessa in remessas
-        if (
-            _money(resumos.get(remessa.cd_remessa, {}).get('valor_conciliado'))
-            + acatados.get(remessa.cd_remessa, Decimal('0.00'))
-        )
-        >= _money(remessa.valor_total)
+        if _posicao_remessa(
+            {
+                'cd_remessa': remessa.cd_remessa,
+                'data_competencia': remessa.data_competencia,
+                'convenio': remessa.convenio,
+                'cnpj_convenio': remessa.cnpj_convenio,
+                'valor_total': remessa.valor_total,
+            },
+            resumos.get(remessa.cd_remessa),
+            acatados.get(remessa.cd_remessa, Decimal('0.00')),
+            recursos.get(remessa.cd_remessa, Decimal('0.00')),
+        )['valor_nao_conciliado']
+        <= 0
     }
 
 
@@ -2224,6 +2238,22 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
             detail='A remessa ou uma das NFS-e ja possui este vinculo.',
         ) from exc
 
+    resumo_atualizado = _resumos_remessas(
+        session_postgres,
+        {cd_remessa},
+    ).get(cd_remessa, {})
+    posicao_atualizada = _posicao_remessa(
+        remessa,
+        resumo_atualizado,
+        _valores_acatados_por_remessa(
+            session_postgres,
+            {cd_remessa},
+        ).get(cd_remessa, Decimal('0.00')),
+        _recursos_abertos_por_remessa(
+            session_postgres,
+            {cd_remessa},
+        ).get(cd_remessa, Decimal('0.00')),
+    )
     return {
         'processo_remessa_id': processo.id,
         'cd_remessa': cd_remessa,
@@ -2231,12 +2261,9 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
         'quantidade_notas': len(notas_validadas),
         'valor_alocado': _money(total_alocado),
         'valor_glosado': _money(total_glosado),
-        'valor_nao_conciliado': _money(
-            max(
-                posicao['valor_nao_conciliado'] - total_alocado,
-                Decimal('0.00'),
-            )
-        ),
+        'valor_nao_conciliado': posicao_atualizada[
+            'valor_nao_conciliado'
+        ],
         'message': 'Remessa conciliada com as NFS-e informadas.',
     }
 
@@ -2979,12 +3006,281 @@ def _conciliacao_alteracao_publica(
     }
 
 
+def _atualizar_valores_conciliacao(  # noqa: PLR0912, PLR0915
+    session: Session,
+    session_oracle: Session,
+    conciliacao: ConciliacaoFaturamento,
+    vinculos: list[ConciliacaoFaturamentoRemessa],
+    payload: ConciliacaoFaturamentoUpdate,
+) -> None:
+    if not payload.remessas:
+        return
+    vinculos_por_remessa = {item.cd_remessa: item for item in vinculos}
+    ajustes = {item.cd_remessa: item for item in payload.remessas}
+    codigos_invalidos = sorted(ajustes.keys() - vinculos_por_remessa.keys())
+    if codigos_invalidos:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'As remessas informadas nao pertencem a conciliacao: '
+                + ', '.join(str(item) for item in codigos_invalidos)
+                + '.'
+            ),
+        )
+
+    valor_atual_nfse = sum(
+        (_valor_alocado_vinculo(item) for item in vinculos),
+        Decimal('0.00'),
+    )
+    valor_novo_nfse = sum(
+        (
+            _money(ajustes[item.cd_remessa].valor_recebido)
+            if item.cd_remessa in ajustes
+            else _valor_alocado_vinculo(item)
+            for item in vinculos
+        ),
+        Decimal('0.00'),
+    )
+    chave_nfse = (
+        str(conciliacao.numero_nfse),
+        _normalize_cnpj(conciliacao.cnpj_convenio),
+    )
+    valor_utilizado_nfse = _valores_utilizados_nfse(session).get(
+        chave_nfse,
+        Decimal('0.00'),
+    )
+    saldo_editavel_nfse = max(
+        _money(conciliacao.valor_nfse)
+        - max(valor_utilizado_nfse - valor_atual_nfse, Decimal('0.00')),
+        Decimal('0.00'),
+    )
+    if valor_novo_nfse > saldo_editavel_nfse:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A soma dos valores recebidos excede o saldo disponivel '
+                f'da NFS-e ({_valor_reais_mensagem(saldo_editavel_nfse)}).'
+            ),
+        )
+
+    codigos = set(ajustes)
+    resumos = _resumos_remessas(session, codigos)
+    valores_acatados = _valores_acatados_por_remessa(session, codigos)
+    recursos_abertos = _recursos_abertos_por_remessa(session, codigos)
+    registros_por_vinculo: dict[int, list[RegistroGlosa]] = {
+        item.id: [] for item in vinculos if item.cd_remessa in ajustes
+    }
+    if registros_por_vinculo:
+        for registro in session.scalars(
+            select(RegistroGlosa).where(
+                RegistroGlosa.conciliacao_remessa_id.in_(
+                    registros_por_vinculo
+                )
+            )
+        ):
+            registros_por_vinculo[registro.conciliacao_remessa_id].append(
+                registro
+            )
+
+    codigos_carregar_itens = set()
+    for cd_remessa, ajuste in ajustes.items():
+        vinculo = vinculos_por_remessa[cd_remessa]
+        valor_recebido = _money(ajuste.valor_recebido)
+        valor_glosado = _money(ajuste.valor_glosado)
+        valor_atual = _valor_alocado_vinculo(vinculo) + _money(
+            vinculo.valor_glosado
+        )
+        remessa = session.get(RemessaFinanceira, cd_remessa)
+        if remessa is None:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail=(
+                    f'A remessa {cd_remessa} nao possui controle financeiro.'
+                ),
+            )
+        posicao = _posicao_remessa(
+            {
+                'cd_remessa': cd_remessa,
+                'convenio': remessa.convenio,
+                'cnpj_convenio': remessa.cnpj_convenio,
+                'valor_total': remessa.valor_total,
+                'data_competencia': remessa.data_competencia,
+            },
+            resumos.get(cd_remessa),
+            valores_acatados.get(cd_remessa, Decimal('0.00')),
+            recursos_abertos.get(cd_remessa, Decimal('0.00')),
+        )
+        limite = valor_atual + _money(
+            posicao['valor_disponivel_conciliacao']
+        )
+        if valor_recebido + valor_glosado > limite:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail=(
+                    f'A soma do valor recebido e da glosa da remessa '
+                    f'{cd_remessa} excede o saldo disponivel '
+                    f'({_valor_reais_mensagem(limite)}).'
+                ),
+            )
+        if valor_glosado != _money(vinculo.valor_glosado):
+            registros = registros_por_vinculo[vinculo.id]
+            if any(
+                registro.processo_recurso
+                or registro.dt_recurso is not None
+                or registro.valor_recursado is not None
+                or registro.sn_glosado == 'not'
+                or registro.valor_recebido is not None
+                for registro in registros
+            ):
+                raise HTTPException(
+                    status_code=HTTPStatus.CONFLICT,
+                    detail=(
+                        f'A glosa da remessa {cd_remessa} ja possui '
+                        'tratamento e nao pode ser alterada.'
+                    ),
+                )
+            if valor_glosado > 0 and not registros:
+                codigos_carregar_itens.add(cd_remessa)
+
+    itens_por_remessa = _carregar_itens_glosa_conciliacao(
+        session_oracle,
+        conciliacao.cnpj_convenio,
+        codigos_carregar_itens,
+    )
+    for cd_remessa, ajuste in ajustes.items():
+        vinculo = vinculos_por_remessa[cd_remessa]
+        valor_recebido = _money(ajuste.valor_recebido)
+        valor_glosado = _money(ajuste.valor_glosado)
+        valor_glosado_anterior = _money(vinculo.valor_glosado)
+        vinculo.valor_alocado_nfse = valor_recebido
+        vinculo.valor_glosado = valor_glosado
+        vinculo.valor_total = valor_recebido + valor_glosado
+        vinculo.sn_glosado = 'true' if valor_glosado > 0 else 'not'
+        registros = registros_por_vinculo[vinculo.id]
+        glosa_alterada = valor_glosado != valor_glosado_anterior
+        if glosa_alterada and valor_glosado <= 0:
+            for registro in registros:
+                registro.sn_ativo = 'not'
+        elif glosa_alterada and registros:
+            for registro in registros:
+                registro.sn_ativo = 'true'
+                registro.sn_glosado = 'true'
+                registro.processo_controle_fatura_gab = (
+                    payload.processo_recebimento
+                    or conciliacao.processo_recebimento
+                )
+        elif glosa_alterada:
+            _registrar_itens_glosa_conciliacao(
+                session,
+                conciliacao,
+                vinculo,
+                itens_por_remessa[cd_remessa],
+            )
+        elif payload.processo_recebimento is not None:
+            for registro in registros:
+                registro.processo_controle_fatura_gab = (
+                    payload.processo_recebimento
+                )
+
+
+def _auditorias_linha_tempo_conciliacoes(
+    session: Session,
+    conciliacoes: list[ConciliacaoFaturamento],
+    vinculos_por_conciliacao: dict[
+        int, list[ConciliacaoFaturamentoRemessa]
+    ],
+) -> tuple[
+    list[AuditoriaConciliacaoFaturamento],
+    dict[int, list[AuditoriaConciliacaoFaturamento]],
+]:
+    if not conciliacoes:
+        return [], {}
+    ids = {conciliacao.id for conciliacao in conciliacoes}
+    hashes_por_conciliacao = {
+        conciliacao.id: conciliacao.nfse_row_hash
+        for conciliacao in conciliacoes
+    }
+    codigos_por_conciliacao = {
+        conciliacao_id: {
+            vinculo.cd_remessa
+            for vinculo in vinculos_por_conciliacao[conciliacao_id]
+        }
+        for conciliacao_id in ids
+    }
+    hashes = set(hashes_por_conciliacao.values())
+    codigos = {
+        codigo
+        for codigos_conciliacao in codigos_por_conciliacao.values()
+        for codigo in codigos_conciliacao
+    }
+    ids_por_vinculo = {}
+    if hashes and codigos:
+        for nfse_row_hash, cd_remessa, conciliacao_id in session.execute(
+            select(
+                ConciliacaoFaturamento.nfse_row_hash,
+                ConciliacaoFaturamentoRemessa.cd_remessa,
+                ConciliacaoFaturamento.id,
+            )
+            .join(
+                ConciliacaoFaturamentoRemessa,
+                ConciliacaoFaturamentoRemessa.conciliacao_id
+                == ConciliacaoFaturamento.id,
+            )
+            .where(
+                ConciliacaoFaturamento.nfse_row_hash.in_(hashes),
+                ConciliacaoFaturamentoRemessa.cd_remessa.in_(codigos),
+            )
+        ):
+            ids_por_vinculo.setdefault((nfse_row_hash, cd_remessa), set()).add(
+                conciliacao_id
+            )
+    ids_historico_por_conciliacao = {
+        conciliacao_id: {conciliacao_id} for conciliacao_id in ids
+    }
+    for conciliacao_id in ids:
+        nfse_row_hash = hashes_por_conciliacao[conciliacao_id]
+        for cd_remessa in codigos_por_conciliacao[conciliacao_id]:
+            ids_historico_por_conciliacao[conciliacao_id].update(
+                ids_por_vinculo.get((nfse_row_hash, cd_remessa), set())
+            )
+
+    ids_auditoria = {
+        historico_id
+        for ids_historico in ids_historico_por_conciliacao.values()
+        for historico_id in ids_historico
+    }
+    auditorias = list(
+        session.scalars(
+            select(AuditoriaConciliacaoFaturamento)
+            .where(
+                AuditoriaConciliacaoFaturamento.conciliacao_id.in_(
+                    ids_auditoria
+                )
+            )
+            .order_by(
+                AuditoriaConciliacaoFaturamento.data_operacao.desc(),
+                AuditoriaConciliacaoFaturamento.id.desc(),
+            )
+        )
+    )
+    return auditorias, {
+        conciliacao_id: [
+            auditoria
+            for auditoria in auditorias
+            if auditoria.conciliacao_id in ids_historico
+        ]
+        for conciliacao_id, ids_historico in (
+            ids_historico_por_conciliacao.items()
+        )
+    }
+
+
 @router.get(
     '/conciliacao-faturamento/conciliacoes',
     status_code=HTTPStatus.OK,
     response_model=ConciliacoesGerenciamentoList,
 )
-def consultar_conciliacoes_faturamento(  # noqa: PLR0913
+def consultar_conciliacoes_faturamento(  # noqa: PLR0913, PLR0915
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
     q: str | None = Query(default=None, max_length=100),
@@ -2998,117 +3294,194 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913
         select(RecebimentoRemessa.id)
         .where(
             RecebimentoRemessa.conciliacao_id
-            == ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+            RecebimentoRemessa.cd_remessa
+            == ConciliacaoFaturamentoRemessa.cd_remessa,
         )
         .exists()
     )
-    filters = []
+    matching_filters = []
     if not incluir_inativas:
-        filters.append(ConciliacaoFaturamento.ativo.is_(True))
+        matching_filters.append(ConciliacaoFaturamento.ativo.is_(True))
     termo = (q or '').strip()
     if termo:
         pattern = f'%{termo}%'
-        remessa_correspondente = (
-            select(ConciliacaoFaturamentoRemessa.id)
-            .where(
-                ConciliacaoFaturamentoRemessa.conciliacao_id
-                == ConciliacaoFaturamento.id,
-                cast(ConciliacaoFaturamentoRemessa.cd_remessa, String).ilike(
-                    pattern
-                ),
-            )
-            .exists()
-        )
-        filters.append(
+        matching_filters.append(
             or_(
                 ConciliacaoFaturamento.numero_nfse.ilike(pattern),
                 ConciliacaoFaturamento.convenio.ilike(pattern),
                 ConciliacaoFaturamento.cnpj_convenio.ilike(pattern),
                 ConciliacaoFaturamento.processo_recebimento.ilike(pattern),
-                remessa_correspondente,
+                cast(
+                    ConciliacaoFaturamentoRemessa.cd_remessa,
+                    String,
+                ).ilike(pattern),
             )
         )
+    remessas_correspondentes = (
+        select(ConciliacaoFaturamentoRemessa.cd_remessa)
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .where(*matching_filters)
+        .distinct()
+    )
+    detail_filters = [
+        ConciliacaoFaturamentoRemessa.cd_remessa.in_(
+            remessas_correspondentes
+        )
+    ]
+    if not incluir_inativas:
+        detail_filters.append(ConciliacaoFaturamento.ativo.is_(True))
+    remessas_agrupadas = (
+        select(
+            ConciliacaoFaturamentoRemessa.cd_remessa.label('cd_remessa'),
+            func.max(ConciliacaoFaturamento.data_criacao).label(
+                'ultima_conciliacao'
+            ),
+            func.max(
+                case(
+                    (ConciliacaoFaturamento.ativo.is_(True), 1),
+                    else_=0,
+                )
+            ).label('ativa'),
+            func.max(case((recebimento_existe, 1), else_=0)).label(
+                'recebida'
+            ),
+        )
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .where(*detail_filters)
+        .group_by(ConciliacaoFaturamentoRemessa.cd_remessa)
+        .subquery()
+    )
+    remessas_filtradas = select(remessas_agrupadas)
     if situacao == 'recebido':
-        filters.append(recebimento_existe)
+        remessas_filtradas = remessas_filtradas.where(
+            remessas_agrupadas.c.recebida == 1
+        )
     elif situacao == 'sem_recebimento':
-        filters.append(~recebimento_existe)
-
+        remessas_filtradas = remessas_filtradas.where(
+            remessas_agrupadas.c.recebida == 0
+        )
+    remessas_filtradas = remessas_filtradas.subquery()
     summary = session.execute(
         select(
-            func.count(ConciliacaoFaturamento.id),
+            func.count(remessas_filtradas.c.cd_remessa),
+            func.sum(remessas_filtradas.c.ativa),
+            func.sum(case((remessas_filtradas.c.ativa == 0, 1), else_=0)),
+            func.sum(remessas_filtradas.c.recebida),
             func.sum(
-                case((ConciliacaoFaturamento.ativo.is_(True), 1), else_=0)
-            ),
-            func.sum(
-                case((ConciliacaoFaturamento.ativo.is_(False), 1), else_=0)
-            ),
-            func.sum(case((recebimento_existe, 1), else_=0)),
-            func.sum(case((~recebimento_existe, 1), else_=0)),
-        ).where(*filters)
+                case((remessas_filtradas.c.recebida == 0, 1), else_=0)
+            )
+        ).select_from(remessas_filtradas)
     ).one()
     total, total_ativas, total_inativas, total_recebidas, total_pendentes = (
         int(value or 0) for value in summary
     )
-    conciliacoes = list(
+    codigos_remessa = list(
         session.scalars(
-            select(ConciliacaoFaturamento)
-            .where(*filters)
+            select(remessas_filtradas.c.cd_remessa)
             .order_by(
-                ConciliacaoFaturamento.data_criacao.desc(),
-                ConciliacaoFaturamento.id.desc(),
+                remessas_filtradas.c.ultima_conciliacao.desc(),
+                remessas_filtradas.c.cd_remessa.desc(),
             )
             .offset(offset)
             .limit(limit)
         )
     )
-    ids = {conciliacao.id for conciliacao in conciliacoes}
+    if not codigos_remessa:
+        return {
+            'conciliacoes': [],
+            'total': total,
+            'total_ativas': total_ativas,
+            'total_inativas': total_inativas,
+            'total_recebidas': total_recebidas,
+            'total_sem_recebimento': total_pendentes,
+            'limit': limit,
+            'offset': offset,
+        }
+
+    rows = session.execute(
+        select(
+            ConciliacaoFaturamentoRemessa,
+            ConciliacaoFaturamento,
+        )
+        .join(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamento.id
+            == ConciliacaoFaturamentoRemessa.conciliacao_id,
+        )
+        .where(
+            ConciliacaoFaturamentoRemessa.cd_remessa.in_(codigos_remessa),
+            *(
+                [ConciliacaoFaturamento.ativo.is_(True)]
+                if not incluir_inativas
+                else []
+            ),
+        )
+        .order_by(
+            ConciliacaoFaturamentoRemessa.cd_remessa,
+            ConciliacaoFaturamento.data_criacao.desc(),
+            ConciliacaoFaturamento.id.desc(),
+        )
+    ).all()
+    vinculos = [row[0] for row in rows]
+    conciliacoes_por_id = {row[1].id: row[1] for row in rows}
+    conciliacoes = list(conciliacoes_por_id.values())
+    ids = set(conciliacoes_por_id)
     vinculos_por_conciliacao = {conciliacao_id: [] for conciliacao_id in ids}
-    recebimentos_por_conciliacao = {
-        conciliacao_id: [] for conciliacao_id in ids
-    }
-    auditorias_por_conciliacao = {
-        conciliacao_id: [] for conciliacao_id in ids
-    }
-    vinculos = []
-    recebimentos = []
-    auditorias = []
-    if ids:
-        vinculos = list(
-            session.scalars(
-                select(ConciliacaoFaturamentoRemessa)
-                .where(
-                    ConciliacaoFaturamentoRemessa.conciliacao_id.in_(ids)
-                )
-                .order_by(ConciliacaoFaturamentoRemessa.cd_remessa)
-            )
-        )
-        recebimentos = list(
-            session.scalars(
-                select(RecebimentoRemessa)
-                .where(RecebimentoRemessa.conciliacao_id.in_(ids))
-                .order_by(RecebimentoRemessa.data_registro)
-            )
-        )
-        auditorias = list(
-            session.scalars(
-                select(AuditoriaConciliacaoFaturamento)
-                .where(
-                    AuditoriaConciliacaoFaturamento.conciliacao_id.in_(ids)
-                )
-                .order_by(
-                    AuditoriaConciliacaoFaturamento.data_operacao.desc(),
-                    AuditoriaConciliacaoFaturamento.id.desc(),
-                )
-            )
-        )
+    vinculos_por_remessa = {codigo: [] for codigo in codigos_remessa}
     for vinculo in vinculos:
         vinculos_por_conciliacao[vinculo.conciliacao_id].append(vinculo)
-    for recebimento in recebimentos:
-        recebimentos_por_conciliacao[recebimento.conciliacao_id].append(
-            recebimento
+        vinculos_por_remessa[vinculo.cd_remessa].append(vinculo)
+
+    recebimentos = list(
+        session.scalars(
+            select(RecebimentoRemessa)
+            .where(
+                RecebimentoRemessa.conciliacao_id.in_(ids),
+                RecebimentoRemessa.cd_remessa.in_(codigos_remessa),
+            )
+            .order_by(RecebimentoRemessa.data_registro)
         )
-    for auditoria in auditorias:
-        auditorias_por_conciliacao[auditoria.conciliacao_id].append(auditoria)
+    )
+    recebimentos_por_vinculo = {}
+    for recebimento in recebimentos:
+        recebimentos_por_vinculo.setdefault(
+            (recebimento.conciliacao_id, recebimento.cd_remessa),
+            [],
+        ).append(recebimento)
+
+    remessas = {
+        remessa.cd_remessa: remessa
+        for remessa in session.scalars(
+            select(RemessaFinanceira).where(
+                RemessaFinanceira.cd_remessa.in_(codigos_remessa)
+            )
+        )
+    }
+    processos = {
+        processo.cd_remessa: processo
+        for processo in session.scalars(
+            select(ProcessoConciliacaoRemessa).where(
+                ProcessoConciliacaoRemessa.cd_remessa.in_(codigos_remessa)
+            )
+        )
+    }
+
+    auditorias, auditorias_por_conciliacao = (
+        _auditorias_linha_tempo_conciliacoes(
+            session,
+            conciliacoes,
+            vinculos_por_conciliacao,
+        )
+    )
 
     usuarios_ids = {
         usuario_id
@@ -3130,83 +3503,156 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913
     }
 
     cards = []
-    for conciliacao in conciliacoes:
-        vinculos_conciliacao = vinculos_por_conciliacao[conciliacao.id]
-        recebimentos_conciliacao = recebimentos_por_conciliacao[
-            conciliacao.id
+    for cd_remessa in codigos_remessa:
+        vinculos_remessa = vinculos_por_remessa[cd_remessa]
+        notas = []
+        auditorias_remessa = {}
+        for vinculo in vinculos_remessa:
+            conciliacao = conciliacoes_por_id[vinculo.conciliacao_id]
+            recebimentos_vinculo = recebimentos_por_vinculo.get(
+                (conciliacao.id, cd_remessa),
+                [],
+            )
+            notas.append(
+                {
+                    'id': conciliacao.id,
+                    'numero_nfse': conciliacao.numero_nfse,
+                    'tipo_conciliacao': vinculo.tp_conciliacao,
+                    'valor_nfse': _money(conciliacao.valor_nfse),
+                    'valor_vinculado_remessa': _money(vinculo.valor_total),
+                    'valor_alocado_nfse': _valor_alocado_vinculo(vinculo),
+                    'valor_glosado': _money(vinculo.valor_glosado),
+                    'data_previsao_recebimento': (
+                        conciliacao.data_previsao_recebimento
+                    ),
+                    'data_recebimento': conciliacao.data_recebimento,
+                    'data_criacao': conciliacao.data_criacao,
+                    'data_atualizacao': conciliacao.data_atualizacao,
+                    'data_inativacao': conciliacao.data_inativacao,
+                    'ativo': conciliacao.ativo,
+                    'situacao_recebimento': (
+                        'recebido'
+                        if recebimentos_vinculo
+                        else 'sem_recebimento'
+                    ),
+                    'usuario_criacao': _usuario_operacao_publico(
+                        usuarios.get(conciliacao.usuario_id)
+                    ),
+                    'usuario_atualizacao': _usuario_operacao_publico(
+                        usuarios.get(conciliacao.usuario_atualizacao_id)
+                    ),
+                    'usuario_inativacao': _usuario_operacao_publico(
+                        usuarios.get(conciliacao.usuario_inativacao_id)
+                    ),
+                    'recebimentos': [
+                        {
+                            'id': recebimento.id,
+                            'cd_remessa': recebimento.cd_remessa,
+                            'data_recebimento': (
+                                recebimento.data_recebimento
+                            ),
+                            'valor_recebido': _money(
+                                recebimento.valor_recebido
+                            ),
+                            'conta_bancaria_id': (
+                                recebimento.conta_bancaria_id
+                            ),
+                            'conta_plano_contas': (
+                                recebimento.conta_plano_contas
+                            ),
+                            'conta_centro_custo': (
+                                recebimento.conta_centro_custo
+                            ),
+                            'lancamento_extrato_id': (
+                                recebimento.lancamento_extrato_id
+                            ),
+                            'data_registro': recebimento.data_registro,
+                            'usuario': _usuario_operacao_publico(
+                                usuarios.get(recebimento.usuario_id)
+                            ),
+                        }
+                        for recebimento in recebimentos_vinculo
+                    ],
+                }
+            )
+            for auditoria in auditorias_por_conciliacao[conciliacao.id]:
+                auditorias_remessa[auditoria.id] = auditoria
+        remessa = remessas.get(cd_remessa)
+        ultima_conciliacao = conciliacoes_por_id[
+            vinculos_remessa[0].conciliacao_id
         ]
+        recebimentos_remessa = [
+            recebimento
+            for recebimento in recebimentos
+            if recebimento.cd_remessa == cd_remessa
+        ]
+        eventos = sorted(
+            auditorias_remessa.values(),
+            key=lambda auditoria: (
+                auditoria.data_operacao,
+                auditoria.id,
+            ),
+            reverse=True,
+        )
         cards.append(
             {
-                'id': conciliacao.id,
-                'numero_nfse': conciliacao.numero_nfse,
-                'convenio': conciliacao.convenio,
-                'cnpj_convenio': conciliacao.cnpj_convenio,
-                'processo_recebimento': conciliacao.processo_recebimento,
-                'data_previsao_recebimento': (
-                    conciliacao.data_previsao_recebimento
+                'cd_remessa': cd_remessa,
+                'convenio': (
+                    remessa.convenio
+                    if remessa is not None
+                    else ultima_conciliacao.convenio
                 ),
-                'data_recebimento': conciliacao.data_recebimento,
-                'data_criacao': conciliacao.data_criacao,
-                'data_atualizacao': conciliacao.data_atualizacao,
-                'data_inativacao': conciliacao.data_inativacao,
-                'valor_nfse': _money(conciliacao.valor_nfse),
-                'ativo': conciliacao.ativo,
+                'cnpj_convenio': (
+                    remessa.cnpj_convenio
+                    if remessa is not None
+                    else ultima_conciliacao.cnpj_convenio
+                ),
+                'processo_recebimento': (
+                    processos[cd_remessa].processo_recebimento
+                    if cd_remessa in processos
+                    else ultima_conciliacao.processo_recebimento
+                ),
+                'data_competencia': (
+                    remessa.data_competencia if remessa is not None else None
+                ),
+                'valor_remessa': (
+                    _money(remessa.valor_total)
+                    if remessa is not None
+                    else sum(
+                        (
+                            _money(vinculo.valor_total)
+                            for vinculo in vinculos_remessa
+                        ),
+                        Decimal('0.00'),
+                    )
+                ),
+                'valor_alocado_nfse': sum(
+                    (
+                        _valor_alocado_vinculo(vinculo)
+                        for vinculo in vinculos_remessa
+                        if conciliacoes_por_id[vinculo.conciliacao_id].ativo
+                    ),
+                    Decimal('0.00'),
+                ),
+                'valor_glosado': sum(
+                    (
+                        _money(vinculo.valor_glosado)
+                        for vinculo in vinculos_remessa
+                        if conciliacoes_por_id[vinculo.conciliacao_id].ativo
+                    ),
+                    Decimal('0.00'),
+                ),
+                'ativo': any(nota['ativo'] for nota in notas),
                 'situacao_recebimento': (
                     'recebido'
-                    if recebimentos_conciliacao
+                    if recebimentos_remessa
                     else 'sem_recebimento'
                 ),
-                'usuario_criacao': _usuario_operacao_publico(
-                    usuarios.get(conciliacao.usuario_id)
-                ),
-                'usuario_atualizacao': _usuario_operacao_publico(
-                    usuarios.get(conciliacao.usuario_atualizacao_id)
-                ),
-                'usuario_inativacao': _usuario_operacao_publico(
-                    usuarios.get(conciliacao.usuario_inativacao_id)
-                ),
-                'remessas': [
-                    {
-                        'cd_remessa': vinculo.cd_remessa,
-                        'tipo_conciliacao': vinculo.tp_conciliacao,
-                        'valor_remessa': _money(vinculo.valor_total),
-                        'valor_alocado_nfse': _valor_alocado_vinculo(
-                            vinculo
-                        ),
-                        'valor_glosado': _money(vinculo.valor_glosado),
-                    }
-                    for vinculo in vinculos_conciliacao
-                ],
-                'recebimentos': [
-                    {
-                        'id': recebimento.id,
-                        'cd_remessa': recebimento.cd_remessa,
-                        'data_recebimento': recebimento.data_recebimento,
-                        'valor_recebido': _money(
-                            recebimento.valor_recebido
-                        ),
-                        'conta_bancaria_id': (
-                            recebimento.conta_bancaria_id
-                        ),
-                        'conta_plano_contas': (
-                            recebimento.conta_plano_contas
-                        ),
-                        'conta_centro_custo': (
-                            recebimento.conta_centro_custo
-                        ),
-                        'lancamento_extrato_id': (
-                            recebimento.lancamento_extrato_id
-                        ),
-                        'data_registro': recebimento.data_registro,
-                        'usuario': _usuario_operacao_publico(
-                            usuarios.get(recebimento.usuario_id)
-                        ),
-                    }
-                    for recebimento in recebimentos_conciliacao
-                ],
+                'notas': notas,
                 'auditoria': [
                     {
                         'id': auditoria.id,
+                        'conciliacao_origem_id': auditoria.conciliacao_id,
                         'acao': auditoria.acao,
                         'usuario': _usuario_operacao_publico(
                             usuarios.get(auditoria.usuario_id)
@@ -3215,9 +3661,7 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913
                         'dados_novos': auditoria.dados_novos,
                         'data_operacao': auditoria.data_operacao,
                     }
-                    for auditoria in auditorias_por_conciliacao[
-                        conciliacao.id
-                    ]
+                    for auditoria in eventos
                 ],
             }
         )
@@ -3243,6 +3687,7 @@ def editar_conciliacao_faturamento(
     payload: ConciliacaoFaturamentoUpdate,
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
 ):
     conciliacao = session.scalar(
         select(ConciliacaoFaturamento)
@@ -3315,9 +3760,21 @@ def editar_conciliacao_faturamento(
                 processo.data_atualizacao = agora
 
     snapshots_anteriores = {
-        item.id: _snapshot_conciliacao(item)
+        item.id: _snapshot_conciliacao(
+            item,
+            vinculos_alvo if item.id == conciliacao.id else None,
+        )
         for item in conciliacoes_afetadas.values()
     }
+    if payload.processo_recebimento is not None:
+        conciliacao.processo_recebimento = payload.processo_recebimento
+    _atualizar_valores_conciliacao(
+        session,
+        session_oracle,
+        conciliacao,
+        vinculos_alvo,
+        payload,
+    )
     if payload.data_previsao_recebimento is not None:
         conciliacao.data_previsao_recebimento = (
             payload.data_previsao_recebimento
@@ -3333,7 +3790,10 @@ def editar_conciliacao_faturamento(
             'edicao',
             usuario_atual.id,
             dados_anteriores=snapshots_anteriores[item.id],
-            dados_novos=_snapshot_conciliacao(item),
+            dados_novos=_snapshot_conciliacao(
+                item,
+                vinculos_alvo if item.id == conciliacao.id else None,
+            ),
         )
     session.commit()
     session.refresh(conciliacao)

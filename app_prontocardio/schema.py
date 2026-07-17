@@ -555,9 +555,16 @@ class ConciliacaoRemessaPublic(BaseModel):
     message: str
 
 
+class ValorConciliacaoRemessaUpdate(BaseModel):
+    cd_remessa: int = Field(gt=0)
+    valor_glosado: Decimal = Field(ge=0)
+    valor_recebido: Decimal = Field(gt=0)
+
+
 class ConciliacaoFaturamentoUpdate(BaseModel):
     processo_recebimento: str | None = Field(default=None, max_length=255)
     data_previsao_recebimento: date | None = None
+    remessas: list[ValorConciliacaoRemessaUpdate] | None = None
 
     @field_validator('processo_recebimento', mode='before')
     @classmethod
@@ -574,8 +581,15 @@ class ConciliacaoFaturamentoUpdate(BaseModel):
         if (
             self.processo_recebimento is None
             and self.data_previsao_recebimento is None
+            and not self.remessas
         ):
             raise ValueError('Informe ao menos um campo para atualizar.')
+        if self.remessas:
+            codigos = [item.cd_remessa for item in self.remessas]
+            if len(codigos) != len(set(codigos)):
+                raise ValueError(
+                    'Uma remessa nao pode ser informada mais de uma vez.'
+                )
         return self
 
 
@@ -587,6 +601,7 @@ class UsuarioOperacaoFinanceiraPublic(BaseModel):
 
 class AuditoriaConciliacaoPublic(BaseModel):
     id: int
+    conciliacao_origem_id: int
     acao: str
     usuario: UsuarioOperacaoFinanceiraPublic
     dados_anteriores: dict | None = None
@@ -607,20 +622,14 @@ class RecebimentoConciliacaoPublic(BaseModel):
     usuario: UsuarioOperacaoFinanceiraPublic
 
 
-class RemessaConciliacaoHistoricoPublic(BaseModel):
-    cd_remessa: int
-    tipo_conciliacao: str
-    valor_remessa: Decimal
-    valor_alocado_nfse: Decimal
-    valor_glosado: Decimal
-
-
-class ConciliacaoGerenciamentoPublic(BaseModel):
+class NotaFiscalConciliacaoHistoricoPublic(BaseModel):
     id: int
     numero_nfse: str
-    convenio: str
-    cnpj_convenio: str
-    processo_recebimento: str
+    tipo_conciliacao: str
+    valor_nfse: Decimal
+    valor_vinculado_remessa: Decimal
+    valor_alocado_nfse: Decimal
+    valor_glosado: Decimal
     data_previsao_recebimento: date
     data_recebimento: date | None = None
     data_criacao: datetime
@@ -632,8 +641,21 @@ class ConciliacaoGerenciamentoPublic(BaseModel):
     usuario_criacao: UsuarioOperacaoFinanceiraPublic
     usuario_atualizacao: UsuarioOperacaoFinanceiraPublic | None = None
     usuario_inativacao: UsuarioOperacaoFinanceiraPublic | None = None
-    remessas: list[RemessaConciliacaoHistoricoPublic]
     recebimentos: list[RecebimentoConciliacaoPublic]
+
+
+class ConciliacaoGerenciamentoPublic(BaseModel):
+    cd_remessa: int
+    convenio: str
+    cnpj_convenio: str
+    processo_recebimento: str
+    data_competencia: date | None = None
+    valor_remessa: Decimal
+    valor_alocado_nfse: Decimal
+    valor_glosado: Decimal
+    ativo: bool
+    situacao_recebimento: str
+    notas: list[NotaFiscalConciliacaoHistoricoPublic]
     auditoria: list[AuditoriaConciliacaoPublic]
 
 

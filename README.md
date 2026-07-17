@@ -108,7 +108,7 @@ Exemplo de resposta:
 A tela foi invertida para representar o fluxo operacional correto: a
 **remessa MV** e o registro principal e as **NFS-e emitidas** sao alocadas
 dentro dela. O card permanece na lista enquanto houver valor nao conciliado,
-inclusive quando uma glosa depende de tratamento ou de recurso.
+inclusive quando esse saldo estiver classificado como glosa pendente.
 
 ```mermaid
 flowchart TD
@@ -176,9 +176,14 @@ A posicao exibida no card da remessa e calculada por:
 
 ```text
 valor_conciliado = SUM(valor_alocado_nfse)
-valor_nao_conciliado = valor_total_remessa
-                       - valor_conciliado
-                       - valor_acatado
+saldo_base = MAX(valor_total_remessa
+                 - SUM(valor_alocado_nfse)
+                 - SUM(valor_glosado)
+                 - valor_acatado, 0)
+glosa_pendente = MAX(SUM(valor_glosado)
+                     - valor_recurso_consumido
+                     - valor_acatado, 0)
+valor_nao_conciliado = MAX(saldo_base, glosa_pendente)
 ```
 
 - O valor alocado deve ser maior que zero e menor ou igual ao saldo atual da
@@ -186,15 +191,18 @@ valor_nao_conciliado = valor_total_remessa
 - A soma de `valor_alocado_nfse + valor_glosado` da operacao nao pode
   ultrapassar o valor disponivel da remessa.
 - A glosa nao consome saldo da NFS-e, pois representa um valor contestado e
-  ainda nao recebido. Ela mantem a remessa aberta e cria itens analiticos no
-  follow-up de glosas.
-- Uma glosa ainda nao tratada bloqueia uma nova conciliacao apenas na parcela
-  glosada. Se houver uma parcela livre da remessa, ela continua disponivel.
-- O acato reconhece a perda e reduz o valor nao conciliado sem criar
-  recebimento.
+  ainda nao recebido. Ela classifica uma parte do saldo nao conciliado e cria
+  itens analiticos no follow-up, mas nao e somada novamente ao saldo da
+  remessa.
+- Uma glosa ainda nao tratada permanece no valor nao conciliado, mas nao fica
+  disponivel para outra NFS-e ate possuir recurso. Eventual parcela livre
+  continua disponivel separadamente.
+- O acato reconhece a perda sem criar recebimento e reduz tanto a glosa
+  pendente quanto o saldo da remessa.
 - O recurso exige processo, data, quantidade e valor recursado em
   `registros_glosa`. Somente o saldo recursado ativo, sem pagamento e ainda
-  nao consumido pode ser associado a uma nova NFS-e.
+  nao consumido torna a parcela glosada disponivel para uma nova NFS-e, sem
+  soma-la novamente ao valor nao conciliado.
 - Quando uma conciliacao de recurso sofre nova glosa, a nova parcela volta ao
   follow-up e somente podera receber outra NFS-e depois de novo recurso.
 
@@ -222,27 +230,35 @@ Depois do registro, os dados bancarios sao atualizados em
 `recebimentos_remessas` e a NFS-e deixa a fila.
 
 Enquanto nao existir recebimento bancario, o follow-up tambem permite editar
-o processo e a previsao ou inativar a conciliacao. A inativacao e logica:
-libera os saldos da remessa e da NFS-e, preserva o registro original e inativa
-os itens de glosa vinculados.
+o processo, a previsao, o valor recebido e o valor glosado de cada remessa ou
+inativar a conciliacao. A alteracao dos valores respeita os saldos da remessa
+e da NFS-e e nao permite modificar glosas que ja tenham tratamento ou recurso.
+A inativacao e logica: libera os saldos da remessa e da NFS-e, preserva o
+registro original e inativa os itens de glosa vinculados.
 
 ### Consulta e auditoria das conciliacoes
 
 O submenu **Consultar conciliacoes** pesquisa por NFS-e, remessa, convenio,
 CNPJ ou processo e permite filtrar conciliacoes recebidas, pendentes e
-inativas. Cada card apresenta os dados da conciliacao, remessas, recebimentos
-bancarios e o historico de operacoes.
+inativas. Os cards sao agrupados por remessa e apresentam internamente todas
+as NFS-e vinculadas, seus valores, recebimentos bancarios e o historico de
+operacoes. A paginacao e os totais tambem consideram remessas, evitando que
+uma remessa com mais de uma nota seja contabilizada mais de uma vez.
 
 Criacao, edicao, registro de recebimento e inativacao mantem o usuario e a
 data da operacao. As alteracoes tambem sao registradas em
 `auditorias_conciliacao_faturamento`, com os estados anterior e posterior.
+Quando um vinculo entre a mesma NFS-e e remessa e inativado e posteriormente
+recriado, a consulta reune os eventos dos registros em uma unica linha do
+tempo e identifica os eventos originados no vinculo anterior.
 
 ### Cache e paginacao
 
 As listagens financeiras usam o mesmo cache curto por rota e filtros da
 Triagem, compartilhado entre os workers do frontend e invalidado apos cada
-mutacao. A pagina principal consulta 25 remessas por vez. No Oracle, total e
-pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`.
+mutacao. A consulta de auditoria nao usa cache para refletir imediatamente as
+operacoes. A pagina principal consulta 25 remessas por vez. No Oracle, total
+e pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`.
 
 ### Endpoints do fluxo
 
