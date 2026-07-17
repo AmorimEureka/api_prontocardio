@@ -622,20 +622,14 @@ class RecebimentoConciliacaoPublic(BaseModel):
     usuario: UsuarioOperacaoFinanceiraPublic
 
 
-class RemessaConciliacaoHistoricoPublic(BaseModel):
-    cd_remessa: int
-    tipo_conciliacao: str
-    valor_remessa: Decimal
-    valor_alocado_nfse: Decimal
-    valor_glosado: Decimal
-
-
-class ConciliacaoGerenciamentoPublic(BaseModel):
+class NotaFiscalConciliacaoHistoricoPublic(BaseModel):
     id: int
     numero_nfse: str
-    convenio: str
-    cnpj_convenio: str
-    processo_recebimento: str
+    tipo_conciliacao: str
+    valor_nfse: Decimal
+    valor_vinculado_remessa: Decimal
+    valor_alocado_nfse: Decimal
+    valor_glosado: Decimal
     data_previsao_recebimento: date
     data_recebimento: date | None = None
     data_criacao: datetime
@@ -647,8 +641,21 @@ class ConciliacaoGerenciamentoPublic(BaseModel):
     usuario_criacao: UsuarioOperacaoFinanceiraPublic
     usuario_atualizacao: UsuarioOperacaoFinanceiraPublic | None = None
     usuario_inativacao: UsuarioOperacaoFinanceiraPublic | None = None
-    remessas: list[RemessaConciliacaoHistoricoPublic]
     recebimentos: list[RecebimentoConciliacaoPublic]
+
+
+class ConciliacaoGerenciamentoPublic(BaseModel):
+    cd_remessa: int
+    convenio: str
+    cnpj_convenio: str
+    processo_recebimento: str
+    data_competencia: date | None = None
+    valor_remessa: Decimal
+    valor_alocado_nfse: Decimal
+    valor_glosado: Decimal
+    ativo: bool
+    situacao_recebimento: str
+    notas: list[NotaFiscalConciliacaoHistoricoPublic]
     auditoria: list[AuditoriaConciliacaoPublic]
 
 

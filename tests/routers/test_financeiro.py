@@ -26,6 +26,7 @@ from app_prontocardio.schema import (
     ConciliacaoFaturamentoCreate,
     ConciliacaoFaturamentoUpdate,
     ConciliacaoRemessaCreate,
+    ConciliacoesGerenciamentoList,
     RecebimentoRemessaCreate,
     RegistroGlosaCreate,
 )
@@ -1716,10 +1717,11 @@ def test_consulta_gerencial_exibe_conciliacao_recebimento_e_usuarios(
 
     assert response['total'] == 1
     card = response['conciliacoes'][0]
+    nota = card['notas'][0]
+    assert card['cd_remessa'] == CD_REMESSA_TESTE
     assert card['situacao_recebimento'] == 'recebido'
-    assert card['usuario_criacao']['id'] == usuario_teste.id
-    assert card['remessas'][0]['cd_remessa'] == CD_REMESSA_TESTE
-    assert card['recebimentos'][0]['usuario']['id'] == usuario_teste.id
+    assert nota['usuario_criacao']['id'] == usuario_teste.id
+    assert nota['recebimentos'][0]['usuario']['id'] == usuario_teste.id
     assert card['auditoria'][0]['acao'] == 'criacao'
 
 
@@ -1781,7 +1783,8 @@ def test_consulta_gerencial_reune_historico_de_conciliacao_recriada(
 
     assert response['total'] == 1
     card = response['conciliacoes'][0]
-    assert card['id'] != conciliacao_anterior.id
+    assert card['cd_remessa'] == CD_REMESSA_TESTE
+    assert card['notas'][0]['id'] != conciliacao_anterior.id
     assert [evento['acao'] for evento in card['auditoria']] == [
         'criacao',
         'inativacao',
@@ -1789,7 +1792,60 @@ def test_consulta_gerencial_reune_historico_de_conciliacao_recriada(
     ]
     assert {
         evento['conciliacao_origem_id'] for evento in card['auditoria']
-    } == {conciliacao_anterior.id, card['id']}
+    } == {conciliacao_anterior.id, card['notas'][0]['id']}
+
+
+def test_consulta_gerencial_agrupa_notas_por_remessa(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    criar_nfse(
+        session,
+        row_hash='nfse-2',
+        valor='100.00',
+        numero_nfse='67890',
+    )
+    configurar_cards_oracle_fake(monkeypatch)
+    for row_hash, valor in (('nfse-1', '60.00'), ('nfse-2', '50.00')):
+        financeiro.conciliar_remessa_com_nfses(
+            cd_remessa=CD_REMESSA_TESTE,
+            payload=ConciliacaoRemessaCreate(
+                processo_recebimento='PROC-AGRUPADO',
+                notas=[
+                    {
+                        'nfse_row_hash': row_hash,
+                        'valor_alocado': valor,
+                        'data_previsao_recebimento': '2026-08-10',
+                    }
+                ],
+            ),
+            usuario_atual=usuario_teste,
+            session_postgres=session,
+            session_oracle=object(),
+        )
+
+    response = financeiro.consultar_conciliacoes_faturamento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        situacao=None,
+        incluir_inativas=False,
+        limit=25,
+        offset=0,
+    )
+
+    assert response['total'] == 1
+    assert response['total_ativas'] == 1
+    assert response['total_sem_recebimento'] == 1
+    card = response['conciliacoes'][0]
+    assert card['cd_remessa'] == CD_REMESSA_TESTE
+    assert {nota['numero_nfse'] for nota in card['notas']} == {
+        '12345',
+        '67890',
+    }
+    ConciliacoesGerenciamentoList.model_validate(response)
 
 
 def test_nao_inativa_conciliacao_com_recebimento(

@@ -240,8 +240,10 @@ registro original e inativa os itens de glosa vinculados.
 
 O submenu **Consultar conciliacoes** pesquisa por NFS-e, remessa, convenio,
 CNPJ ou processo e permite filtrar conciliacoes recebidas, pendentes e
-inativas. Cada card apresenta os dados da conciliacao, remessas, recebimentos
-bancarios e o historico de operacoes.
+inativas. Os cards sao agrupados por remessa e apresentam internamente todas
+as NFS-e vinculadas, seus valores, recebimentos bancarios e o historico de
+operacoes. A paginacao e os totais tambem consideram remessas, evitando que
+uma remessa com mais de uma nota seja contabilizada mais de uma vez.
 
 Criacao, edicao, registro de recebimento e inativacao mantem o usuario e a
 data da operacao. As alteracoes tambem sao registradas em
