@@ -1198,6 +1198,7 @@ def _registrar_itens_glosa_conciliacao(
             cd_gru_fat=item['cd_gru_fat'],
             ds_gru_fat=item['ds_gru_fat'],
             conciliacao_remessa_id=remessa_conciliada.id,
+            origem_registro='conciliacao',
             sn_glosado='true',
             sn_ativo='true',
         )

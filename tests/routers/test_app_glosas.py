@@ -101,6 +101,21 @@ def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
     assert response.json()['glosas'][0]['sn_ativo'] == 'true'
 
 
+def test_registro_triagem_preserva_contrato_dos_indicadores(
+    session,
+    usuario_teste,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(**registro_glosa_payload()),
+        usuario_teste,
+        session,
+    )
+
+    assert registro.origem_registro == 'triagem'
+    assert registro.status_tratativa == 'recurso'
+    assert registro.valor_indicador == Decimal('12.31')
+
+
 def test_filtra_glosas_de_convenio_desabilitado(session):
     payload = RegistroGlosaCreate(**registro_glosa_payload())
     registro = RegistroGlosa(

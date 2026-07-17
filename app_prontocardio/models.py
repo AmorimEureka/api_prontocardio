@@ -76,6 +76,15 @@ class TokenRedefinicaoSenha:
 class RegistroGlosa:
     __tablename__ = 'registros_glosa'
     __table_args__ = (
+        CheckConstraint(
+            "origem_registro IN ('triagem', 'conciliacao')",
+            name='ck_registros_glosa_origem',
+        ),
+        CheckConstraint(
+            'conciliacao_remessa_id IS NULL OR '
+            "origem_registro = 'conciliacao'",
+            name='ck_registros_glosa_origem_vinculo',
+        ),
         UniqueConstraint(
             'conciliacao_remessa_id',
             'conta',
@@ -166,6 +175,11 @@ class RegistroGlosa:
         ),
         default=None,
     )
+    origem_registro: Mapped[str] = mapped_column(
+        String(20),
+        default='triagem',
+        server_default=text("'triagem'"),
+    )
     sn_glosado: Mapped[str] = mapped_column(String, default='true')
     sn_ativo: Mapped[str] = mapped_column(String, default='true')
     data_criacao: Mapped[datetime] = mapped_column(
@@ -182,7 +196,7 @@ class RegistroGlosa:
     @property
     def valor_glosa_origem(self) -> Decimal | None:
         if self.conciliacao_remessa is None:
-            return None
+            return self.valor_recursado
         return self.conciliacao_remessa.valor_glosado
 
     @property
@@ -200,6 +214,52 @@ class RegistroGlosa:
         )
         return max(
             self.conciliacao_remessa.valor_glosado - valor_alocado,
+            Decimal('0.00'),
+        )
+
+    @property
+    def status_tratativa(self) -> str:
+        if self.processo_recurso is not None and self.dt_recurso is not None:
+            return 'acato' if self.sn_glosado == 'not' else 'recurso'
+        return 'pendente'
+
+    @property
+    def valor_indicador(self) -> Decimal:
+        if self.status_tratativa != 'pendente':
+            return self.valor_recursado or Decimal('0.00')
+        if self.conciliacao_remessa is None:
+            return self.valor_recursado or Decimal('0.00')
+
+        registros_ativos = [
+            registro
+            for registro in self.conciliacao_remessa.registros_glosa
+            if registro.sn_ativo == 'true'
+        ]
+        valor_tratado = sum(
+            (
+                registro.valor_recursado
+                for registro in registros_ativos
+                if registro.processo_recurso is not None
+                and registro.dt_recurso is not None
+                and registro.valor_recursado is not None
+            ),
+            start=Decimal('0.00'),
+        )
+        registros_pendentes = [
+            registro
+            for registro in registros_ativos
+            if registro.processo_recurso is None or registro.dt_recurso is None
+        ]
+        if not registros_pendentes:
+            return Decimal('0.00')
+        primeiro_pendente = min(
+            registros_pendentes,
+            key=lambda registro: registro.id or 0,
+        )
+        if self is not primeiro_pendente:
+            return Decimal('0.00')
+        return max(
+            self.conciliacao_remessa.valor_glosado - valor_tratado,
             Decimal('0.00'),
         )
 

@@ -231,10 +231,13 @@ class RegistroGlosaPublic(BaseModel):
     observacao_recebimento: str | None = None
     sn_glosado: str
     sn_ativo: str
+    origem_registro: str
     data_criacao: datetime
     conciliacao_remessa_id: int | None = None
     valor_glosa_origem: Decimal | None = None
     valor_glosa_pendente: Decimal | None = None
+    status_tratativa: str
+    valor_indicador: Decimal
 
 
 class RegistroGlosas(BaseModel):
