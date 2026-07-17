@@ -5,6 +5,7 @@ from decimal import Decimal
 from enum import Enum
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     Date,
@@ -317,6 +318,27 @@ class ConciliacaoFaturamento:
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
     )
+    ativo: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text('true'),
+    )
+    usuario_atualizacao_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        default=None,
+    )
+    data_atualizacao: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        default=None,
+    )
+    usuario_inativacao_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        default=None,
+    )
+    data_inativacao: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        default=None,
+    )
 
 
 @table_registry.mapped_as_dataclass
@@ -341,6 +363,44 @@ class ProcessoConciliacaoRemessa:
         ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
     )
     data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    usuario_atualizacao_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        default=None,
+    )
+    data_atualizacao: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        default=None,
+    )
+
+
+@table_registry.mapped_as_dataclass
+class AuditoriaConciliacaoFaturamento:
+    __tablename__ = 'auditorias_conciliacao_faturamento'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    conciliacao_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento.id',
+            ondelete='CASCADE',
+        )
+    )
+    acao: Mapped[str] = mapped_column(String(40))
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    dados_anteriores: Mapped[dict | None] = mapped_column(
+        JSON,
+        default=None,
+    )
+    dados_novos: Mapped[dict | None] = mapped_column(
+        JSON,
+        default=None,
+    )
+    data_operacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
     )

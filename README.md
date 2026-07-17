@@ -221,6 +221,29 @@ Depois do registro, os dados bancarios sao atualizados em
 `conciliacoes_faturamento`, o recebimento e gravado em
 `recebimentos_remessas` e a NFS-e deixa a fila.
 
+Enquanto nao existir recebimento bancario, o follow-up tambem permite editar
+o processo e a previsao ou inativar a conciliacao. A inativacao e logica:
+libera os saldos da remessa e da NFS-e, preserva o registro original e inativa
+os itens de glosa vinculados.
+
+### Consulta e auditoria das conciliacoes
+
+O submenu **Consultar conciliacoes** pesquisa por NFS-e, remessa, convenio,
+CNPJ ou processo e permite filtrar conciliacoes recebidas, pendentes e
+inativas. Cada card apresenta os dados da conciliacao, remessas, recebimentos
+bancarios e o historico de operacoes.
+
+Criacao, edicao, registro de recebimento e inativacao mantem o usuario e a
+data da operacao. As alteracoes tambem sao registradas em
+`auditorias_conciliacao_faturamento`, com os estados anterior e posterior.
+
+### Cache e paginacao
+
+As listagens financeiras usam o mesmo cache curto por rota e filtros da
+Triagem, compartilhado entre os workers do frontend e invalidado apos cada
+mutacao. A pagina principal consulta 25 remessas por vez. No Oracle, total e
+pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`.
+
 ### Endpoints do fluxo
 
 - `GET /app_glosas/financeiro/conciliacao-faturamento/remessas`: cards das
@@ -233,6 +256,12 @@ Depois do registro, os dados bancarios sao atualizados em
   follow-up das NFS-e sem recebimento bancario.
 - `POST /app_glosas/financeiro/conciliacao-faturamento/recebimentos-remessas`:
   completa o recebimento da NFS-e pendente.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/conciliacoes`:
+  pesquisa conciliacoes e retorna remessas, recebimentos, usuarios e auditoria.
+- `PUT /app_glosas/financeiro/conciliacao-faturamento/conciliacoes/{id}`:
+  edita uma conciliacao ainda sem recebimento.
+- `DELETE /app_glosas/financeiro/conciliacao-faturamento/conciliacoes/{id}`:
+  inativa logicamente uma conciliacao ainda sem recebimento.
 
 ## Contratos em schema.py e importancia da validacao
 
