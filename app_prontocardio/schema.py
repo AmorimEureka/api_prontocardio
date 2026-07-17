@@ -552,6 +552,7 @@ class ConciliacaoRemessaPublic(BaseModel):
     valor_alocado: Decimal
     valor_glosado: Decimal
     valor_nao_conciliado: Decimal
+    remessa: RemessaFaturamentoCardPublic
     message: str
 
 
@@ -860,38 +861,40 @@ class RecebimentosRemessaList(BaseModel):
     offset: int
 
 
-class RemessaSemRecebimentoPublic(BaseModel):
-    cd_remessa: int
-    tp_conciliacao: str
-    valor_remessa: Decimal
-    valor_glosado: Decimal
-    valor_pendente: Decimal
-
-
-class ConciliacaoSemRecebimentoPublic(BaseModel):
+class NfseSemRecebimentoPublic(BaseModel):
     id: int
     numero_nfse: str
-    convenio: str
-    cnpj_convenio: str
-    processo_recebimento: str
+    tp_conciliacao: str
     data_previsao_recebimento: date
     data_criacao: datetime
     valor_nfse: Decimal
-    quantidade_remessas: int
-    quantidade_remessas_sem_recebimento: int
-    valor_total_remessas: Decimal
+    valor_vinculado_remessa: Decimal
+    valor_glosado: Decimal
+    valor_pendente: Decimal
+    situacao: str
+    em_atraso: bool
+    dias_em_atraso: int
+
+
+class RemessaSemRecebimentoPublic(BaseModel):
+    cd_remessa: int
+    convenio: str
+    cnpj_convenio: str
+    processo_recebimento: str
+    data_competencia: date | None = None
+    valor_remessa: Decimal
+    quantidade_nfses_sem_recebimento: int
     valor_total_glosas: Decimal
-    valor_previsto_recebimento: Decimal
     valor_recebido: Decimal
     valor_pendente: Decimal
     situacao: str
     em_atraso: bool
     dias_em_atraso: int
-    remessas: list[RemessaSemRecebimentoPublic]
+    notas: list[NfseSemRecebimentoPublic]
 
 
 class ConciliacoesSemRecebimentoList(BaseModel):
-    conciliacoes: list[ConciliacaoSemRecebimentoPublic]
+    conciliacoes: list[RemessaSemRecebimentoPublic]
     total: int
     total_remessas_sem_recebimento: int
     valor_total_pendente: Decimal

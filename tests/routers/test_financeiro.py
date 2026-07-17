@@ -26,7 +26,9 @@ from app_prontocardio.schema import (
     ConciliacaoFaturamentoCreate,
     ConciliacaoFaturamentoUpdate,
     ConciliacaoRemessaCreate,
+    ConciliacaoRemessaPublic,
     ConciliacoesGerenciamentoList,
+    ConciliacoesSemRecebimentoList,
     RecebimentoRemessaCreate,
     RegistroGlosaCreate,
 )
@@ -677,25 +679,31 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
     assert response['total'] == 1
     assert response['total_remessas_sem_recebimento'] == 1
     assert response['valor_total_pendente'] == Decimal('100.00')
-    conciliacao = response['conciliacoes'][0]
-    assert conciliacao['numero_nfse'] == '12345'
-    assert conciliacao['situacao'] == 'sem_recebimento'
-    assert conciliacao['quantidade_remessas'] == 1
-    assert conciliacao['quantidade_remessas_sem_recebimento'] == 1
-    assert conciliacao['valor_total_remessas'] == Decimal('120.00')
-    assert conciliacao['valor_total_glosas'] == Decimal('20.00')
-    assert conciliacao['valor_previsto_recebimento'] == Decimal('100.00')
-    assert conciliacao['valor_recebido'] == Decimal('0.00')
-    assert conciliacao['valor_pendente'] == Decimal('100.00')
-    assert conciliacao['remessas'] == [
+    remessa = response['conciliacoes'][0]
+    assert remessa['cd_remessa'] == CD_REMESSA_TESTE
+    assert remessa['situacao'] == 'sem_recebimento'
+    assert remessa['quantidade_nfses_sem_recebimento'] == 1
+    assert remessa['valor_remessa'] == Decimal('120.00')
+    assert remessa['valor_total_glosas'] == Decimal('20.00')
+    assert remessa['valor_recebido'] == Decimal('0.00')
+    assert remessa['valor_pendente'] == Decimal('100.00')
+    assert remessa['notas'] == [
         {
-            'cd_remessa': CD_REMESSA_TESTE,
+            'id': remessa['notas'][0]['id'],
+            'numero_nfse': '12345',
             'tp_conciliacao': 'faturamento',
-            'valor_remessa': Decimal('120.00'),
+            'data_previsao_recebimento': date(2026, 8, 10),
+            'data_criacao': remessa['notas'][0]['data_criacao'],
+            'valor_nfse': Decimal('100.00'),
+            'valor_vinculado_remessa': Decimal('120.00'),
             'valor_glosado': Decimal('20.00'),
             'valor_pendente': Decimal('100.00'),
+            'situacao': 'sem_recebimento',
+            'em_atraso': False,
+            'dias_em_atraso': 0,
         }
     ]
+    ConciliacoesSemRecebimentoList.model_validate(response)
 
 
 def test_conciliacao_recebida_nao_aparece_na_fila_sem_recebimento(
@@ -733,6 +741,75 @@ def test_conciliacao_recebida_nao_aparece_na_fila_sem_recebimento(
         'limit': 100,
         'offset': 0,
     }
+
+
+def test_fila_sem_recebimento_agrupa_nfses_por_remessa(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    criar_nfse(
+        session,
+        row_hash='nfse-2',
+        valor='100.00',
+        numero_nfse='67890',
+    )
+    configurar_cards_oracle_fake(monkeypatch)
+    for row_hash, valor in (('nfse-1', '60.00'), ('nfse-2', '40.00')):
+        financeiro.conciliar_remessa_com_nfses(
+            cd_remessa=CD_REMESSA_TESTE,
+            payload=ConciliacaoRemessaCreate(
+                processo_recebimento='PROC-SEM-RECEBIMENTO',
+                notas=[
+                    {
+                        'nfse_row_hash': row_hash,
+                        'valor_alocado': valor,
+                        'data_previsao_recebimento': '2026-08-10',
+                    }
+                ],
+            ),
+            usuario_atual=usuario_teste,
+            session_postgres=session,
+            session_oracle=object(),
+        )
+
+    response = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        limit=25,
+        offset=0,
+    )
+
+    assert response['total'] == 1
+    assert response['total_remessas_sem_recebimento'] == 1
+    assert response['valor_total_pendente'] == Decimal('100.00')
+    remessa = response['conciliacoes'][0]
+    assert remessa['cd_remessa'] == CD_REMESSA_TESTE
+    assert (
+        remessa['quantidade_nfses_sem_recebimento']
+        == CONCILIACOES_DISTRIBUIDAS
+    )
+    assert {nota['numero_nfse'] for nota in remessa['notas']} == {
+        '12345',
+        '67890',
+    }
+    ConciliacoesSemRecebimentoList.model_validate(response)
+
+    response_por_nfse = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q='12345',
+        limit=25,
+        offset=0,
+    )
+    assert response_por_nfse['total'] == 1
+    assert response_por_nfse['valor_total_pendente'] == Decimal('100.00')
+    assert (
+        len(response_por_nfse['conciliacoes'][0]['notas'])
+        == CONCILIACOES_DISTRIBUIDAS
+    )
 
 
 def test_lista_apenas_remessa_pendente_em_conciliacao_parcial(
@@ -798,13 +875,13 @@ def test_lista_apenas_remessa_pendente_em_conciliacao_parcial(
 
     assert response['total'] == 1
     item = response['conciliacoes'][0]
-    quantidade_remessas = 2
-    assert item['situacao'] == 'recebimento_parcial'
-    assert item['quantidade_remessas'] == quantidade_remessas
-    assert item['quantidade_remessas_sem_recebimento'] == 1
-    assert item['valor_recebido'] == Decimal('100.00')
+    assert item['cd_remessa'] == cd_remessa_pendente
+    assert item['situacao'] == 'sem_recebimento'
+    assert item['quantidade_nfses_sem_recebimento'] == 1
+    assert item['valor_recebido'] == Decimal('0.00')
     assert item['valor_pendente'] == Decimal('40.00')
-    assert [remessa['cd_remessa'] for remessa in item['remessas']] == [988]
+    assert item['notas'][0]['numero_nfse'] == '12345'
+    assert item['notas'][0]['situacao'] == 'recebimento_parcial'
 
     response_remessa_recebida = (
         financeiro.consultar_conciliacoes_sem_recebimento(
@@ -1424,6 +1501,9 @@ def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
 
     assert primeira['valor_alocado'] == Decimal('60.00')
     assert segunda['valor_alocado'] == Decimal('40.00')
+    assert primeira['remessa']['cd_remessa'] == CD_REMESSA_TESTE
+    assert primeira['remessa']['valor_nao_conciliado'] == Decimal('60.00')
+    ConciliacaoRemessaPublic.model_validate(primeira)
     assert (
         session.query(ConciliacaoFaturamento).count()
         == CONCILIACOES_DISTRIBUIDAS
