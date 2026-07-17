@@ -10,6 +10,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.dialects import oracle
 
 from app_prontocardio.models import (
+    AuditoriaConciliacaoFaturamento,
     ConciliacaoFaturamento,
     ConciliacaoFaturamentoRemessa,
     LancamentoExtratoBancario,
@@ -23,6 +24,7 @@ from app_prontocardio.models import (
 from app_prontocardio.routers import app_glosas, financeiro
 from app_prontocardio.schema import (
     ConciliacaoFaturamentoCreate,
+    ConciliacaoFaturamentoUpdate,
     ConciliacaoRemessaCreate,
     RecebimentoRemessaCreate,
     RegistroGlosaCreate,
@@ -1446,6 +1448,135 @@ def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
     assert response['valor_disponivel_remessa'] == Decimal('0.00')
     assert 'glosa ainda sem recurso' in response['message']
     assert session.query(RegistroGlosa).count() == ITENS_ANALITICOS_TESTE
+
+
+def test_edita_e_inativa_conciliacao_sem_recebimento_com_auditoria(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-ORIGINAL',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '100.00',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    conciliacao = session.scalar(select(ConciliacaoFaturamento))
+
+    editada = financeiro.editar_conciliacao_faturamento(
+        conciliacao_id=conciliacao.id,
+        payload=ConciliacaoFaturamentoUpdate(
+            processo_recebimento='PROC-CORRIGIDO',
+            data_previsao_recebimento=date(2026, 8, 20),
+        ),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    assert editada['processo_recebimento'] == 'PROC-CORRIGIDO'
+    assert editada['usuario_operacao_id'] == usuario_teste.id
+    assert conciliacao.usuario_atualizacao_id == usuario_teste.id
+    assert conciliacao.data_previsao_recebimento == date(2026, 8, 20)
+    processo = session.scalar(select(ProcessoConciliacaoRemessa))
+    assert processo.processo_recebimento == 'PROC-CORRIGIDO'
+    assert processo.usuario_atualizacao_id == usuario_teste.id
+
+    inativada = financeiro.inativar_conciliacao_faturamento(
+        conciliacao_id=conciliacao.id,
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    assert inativada['ativo'] is False
+    assert conciliacao.usuario_inativacao_id == usuario_teste.id
+    assert [
+        auditoria.acao
+        for auditoria in session.scalars(
+            select(AuditoriaConciliacaoFaturamento).order_by(
+                AuditoriaConciliacaoFaturamento.id
+            )
+        )
+    ] == ['criacao', 'edicao', 'inativacao']
+    assert financeiro._valores_utilizados_nfse(session) == {}
+    assert financeiro._resumos_remessas(
+        session,
+        {CD_REMESSA_TESTE},
+    ) == {}
+
+
+def test_consulta_gerencial_exibe_conciliacao_recebimento_e_usuarios(
+    session,
+    usuario_teste,
+):
+    vinculo = criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+    )
+    conciliacao = session.get(
+        ConciliacaoFaturamento,
+        vinculo.conciliacao_id,
+    )
+    financeiro._registrar_auditoria_conciliacao(
+        session,
+        conciliacao.id,
+        'criacao',
+        usuario_teste.id,
+        dados_novos=financeiro._snapshot_conciliacao(
+            conciliacao,
+            [vinculo],
+        ),
+    )
+    session.commit()
+
+    response = financeiro.consultar_conciliacoes_faturamento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q='NFSE-ANTERIOR',
+        situacao='recebido',
+        incluir_inativas=False,
+        limit=25,
+        offset=0,
+    )
+
+    assert response['total'] == 1
+    card = response['conciliacoes'][0]
+    assert card['situacao_recebimento'] == 'recebido'
+    assert card['usuario_criacao']['id'] == usuario_teste.id
+    assert card['remessas'][0]['cd_remessa'] == CD_REMESSA_TESTE
+    assert card['recebimentos'][0]['usuario']['id'] == usuario_teste.id
+    assert card['auditoria'][0]['acao'] == 'criacao'
+
+
+def test_nao_inativa_conciliacao_com_recebimento(
+    session,
+    usuario_teste,
+):
+    vinculo = criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        financeiro.inativar_conciliacao_faturamento(
+            conciliacao_id=vinculo.conciliacao_id,
+            usuario_atual=usuario_teste,
+            session=session,
+        )
+
+    assert error.value.status_code == HTTPStatus.CONFLICT
+    assert 'recebimento bancário' in error.value.detail
 
 
 def test_concilia_recurso_usando_valor_recursado_como_total_da_remessa(

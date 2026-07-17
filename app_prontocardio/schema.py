@@ -555,6 +555,109 @@ class ConciliacaoRemessaPublic(BaseModel):
     message: str
 
 
+class ConciliacaoFaturamentoUpdate(BaseModel):
+    processo_recebimento: str | None = Field(default=None, max_length=255)
+    data_previsao_recebimento: date | None = None
+
+    @field_validator('processo_recebimento', mode='before')
+    @classmethod
+    def normalize_processo_recebimento(cls, value):
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError('campo obrigatorio')
+        return normalized
+
+    @model_validator(mode='after')
+    def validate_campos_informados(self):
+        if (
+            self.processo_recebimento is None
+            and self.data_previsao_recebimento is None
+        ):
+            raise ValueError('Informe ao menos um campo para atualizar.')
+        return self
+
+
+class UsuarioOperacaoFinanceiraPublic(BaseModel):
+    id: int
+    nome: str
+    email: str
+
+
+class AuditoriaConciliacaoPublic(BaseModel):
+    id: int
+    acao: str
+    usuario: UsuarioOperacaoFinanceiraPublic
+    dados_anteriores: dict | None = None
+    dados_novos: dict | None = None
+    data_operacao: datetime
+
+
+class RecebimentoConciliacaoPublic(BaseModel):
+    id: int
+    cd_remessa: int
+    data_recebimento: date
+    valor_recebido: Decimal
+    conta_bancaria_id: int
+    conta_plano_contas: str | None = None
+    conta_centro_custo: str | None = None
+    lancamento_extrato_id: int | None = None
+    data_registro: datetime
+    usuario: UsuarioOperacaoFinanceiraPublic
+
+
+class RemessaConciliacaoHistoricoPublic(BaseModel):
+    cd_remessa: int
+    tipo_conciliacao: str
+    valor_remessa: Decimal
+    valor_alocado_nfse: Decimal
+    valor_glosado: Decimal
+
+
+class ConciliacaoGerenciamentoPublic(BaseModel):
+    id: int
+    numero_nfse: str
+    convenio: str
+    cnpj_convenio: str
+    processo_recebimento: str
+    data_previsao_recebimento: date
+    data_recebimento: date | None = None
+    data_criacao: datetime
+    data_atualizacao: datetime | None = None
+    data_inativacao: datetime | None = None
+    valor_nfse: Decimal
+    ativo: bool
+    situacao_recebimento: str
+    usuario_criacao: UsuarioOperacaoFinanceiraPublic
+    usuario_atualizacao: UsuarioOperacaoFinanceiraPublic | None = None
+    usuario_inativacao: UsuarioOperacaoFinanceiraPublic | None = None
+    remessas: list[RemessaConciliacaoHistoricoPublic]
+    recebimentos: list[RecebimentoConciliacaoPublic]
+    auditoria: list[AuditoriaConciliacaoPublic]
+
+
+class ConciliacoesGerenciamentoList(BaseModel):
+    conciliacoes: list[ConciliacaoGerenciamentoPublic]
+    total: int
+    total_ativas: int
+    total_inativas: int
+    total_recebidas: int
+    total_sem_recebimento: int
+    limit: int
+    offset: int
+
+
+class ConciliacaoAlteracaoPublic(BaseModel):
+    id: int
+    ativo: bool
+    processo_recebimento: str
+    data_previsao_recebimento: date
+    usuario_operacao_id: int
+    data_operacao: datetime
+    message: str
+
+
 class ContaBancariaRecebimentoPublic(BaseModel):
     id: int
     banco: str
