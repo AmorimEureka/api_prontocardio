@@ -128,7 +128,7 @@ flowchart TD
     L --> M["Gravar um vinculo fiscal por NFS-e e um processo por remessa"]
     M --> N{"Data de recebimento informada?"}
     N -- "Sim" --> O["Validar conta, data e lancamento; registrar recebimento"]
-    N -- "Nao" --> P["Enviar a NFS-e para Conciliações sem Recebimento"]
+    N -- "Nao" --> P["Manter a NFS-e dentro da remessa em Conciliações sem Recebimento"]
     M --> Q{"Existe glosa?"}
     Q -- "Sim" --> R["Criar itens em registros_glosa e notificar o setor de glosas"]
     Q -- "Nao" --> S["Atualizar o saldo da remessa"]
@@ -220,14 +220,17 @@ valor_nao_conciliado = MAX(saldo_base, glosa_pendente)
 
 ### Follow-up Conciliações sem Recebimento
 
-O submenu lista cada NFS-e conciliada cuja `data_recebimento` ainda nao foi
-informada. A fila usa o vinculo exato `conciliacao_id + cd_remessa` e permite
-preencher posteriormente data, conta bancaria, plano de contas, centro de
-custo e lancamento.
+O submenu apresenta um card por remessa e lista internamente cada NFS-e
+conciliada cuja `data_recebimento` ainda nao foi informada. Totais, paginacao
+e pesquisa tambem consideram remessas, sem duplicar o card quando houver mais
+de uma nota pendente. A fila usa o vinculo exato
+`conciliacao_id + cd_remessa` e permite preencher posteriormente data, conta
+bancaria, plano de contas, centro de custo e lancamento.
 
 Depois do registro, os dados bancarios sao atualizados em
 `conciliacoes_faturamento`, o recebimento e gravado em
-`recebimentos_remessas` e a NFS-e deixa a fila.
+`recebimentos_remessas` e a NFS-e deixa o agrupamento. O card da remessa sai
+da fila quando nao restar nenhuma nota pendente de recebimento.
 
 Enquanto nao existir recebimento bancario, o follow-up tambem permite editar
 o processo, a previsao, o valor recebido e o valor glosado de cada remessa ou
@@ -258,7 +261,10 @@ As listagens financeiras usam o mesmo cache curto por rota e filtros da
 Triagem, compartilhado entre os workers do frontend e invalidado apos cada
 mutacao. A consulta de auditoria nao usa cache para refletir imediatamente as
 operacoes. A pagina principal consulta 25 remessas por vez. No Oracle, total
-e pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`.
+e pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`. Apos
+uma conciliacao, a API devolve a posicao atualizada da remessa para o frontend
+atualizar o card e os totais ja carregados, evitando repetir imediatamente a
+consulta completa ao Oracle.
 
 ### Endpoints do fluxo
 
@@ -269,7 +275,7 @@ e pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`.
 - `POST /app_glosas/financeiro/conciliacao-faturamento/remessas/{cd_remessa}/conciliar`:
   grava o processo unico e uma ou mais alocacoes de NFS-e.
 - `GET /app_glosas/financeiro/conciliacao-faturamento/sem-recebimento`:
-  follow-up das NFS-e sem recebimento bancario.
+  follow-up agrupado por remessa, com suas NFS-e sem recebimento bancario.
 - `POST /app_glosas/financeiro/conciliacao-faturamento/recebimentos-remessas`:
   completa o recebimento da NFS-e pendente.
 - `GET /app_glosas/financeiro/conciliacao-faturamento/conciliacoes`:
