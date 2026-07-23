@@ -208,3 +208,6 @@ __marimo__/
 
 # Local server/proxy configuration
 server/
+
+# Backups locais do banco de dados
+/backups/
