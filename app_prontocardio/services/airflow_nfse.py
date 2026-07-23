@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from http import HTTPStatus
 
 import httpx
 
@@ -10,6 +11,10 @@ class AirflowNfseNaoConfiguradoError(RuntimeError):
 
 
 class AirflowNfseTriggerError(RuntimeError):
+    pass
+
+
+class AirflowNfseIndisponivelError(AirflowNfseTriggerError):
     pass
 
 
@@ -69,11 +74,36 @@ def disparar_dag_emissao_nfse(
             timeout=config.AIRFLOW_NFSE_TIMEOUT_SECONDS,
             verify=config.AIRFLOW_NFSE_VERIFY_SSL,
         )
+    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        raise AirflowNfseIndisponivelError(
+            'O Airflow está indisponível ou excedeu o tempo limite.'
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise AirflowNfseIndisponivelError(
+            'Não foi possível estabelecer comunicação com o Airflow.'
+        ) from exc
+
+    status_code = int(getattr(response, 'status_code', 200))
+    if status_code == HTTPStatus.CONFLICT:
+        return AirflowDagRun(dag_run_id=dag_run_id, state=None)
+
+    try:
         response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        error_class = (
+            AirflowNfseIndisponivelError
+            if status_code >= HTTPStatus.INTERNAL_SERVER_ERROR
+            else AirflowNfseTriggerError
+        )
+        raise error_class(
+            f'O Airflow recusou o disparo (HTTP {status_code}).'
+        ) from exc
+
+    try:
         payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
+    except ValueError as exc:
         raise AirflowNfseTriggerError(
-            'O Airflow não aceitou o disparo da emissão de NFS-e.'
+            'O Airflow retornou uma resposta inválida para o disparo.'
         ) from exc
 
     returned_run_id = str(
