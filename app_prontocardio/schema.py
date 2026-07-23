@@ -118,6 +118,7 @@ class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
     valor_nota: Decimal | None = Field(default=None, ge=0)
     usuario_id: int
     cadastrado_por: str | None = None
+    status: StatusWorkflowSolicitacao | None = None
     data_criacao: datetime
 
 
