@@ -1,3 +1,4 @@
+from decimal import Decimal
 from http import HTTPStatus
 from types import SimpleNamespace
 
@@ -114,6 +115,16 @@ def test_local_da_solicitacao_deve_ser_opcao_permitida():
             codigo_atendimento=CODIGO_ATENDIMENTO,
             local='Outro local',
             procedimento='Consulta',
+            valor_nota=Decimal('60.75'),
+        )
+
+
+def test_valor_da_nota_deve_ser_informado_no_cadastro():
+    with pytest.raises(ValidationError):
+        SolicitacaoNotaCreate(
+            codigo_atendimento=CODIGO_ATENDIMENTO,
+            local='Clinica 1',
+            procedimento='Consulta',
         )
 
 
@@ -133,6 +144,7 @@ def test_cadastro_busca_novamente_oracle_e_grava_snapshot(
             codigo_atendimento=123456,
             local='Clinica 2',
             procedimento='  Exame cardiológico  ',
+            valor_nota=Decimal('60.75'),
         ),
         usuario_teste,
         session,
@@ -146,19 +158,22 @@ def test_cadastro_busca_novamente_oracle_e_grava_snapshot(
     assert registro.codigo_convenio == CODIGO_CONVENIO
     assert registro.convenio == 'CONVÊNIO TESTE'
     assert registro.nr_fone == '85999999999'
+    assert registro.valor_nota == Decimal('60.75')
     assert registro.local == 'Clinica 2'
     assert registro.procedimento == 'Exame cardiológico'
     assert registro.tipo_atendimento == 'Ambulatório'
     assert registro.usuario_id == usuario_teste.id
+    assert response.cadastrado_por == usuario_teste.nome
     workflow = session.scalar(
         select(SolicitacaoNotaWorkflow).where(
             SolicitacaoNotaWorkflow.solicitacao_nota_id == registro.id
         )
     )
     assert workflow.status == StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
-    assert session.scalar(
-        select(func.count()).select_from(SolicitacaoNotaEvento)
-    ) == 1
+    evento = session.scalar(select(SolicitacaoNotaEvento))
+    assert evento.usuario_id == usuario_teste.id
+    assert evento.tipo_acao == 'CRIACAO'
+    assert '60.75' in evento.observacao
 
 
 def test_lista_solicitacoes_com_paginacao(
@@ -178,6 +193,7 @@ def test_lista_solicitacoes_com_paginacao(
                 codigo_atendimento=CODIGO_ATENDIMENTO,
                 local='Clinica 1',
                 procedimento=procedimento,
+                valor_nota=Decimal('60.75'),
             ),
             usuario_teste,
             session,
@@ -197,6 +213,8 @@ def test_lista_solicitacoes_com_paginacao(
     assert response.offset == 1
     assert len(response.solicitacoes) == 1
     assert response.solicitacoes[0].id == ids[-2]
+    assert response.solicitacoes[0].valor_nota == Decimal('60.75')
+    assert response.solicitacoes[0].cadastrado_por == usuario_teste.nome
 
 
 def _criar_solicitacao(
@@ -215,6 +233,7 @@ def _criar_solicitacao(
             codigo_atendimento=CODIGO_ATENDIMENTO,
             local='Clinica 1',
             procedimento=procedimento,
+            valor_nota=Decimal('60.75'),
         ),
         usuario_teste,
         session,
@@ -241,8 +260,14 @@ def test_validacao_move_solicitacao_para_fila_de_emissao(
     )
 
     assert response.status == StatusWorkflowSolicitacao.VALIDADA
+    assert response.cadastrado_por == usuario_teste.nome
     assert response.validado_por_id == usuario_teste.id
     assert response.validado_por == usuario_teste.nome
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento)
+        .where(SolicitacaoNotaEvento.tipo_acao == 'VALIDADA')
+    )
+    assert evento.usuario_id == usuario_teste.id
 
 
 def test_recusa_exige_motivo_e_fica_na_fila_de_recusadas(
@@ -268,6 +293,39 @@ def test_recusa_exige_motivo_e_fica_na_fila_de_recusadas(
 
     assert response.status == StatusWorkflowSolicitacao.RECUSADA
     assert response.motivo_recusa == 'CPF divergente.'
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento)
+        .where(SolicitacaoNotaEvento.tipo_acao == 'RECUSADA')
+    )
+    assert evento.usuario_id == usuario_teste.id
+
+
+def test_validacao_bloqueia_registro_legado_sem_valor(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    registro = session.get(SolicitacaoNota, solicitacao.id)
+    registro.valor_nota = None
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.validar_solicitacao_nota(
+            solicitacao.id,
+            ValidacaoSolicitacaoNotaInput(decisao='VALIDADA'),
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert exc_info.value.detail == (
+        'Informe o valor da nota antes de validar a solicitação.'
+    )
 
 
 def test_emissao_em_lote_dispara_airflow_e_marca_itens(
@@ -328,6 +386,15 @@ def test_emissao_em_lote_dispara_airflow_e_marca_itens(
         select(SolicitacaoNotaWorkflow.status)
     ).all()
     assert set(statuses) == {'EMISSAO_SOLICITADA'}
+    eventos_emissao = session.scalars(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'EMISSAO_SOLICITADA'
+        )
+    ).all()
+    assert len(eventos_emissao) == QUANTIDADE_LOTE
+    assert {
+        evento.usuario_id for evento in eventos_emissao
+    } == {usuario_teste.id}
 
 
 def test_falha_no_airflow_devolve_itens_para_emissao(

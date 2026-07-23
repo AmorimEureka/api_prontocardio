@@ -699,6 +699,10 @@ class SolicitacaoNota:
             "local IN ('Clinica 1', 'Clinica 2', 'Emergencia')",
             name='ck_solicitacao_nota_local',
         ),
+        CheckConstraint(
+            'valor_nota IS NULL OR valor_nota > 0',
+            name='ck_solicitacao_nota_valor_nota',
+        ),
         Index(
             'ix_solicitacao_nota_codigo_atendimento',
             'codigo_atendimento',
@@ -717,6 +721,10 @@ class SolicitacaoNota:
     tipo_atendimento: Mapped[str] = mapped_column(String(50))
     usuario_id: Mapped[int] = mapped_column(
         ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    valor_nota: Mapped[Decimal | None] = mapped_column(
+        Numeric(14, 2),
+        default=None,
     )
     nr_cpf: Mapped[str | None] = mapped_column(String(20), default=None)
     nr_cep: Mapped[str | None] = mapped_column(String(20), default=None)

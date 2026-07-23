@@ -6,13 +6,14 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app_prontocardio.database import (
     get_session_oracle,
     get_session_postgres,
 )
 from app_prontocardio.models import (
+    DecisaoValidacaoSolicitacao,
     EmissaoNfse,
     LoteEmissaoNfse,
     ModelContaAtendimento,
@@ -64,13 +65,27 @@ def _agora_local() -> datetime:
     return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
 
 
+def _solicitacao_public(
+    solicitacao: SolicitacaoNota,
+    cadastrado_por: str | None = None,
+) -> SolicitacaoNotaPublic:
+    public = SolicitacaoNotaPublic.model_validate(solicitacao)
+    return public.model_copy(
+        update={'cadastrado_por': cadastrado_por},
+    )
+
+
 def _workflow_public(
     solicitacao: SolicitacaoNota,
     workflow: SolicitacaoNotaWorkflow,
+    cadastrado_por: str | None = None,
     validado_por: str | None = None,
 ) -> SolicitacaoNotaWorkflowPublic:
     return SolicitacaoNotaWorkflowPublic(
-        **SolicitacaoNotaPublic.model_validate(solicitacao).model_dump(),
+        **_solicitacao_public(
+            solicitacao,
+            cadastrado_por,
+        ).model_dump(),
         workflow_id=workflow.id,
         status=workflow.status,
         validacao=workflow.validacao,
@@ -145,7 +160,6 @@ def _consultar_atendimento(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail='O atendimento não possui nome de paciente.',
         )
-
     return AtendimentoSolicitacaoNotaPublic(
         codigo_atendimento=codigo_atendimento,
         codigo_paciente=int(atendimento.cd_paciente),
@@ -195,8 +209,12 @@ def listar_solicitacoes_nota(
     total = session_postgres.scalar(
         select(func.count()).select_from(SolicitacaoNota)
     ) or 0
-    solicitacoes = session_postgres.scalars(
-        select(SolicitacaoNota)
+    rows = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            Usuario.nome.label('cadastrado_por'),
+        )
+        .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
         .order_by(
             SolicitacaoNota.data_criacao.desc(),
             SolicitacaoNota.id.desc(),
@@ -206,8 +224,8 @@ def listar_solicitacoes_nota(
     ).all()
     return SolicitacaoNotaList(
         solicitacoes=[
-            SolicitacaoNotaPublic.model_validate(solicitacao)
-            for solicitacao in solicitacoes
+            _solicitacao_public(solicitacao, cadastrado_por)
+            for solicitacao, cadastrado_por in rows
         ],
         total=total,
         limit=limit,
@@ -242,20 +260,27 @@ def listar_workflow_solicitacoes_nota(
     if local := _texto(filtros_query.local):
         filtros.append(SolicitacaoNota.local == local)
 
+    criador = aliased(Usuario)
+    validador = aliased(Usuario)
     base_query = (
         select(
             SolicitacaoNota,
             SolicitacaoNotaWorkflow,
-            Usuario.nome.label('validado_por'),
+            criador.nome.label('cadastrado_por'),
+            validador.nome.label('validado_por'),
         )
         .join(
             SolicitacaoNotaWorkflow,
             SolicitacaoNotaWorkflow.solicitacao_nota_id
             == SolicitacaoNota.id,
         )
+        .join(
+            criador,
+            criador.id == SolicitacaoNota.usuario_id,
+        )
         .outerjoin(
-            Usuario,
-            Usuario.id == SolicitacaoNotaWorkflow.validado_por_id,
+            validador,
+            validador.id == SolicitacaoNotaWorkflow.validado_por_id,
         )
         .where(*filtros)
     )
@@ -272,8 +297,18 @@ def listar_workflow_solicitacoes_nota(
     ).all()
     return SolicitacaoNotaWorkflowList(
         solicitacoes=[
-            _workflow_public(solicitacao, workflow, validado_por)
-            for solicitacao, workflow, validado_por in rows
+            _workflow_public(
+                solicitacao,
+                workflow,
+                cadastrado_por,
+                validado_por,
+            )
+            for (
+                solicitacao,
+                workflow,
+                cadastrado_por,
+                validado_por,
+            ) in rows
         ],
         total=total,
         limit=filtros_query.limit,
@@ -293,12 +328,17 @@ def validar_solicitacao_nota(
     session_postgres: SessionPostgres,
 ):
     row = session_postgres.execute(
-        select(SolicitacaoNota, SolicitacaoNotaWorkflow)
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+            Usuario.nome.label('cadastrado_por'),
+        )
         .join(
             SolicitacaoNotaWorkflow,
             SolicitacaoNotaWorkflow.solicitacao_nota_id
             == SolicitacaoNota.id,
         )
+        .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
         .where(SolicitacaoNota.id == solicitacao_id)
         .with_for_update()
     ).first()
@@ -307,11 +347,19 @@ def validar_solicitacao_nota(
             status_code=HTTPStatus.NOT_FOUND,
             detail='Solicitação de nota não encontrada.',
         )
-    solicitacao, workflow = row
+    solicitacao, workflow, cadastrado_por = row
     if workflow.status != StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value:
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
             detail='A solicitação não está pendente de validação.',
+        )
+    if (
+        payload.decisao == DecisaoValidacaoSolicitacao.VALIDADA
+        and (solicitacao.valor_nota is None or solicitacao.valor_nota <= 0)
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Informe o valor da nota antes de validar a solicitação.',
         )
 
     agora = _agora_local()
@@ -337,7 +385,12 @@ def validar_solicitacao_nota(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail='Não foi possível registrar a validação.',
         ) from exc
-    return _workflow_public(solicitacao, workflow, usuario_atual.nome)
+    return _workflow_public(
+        solicitacao,
+        workflow,
+        cadastrado_por=cadastrado_por,
+        validado_por=usuario_atual.nome,
+    )
 
 
 @router.post(
@@ -360,16 +413,29 @@ def solicitar_emissao_nfse(
         )
 
     rows = session_postgres.execute(
-        select(SolicitacaoNotaWorkflow)
+        select(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNota.valor_nota,
+        )
+        .join(
+            SolicitacaoNota,
+            SolicitacaoNota.id
+            == SolicitacaoNotaWorkflow.solicitacao_nota_id,
+        )
         .where(
             SolicitacaoNotaWorkflow.solicitacao_nota_id.in_(
                 payload.solicitacao_ids
             )
         )
         .with_for_update()
-    ).scalars().all()
+    ).all()
     workflows = {
-        workflow.solicitacao_nota_id: workflow for workflow in rows
+        workflow.solicitacao_nota_id: workflow
+        for workflow, _valor_nota in rows
+    }
+    valores = {
+        workflow.solicitacao_nota_id: valor_nota
+        for workflow, valor_nota in rows
     }
     indisponiveis = [
         solicitacao_id
@@ -378,6 +444,8 @@ def solicitar_emissao_nfse(
             solicitacao_id not in workflows
             or workflows[solicitacao_id].status
             != StatusWorkflowSolicitacao.VALIDADA.value
+            or valores.get(solicitacao_id) is None
+            or valores[solicitacao_id] <= 0
         )
     ]
     if indisponiveis:
@@ -515,6 +583,7 @@ def cadastrar_solicitacao_nota(
         procedimento=payload.procedimento,
         tipo_atendimento=atendimento.tipo_atendimento,
         usuario_id=usuario_atual.id,
+        valor_nota=payload.valor_nota,
         nr_cpf=atendimento.nr_cpf,
         nr_cep=atendimento.nr_cep,
         ds_endereco=atendimento.ds_endereco,
@@ -540,7 +609,10 @@ def cadastrar_solicitacao_nota(
                 solicitacao_nota_id=solicitacao.id,
                 usuario_id=usuario_atual.id,
                 tipo_acao='CRIACAO',
-                observacao='Solicitação cadastrada.',
+                observacao=(
+                    'Solicitação cadastrada com valor de '
+                    f'R$ {payload.valor_nota:.2f}.'
+                ),
             )
         )
         session_postgres.commit()
@@ -551,4 +623,4 @@ def cadastrar_solicitacao_nota(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail='Não foi possível cadastrar a solicitação da nota.',
         ) from exc
-    return solicitacao
+    return _solicitacao_public(solicitacao, usuario_atual.nome)
