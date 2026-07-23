@@ -12,7 +12,12 @@ from pydantic import (
     model_validator,
 )
 
-from app_prontocardio.models import LocalSolicitacaoNota, TipoAtendimento
+from app_prontocardio.models import (
+    DecisaoValidacaoSolicitacao,
+    LocalSolicitacaoNota,
+    StatusWorkflowSolicitacao,
+    TipoAtendimento,
+)
 
 
 class UserSchema(BaseModel):
@@ -118,6 +123,93 @@ class SolicitacaoNotaList(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
+    workflow_id: int
+    status: StatusWorkflowSolicitacao
+    validacao: DecisaoValidacaoSolicitacao | None = None
+    motivo_recusa: str | None = None
+    validado_por_id: int | None = None
+    validado_por: str | None = None
+    validado_em: datetime | None = None
+    workflow_atualizado_em: datetime
+
+
+class SolicitacaoNotaWorkflowList(BaseModel):
+    solicitacoes: list[SolicitacaoNotaWorkflowPublic]
+    total: int
+    limit: int
+    offset: int
+
+
+class SolicitacaoNotaWorkflowFilter(BaseModel):
+    status: StatusWorkflowSolicitacao = (
+        StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
+    )
+    nome_paciente: str | None = Field(default=None, max_length=200)
+    cpf: str | None = Field(default=None, max_length=20)
+    tipo_atendimento: str | None = Field(default=None, max_length=50)
+    local: str | None = Field(default=None, max_length=20)
+    limit: int = Field(default=10, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+class ValidacaoSolicitacaoNotaInput(BaseModel):
+    decisao: DecisaoValidacaoSolicitacao
+    motivo_recusa: str | None = Field(default=None, max_length=500)
+
+    @field_validator('motivo_recusa', mode='before')
+    @classmethod
+    def normalize_motivo_recusa(cls, value):
+        motivo = str(value or '').strip()
+        return motivo or None
+
+    @model_validator(mode='after')
+    def validate_motivo_recusa(self):
+        if (
+            self.decisao == DecisaoValidacaoSolicitacao.RECUSADA
+            and not self.motivo_recusa
+        ):
+            raise ValueError('Informe o motivo da recusa.')
+        if self.decisao == DecisaoValidacaoSolicitacao.VALIDADA:
+            self.motivo_recusa = None
+        return self
+
+
+class EmissaoNfseCreate(BaseModel):
+    solicitacao_ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator('solicitacao_ids')
+    @classmethod
+    def validate_solicitacoes_unicas(cls, value):
+        if any(solicitacao_id <= 0 for solicitacao_id in value):
+            raise ValueError('Solicitação inválida.')
+        if len(value) != len(set(value)):
+            raise ValueError('Não repita solicitações no lote.')
+        return value
+
+
+class EmissaoNfsePublic(BaseModel):
+    id: int
+    solicitacao_nota_id: int
+    lote_id: int
+    status: str
+    numero_nfse: str | None = None
+    protocolo: str | None = None
+    data_criacao: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class LoteEmissaoNfsePublic(BaseModel):
+    lote_id: int
+    tipo: str
+    status: str
+    quantidade: int
+    dag_run_id: str | None = None
+    emissoes: list[EmissaoNfsePublic]
+    message: str
 
 
 class RegistroGlosaCreate(BaseModel):
