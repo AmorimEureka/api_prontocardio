@@ -81,6 +81,7 @@ class SolicitacaoNotaCreate(BaseModel):
     codigo_atendimento: int = Field(gt=0)
     local: LocalSolicitacaoNota
     procedimento: str = Field(min_length=1, max_length=500)
+    valor_nota: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
 
     @field_validator('procedimento', mode='before')
     @classmethod
@@ -114,7 +115,9 @@ class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
     id: int
     local: LocalSolicitacaoNota
     procedimento: str
+    valor_nota: Decimal | None = Field(default=None, ge=0)
     usuario_id: int
+    cadastrado_por: str | None = None
     data_criacao: datetime
 
 
