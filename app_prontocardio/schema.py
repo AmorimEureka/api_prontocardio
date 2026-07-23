@@ -12,7 +12,7 @@ from pydantic import (
     model_validator,
 )
 
-from app_prontocardio.models import TipoAtendimento
+from app_prontocardio.models import LocalSolicitacaoNota, TipoAtendimento
 
 
 class UserSchema(BaseModel):
@@ -72,6 +72,54 @@ class Message(BaseModel):
     message: str
 
 
+class SolicitacaoNotaCreate(BaseModel):
+    codigo_atendimento: int = Field(gt=0)
+    local: LocalSolicitacaoNota
+    procedimento: str = Field(min_length=1, max_length=500)
+
+    @field_validator('procedimento', mode='before')
+    @classmethod
+    def normalize_procedimento(cls, value):
+        procedimento = str(value or '').strip()
+        if not procedimento:
+            raise ValueError('Informe o procedimento.')
+        return procedimento
+
+
+class AtendimentoSolicitacaoNotaPublic(BaseModel):
+    codigo_atendimento: int
+    codigo_paciente: int
+    codigo_convenio: int
+    nm_paciente: str
+    convenio: str
+    nr_cpf: str | None = None
+    nr_cep: str | None = None
+    ds_endereco: str | None = None
+    nr_endereco: str | None = None
+    nm_bairro: str | None = None
+    ds_complemento: str | None = None
+    email: str | None = None
+    nr_fone: str | None = None
+    tipo_atendimento: str
+
+
+class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    local: LocalSolicitacaoNota
+    procedimento: str
+    usuario_id: int
+    data_criacao: datetime
+
+
+class SolicitacaoNotaList(BaseModel):
+    solicitacoes: list[SolicitacaoNotaPublic]
+    total: int
+    limit: int
+    offset: int
+
+
 class RegistroGlosaCreate(BaseModel):
     codigo_paciente: int
     nm_paciente: str | None = None
@@ -89,7 +137,7 @@ class RegistroGlosaCreate(BaseModel):
     data_atendimento: datetime
     valor: Decimal
     processo_controle_fatura_gab: str
-    processo_recurso: str
+    processo_recurso: str | None = None
     data_glosa: date
     motivo_glosa: str
     descricao_glosa: str
@@ -101,7 +149,8 @@ class RegistroGlosaCreate(BaseModel):
     ds_gru_pro: str | None = None
     cd_gru_fat: int | None = None
     ds_gru_fat: str | None = None
-    qtd_recursado: Decimal = Field(
+    qtd_recursado: Decimal | None = Field(
+        default=None,
         gt=0,
         validation_alias=AliasChoices(
             'qtd_recursado',
@@ -110,7 +159,8 @@ class RegistroGlosaCreate(BaseModel):
             'qtd_glosado',
         ),
     )
-    valor_recursado: Decimal = Field(
+    valor_recursado: Decimal | None = Field(
+        default=None,
         gt=0,
         validation_alias=AliasChoices('valor_recursado', 'valor_glosado'),
     )
@@ -124,7 +174,6 @@ class RegistroGlosaCreate(BaseModel):
 
     @field_validator(
         'processo_controle_fatura_gab',
-        'processo_recurso',
         'motivo_glosa',
         mode='before',
     )
@@ -134,6 +183,12 @@ class RegistroGlosaCreate(BaseModel):
         if not text:
             raise ValueError('campo obrigatorio')
         return text
+
+    @field_validator('processo_recurso', mode='before')
+    @classmethod
+    def normalize_optional_processo_recurso(cls, value):
+        text = str(value or '').strip()
+        return text or None
 
     @model_validator(mode='after')
     def validate_glosa_business_rules(self):
@@ -163,12 +218,26 @@ class RegistroGlosaCreate(BaseModel):
                 'A data do recurso nao pode ser anterior as datas '
                 'da glosa ou do pagamento.'
             )
-        if self.qtd_recursado > self.qtd_registro:
+        if self.sn_glosado == 'true' and (
+            self.processo_recurso is None
+            or self.qtd_recursado is None
+            or self.valor_recursado is None
+        ):
+            raise ValueError(
+                'Informe processo, quantidade e valor para registrar recurso.'
+            )
+        if (
+            self.qtd_recursado is not None
+            and self.qtd_recursado > self.qtd_registro
+        ):
             raise ValueError(
                 'A quantidade glosada/acatada nao pode exceder '
                 'a quantidade do registro.'
             )
-        if self.valor_recursado > self.valor:
+        if (
+            self.valor_recursado is not None
+            and self.valor_recursado > self.valor
+        ):
             raise ValueError(
                 'O valor glosado/acatado nao pode exceder o valor do registro.'
             )
@@ -439,6 +508,7 @@ class RemessaFaturamentoCardPublic(BaseModel):
 class RemessasFaturamentoList(BaseModel):
     remessas: list[RemessaFaturamentoCardPublic]
     total: int
+    valor_total_conciliado: Decimal
     valor_total_nao_conciliado: Decimal
     limit: int
     offset: int
@@ -606,6 +676,7 @@ class UsuarioOperacaoFinanceiraPublic(BaseModel):
 class AuditoriaConciliacaoPublic(BaseModel):
     id: int
     conciliacao_origem_id: int
+    numero_nfse: str
     acao: str
     usuario: UsuarioOperacaoFinanceiraPublic
     dados_anteriores: dict | None = None
@@ -835,6 +906,30 @@ class RecebimentoRemessaCreate(BaseModel):
         return self
 
 
+class RecebimentoRemessaUpdate(BaseModel):
+    data_recebimento: date
+    valor_recebido: Decimal = Field(gt=0)
+    conta_bancaria_id: int = Field(gt=0)
+    conta_plano_contas: str | None = Field(default=None, max_length=255)
+    conta_centro_custo: str | None = Field(default=None, max_length=255)
+    lancamento_extrato_id: int | None = Field(default=None, gt=0)
+
+    @field_validator('conta_plano_contas', 'conta_centro_custo')
+    @classmethod
+    def normalize_optional_text(cls, value):
+        normalized = str(value or '').strip()
+        return normalized or None
+
+    @model_validator(mode='after')
+    def validate_data_recebimento(self):
+        today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
+        if self.data_recebimento > today:
+            raise ValueError(
+                'A data do recebimento nao pode ser maior que a data atual.'
+            )
+        return self
+
+
 class RecebimentoRemessaPublic(BaseModel):
     id: int
     cd_remessa: int
@@ -864,6 +959,19 @@ class RecebimentosRemessaList(BaseModel):
     offset: int
 
 
+class RecebimentoAnteriorNfsePublic(BaseModel):
+    id: int
+    data_recebimento: date
+    valor_recebido: Decimal
+    saldo_financeiro: Decimal
+    conta_bancaria_id: int
+    conta_plano_contas: str | None = None
+    conta_centro_custo: str | None = None
+    lancamento_extrato_id: int | None = None
+    lancamento_extrato: LancamentoExtratoBancarioPublic | None = None
+    data_registro: datetime
+
+
 class NfseSemRecebimentoPublic(BaseModel):
     id: int
     numero_nfse: str
@@ -873,10 +981,12 @@ class NfseSemRecebimentoPublic(BaseModel):
     valor_nfse: Decimal
     valor_vinculado_remessa: Decimal
     valor_glosado: Decimal
+    valor_recebido: Decimal
     valor_pendente: Decimal
     situacao: str
     em_atraso: bool
     dias_em_atraso: int
+    recebimentos: list[RecebimentoAnteriorNfsePublic]
 
 
 class RemessaSemRecebimentoPublic(BaseModel):
@@ -900,6 +1010,7 @@ class ConciliacoesSemRecebimentoList(BaseModel):
     conciliacoes: list[RemessaSemRecebimentoPublic]
     total: int
     total_remessas_sem_recebimento: int
+    valor_total_recebido: Decimal
     valor_total_pendente: Decimal
     limit: int
     offset: int
@@ -930,6 +1041,8 @@ class ItemFollowUpGlosaPublic(BaseModel):
     qt_lancamento: Decimal
     vl_total_conta: Decimal
     registro_glosa: RegistroGlosaPublic
+    registro_recusa: RegistroGlosaPublic | None = None
+    registro_acato: RegistroGlosaPublic | None = None
 
 
 class PacienteFollowUpGlosaPublic(BaseModel):

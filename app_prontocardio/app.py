@@ -13,6 +13,7 @@ from app_prontocardio.routers import (
     autenticacao,
     financeiro,
     livre,
+    requisicoes,
     usuarios,
 )
 from app_prontocardio.settings import Settings
@@ -44,3 +45,4 @@ app.include_router(livre.router)
 app.include_router(usuarios.router)
 app.include_router(app_glosas.router)
 app.include_router(financeiro.router)
+app.include_router(requisicoes.router)

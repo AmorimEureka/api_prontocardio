@@ -30,6 +30,7 @@ from app_prontocardio.schema import (
     ConciliacoesGerenciamentoList,
     ConciliacoesSemRecebimentoList,
     RecebimentoRemessaCreate,
+    RecebimentoRemessaUpdate,
     RegistroGlosaCreate,
 )
 
@@ -37,6 +38,7 @@ CD_REMESSA_TESTE = 987
 CONTA_BANCARIA_TESTE = 7
 ITENS_ANALITICOS_TESTE = 2
 CONCILIACOES_DISTRIBUIDAS = 2
+PARCELAS_ANTES_QUITACAO = 2
 GRU_PRO_DIAGNOSTICO = 10
 GRU_PRO_MEDICAMENTOS = 20
 GRU_FAT_EXAMES = 1
@@ -447,7 +449,7 @@ def test_lista_apenas_nfse_nao_conciliada(
     }
 
 
-def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
+def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(  # noqa: PLR0915
     session,
     usuario_teste,
     monkeypatch,
@@ -469,6 +471,9 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
         session=session,
         session_oracle=object(),
         q=None,
+        numero_nfse='1234',
+        cd_remessa=CD_REMESSA_TESTE,
+        convenio='Teste',
         limit=20,
         offset=0,
     )
@@ -555,6 +560,112 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(
         offset=0,
     )
     assert follow_up['cards'] == []
+
+    response = app_glosas.deletar_glosa(
+        registros_glosa[0].id,
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    session.refresh(registros_glosa[0])
+    assert response == {'message': 'Registro de glosa desfeito!'}
+    assert registros_glosa[0].sn_ativo == 'true'
+    assert registros_glosa[0].status_tratativa == 'pendente'
+    assert registros_glosa[0].processo_recurso is None
+    assert registros_glosa[0].qtd_recursado is None
+    assert registros_glosa[0].valor_recursado is None
+    assert registros_glosa[0].dt_recurso is None
+    assert registros_glosa[0].motivo_glosa == (
+        'Glosa informada na conciliacao fiscal'
+    )
+    assert 'Pendente de tratativa da NFS-e 12345' in (
+        registros_glosa[0].descricao_glosa
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+    assert follow_up['valor_total_pendente'] == Decimal('10.00')
+    assert follow_up['valor_total_tratado'] == Decimal('10.00')
+    assert len(follow_up['cards']) == 1
+    itens_reexibidos = [
+        item
+        for paciente in follow_up['cards'][0]['pacientes']
+        for item in paciente['itens']
+    ]
+    item_restaurado = next(
+        item
+        for item in itens_reexibidos
+        if item['registro_glosa'].id == registros_glosa[0].id
+    )
+    assert item_restaurado['registro_glosa'].status_tratativa == 'pendente'
+
+
+def test_follow_up_agrupa_recurso_e_acato_no_mesmo_item(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session)
+    configurar_oracle_fake(monkeypatch)
+    financeiro.conciliar_faturamento(
+        payload=ConciliacaoFaturamentoCreate(**payload_conciliacao()),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    registro = session.scalar(
+        select(RegistroGlosa).where(RegistroGlosa.cd_lancamento == 1)
+    )
+    app_glosas.editar_glosa(
+        registro.id,
+        payload_tratativa(registro, 'REC-ITEM-1', '10.00'),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    dados_acato = payload_tratativa(
+        registro,
+        'TEMPORARIO',
+        '5.00',
+    ).model_dump()
+    dados_acato.update(
+        sn_glosado='not',
+        processo_recurso=None,
+        qtd_recursado=None,
+    )
+    acato = app_glosas.editar_glosa(
+        registro.id,
+        RegistroGlosaCreate(**dados_acato),
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+    itens = [
+        item
+        for paciente in follow_up['cards'][0]['pacientes']
+        for item in paciente['itens']
+    ]
+    item = next(item for item in itens if item['cd_lancamento'] == 1)
+
+    assert len(itens) == ITENS_ANALITICOS_TESTE
+    assert item['registro_recusa'].id == registro.id
+    assert item['registro_acato'].id == acato.id
+    assert item['registro_recusa'].valor_recursado == Decimal('10.00')
+    assert item['registro_acato'].valor_recursado == Decimal('5.00')
+    assert follow_up['valor_total_tratado'] == Decimal('15.00')
+    assert follow_up['valor_total_pendente'] == Decimal('5.00')
 
 
 def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
@@ -696,6 +807,7 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
 
     assert response['total'] == 1
     assert response['total_remessas_sem_recebimento'] == 1
+    assert response['valor_total_recebido'] == Decimal('0.00')
     assert response['valor_total_pendente'] == Decimal('100.00')
     remessa = response['conciliacoes'][0]
     assert remessa['cd_remessa'] == CD_REMESSA_TESTE
@@ -715,10 +827,12 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
             'valor_nfse': Decimal('100.00'),
             'valor_vinculado_remessa': Decimal('120.00'),
             'valor_glosado': Decimal('20.00'),
+            'valor_recebido': Decimal('0.00'),
             'valor_pendente': Decimal('100.00'),
             'situacao': 'sem_recebimento',
             'em_atraso': False,
             'dias_em_atraso': 0,
+            'recebimentos': [],
         }
     ]
     ConciliacoesSemRecebimentoList.model_validate(response)
@@ -755,6 +869,7 @@ def test_conciliacao_recebida_nao_aparece_na_fila_sem_recebimento(
         'conciliacoes': [],
         'total': 0,
         'total_remessas_sem_recebimento': 0,
+        'valor_total_recebido': Decimal('0.00'),
         'valor_total_pendente': Decimal('0.00'),
         'limit': 100,
         'offset': 0,
@@ -802,6 +917,7 @@ def test_fila_sem_recebimento_agrupa_nfses_por_remessa(
 
     assert response['total'] == 1
     assert response['total_remessas_sem_recebimento'] == 1
+    assert response['valor_total_recebido'] == Decimal('0.00')
     assert response['valor_total_pendente'] == Decimal('100.00')
     remessa = response['conciliacoes'][0]
     assert remessa['cd_remessa'] == CD_REMESSA_TESTE
@@ -828,6 +944,201 @@ def test_fila_sem_recebimento_agrupa_nfses_por_remessa(
         len(response_por_nfse['conciliacoes'][0]['notas'])
         == CONCILIACOES_DISTRIBUIDAS
     )
+
+    response_filtros_separados = (
+        financeiro.consultar_conciliacoes_sem_recebimento(
+            usuario_atual=usuario_teste,
+            session=session,
+            q=None,
+            numero_nfse='12345',
+            cd_remessa=str(CD_REMESSA_TESTE),
+            convenio='Convenio Teste',
+            processo_recebimento='PROC-SEM-RECEBIMENTO',
+            limit=25,
+            offset=0,
+        )
+    )
+    assert response_filtros_separados['total'] == 1
+    assert (
+        response_filtros_separados['conciliacoes'][0]['cd_remessa']
+        == CD_REMESSA_TESTE
+    )
+
+    response_processo_inexistente = (
+        financeiro.consultar_conciliacoes_sem_recebimento(
+            usuario_atual=usuario_teste,
+            session=session,
+            q=None,
+            processo_recebimento='PROCESSO-INEXISTENTE',
+            limit=25,
+            offset=0,
+        )
+    )
+    assert response_processo_inexistente['total'] == 0
+
+
+def test_fila_exibe_nfse_quitada_e_permite_editar_e_excluir_recebimento(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='60.00')
+    criar_nfse(
+        session,
+        row_hash='nfse-2',
+        valor='40.00',
+        numero_nfse='67890',
+    )
+    configurar_cards_oracle_fake(monkeypatch)
+    for row_hash, valor in (('nfse-1', '60.00'), ('nfse-2', '40.00')):
+        financeiro.conciliar_remessa_com_nfses(
+            cd_remessa=CD_REMESSA_TESTE,
+            payload=ConciliacaoRemessaCreate(
+                processo_recebimento='PROC-HISTORICO',
+                notas=[
+                    {
+                        'nfse_row_hash': row_hash,
+                        'valor_alocado': valor,
+                        'data_previsao_recebimento': '2026-08-10',
+                    }
+                ],
+            ),
+            usuario_atual=usuario_teste,
+            session_postgres=session,
+            session_oracle=object(),
+        )
+    conciliacao = session.scalar(
+        select(ConciliacaoFaturamento).where(
+            ConciliacaoFaturamento.numero_nfse == '12345'
+        )
+    )
+    lancamento = LancamentoExtratoBancario(
+        conta_bancaria_id=CONTA_BANCARIA_TESTE,
+        data_lancamento=date(2026, 7, 10),
+        valor=Decimal('60.00'),
+        descricao='Crédito da NFS-e 12345',
+    )
+    lancamento.data_criacao = datetime(2026, 7, 10, 9, 0)
+    session.add(lancamento)
+    session.commit()
+    criado = financeiro.registrar_recebimento_remessa(
+        payload=RecebimentoRemessaCreate(
+            conciliacao_id=conciliacao.id,
+            cd_remessa=CD_REMESSA_TESTE,
+            numero_nfse='12345',
+            data_recebimento='2026-07-10',
+            valor_recebido='60.00',
+            conta_bancaria_id=CONTA_BANCARIA_TESTE,
+            conta_plano_contas='1.1.1',
+            conta_centro_custo='CC-10',
+            lancamento_extrato_id=lancamento.id,
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=OracleComContaFake(),
+    )
+
+    fila = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        limit=25,
+        offset=0,
+    )
+    card = fila['conciliacoes'][0]
+    assert card['valor_recebido'] == Decimal('60.00')
+    assert card['valor_pendente'] == Decimal('40.00')
+    assert len(card['notas']) == CONCILIACOES_DISTRIBUIDAS
+    nota_quitada = next(
+        nota for nota in card['notas'] if nota['numero_nfse'] == '12345'
+    )
+    assert nota_quitada['situacao'] == 'recebido'
+    assert nota_quitada['valor_recebido'] == Decimal('60.00')
+    assert nota_quitada['valor_pendente'] == Decimal('0.00')
+    assert nota_quitada['recebimentos'][0]['lancamento_extrato'][
+        'descricao'
+    ] == 'Crédito da NFS-e 12345'
+
+    atualizado = financeiro.editar_recebimento_remessa(
+        recebimento_id=criado['id'],
+        payload=RecebimentoRemessaUpdate(
+            data_recebimento='2026-07-10',
+            valor_recebido='50.00',
+            conta_bancaria_id=CONTA_BANCARIA_TESTE,
+            conta_plano_contas='1.1.2',
+            conta_centro_custo='CC-11',
+            lancamento_extrato_id=lancamento.id,
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=OracleComContaFake(),
+    )
+    assert atualizado['valor_recebido'] == Decimal('50.00')
+    fila_editada = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        limit=25,
+        offset=0,
+    )
+    card_editado = fila_editada['conciliacoes'][0]
+    nota_editada = next(
+        nota
+        for nota in card_editado['notas']
+        if nota['numero_nfse'] == '12345'
+    )
+    assert card_editado['valor_recebido'] == Decimal('50.00')
+    assert card_editado['valor_pendente'] == Decimal('50.00')
+    assert nota_editada['situacao'] == 'recebimento_parcial'
+    assert nota_editada['valor_pendente'] == Decimal('10.00')
+    assert nota_editada['recebimentos'][0]['conta_plano_contas'] == '1.1.2'
+
+    excluido = financeiro.excluir_recebimento_remessa(
+        recebimento_id=criado['id'],
+        usuario_atual=usuario_teste,
+        session=session,
+    )
+    assert excluido['valor_total_recebido'] == Decimal('0.00')
+    fila_reaberta = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        limit=25,
+        offset=0,
+    )
+    card_reaberto = fila_reaberta['conciliacoes'][0]
+    nota_reaberta = next(
+        nota
+        for nota in card_reaberto['notas']
+        if nota['numero_nfse'] == '12345'
+    )
+    assert card_reaberto['valor_recebido'] == Decimal('0.00')
+    assert card_reaberto['valor_pendente'] == Decimal('100.00')
+    assert nota_reaberta['recebimentos'] == []
+    assert nota_reaberta['situacao'] == 'sem_recebimento'
+    assert (
+        session.get(LancamentoExtratoBancario, lancamento.id).conciliado
+        is False
+    )
+    auditorias = list(
+        session.scalars(
+            select(AuditoriaConciliacaoFaturamento)
+            .where(
+                AuditoriaConciliacaoFaturamento.conciliacao_id
+                == conciliacao.id,
+                AuditoriaConciliacaoFaturamento.acao.in_(
+                    ('edicao_recebimento', 'exclusao_recebimento')
+                ),
+            )
+            .order_by(AuditoriaConciliacaoFaturamento.id)
+        )
+    )
+    assert [auditoria.acao for auditoria in auditorias] == [
+        'edicao_recebimento',
+        'exclusao_recebimento',
+    ]
+    assert auditorias[-1].usuario_id == usuario_teste.id
+    assert auditorias[-1].dados_anteriores['recebimento']['id'] == criado['id']
 
 
 def test_lista_apenas_remessa_pendente_em_conciliacao_parcial(
@@ -899,7 +1210,7 @@ def test_lista_apenas_remessa_pendente_em_conciliacao_parcial(
     assert item['valor_recebido'] == Decimal('0.00')
     assert item['valor_pendente'] == Decimal('40.00')
     assert item['notas'][0]['numero_nfse'] == '12345'
-    assert item['notas'][0]['situacao'] == 'recebimento_parcial'
+    assert item['notas'][0]['situacao'] == 'sem_recebimento'
 
     response_remessa_recebida = (
         financeiro.consultar_conciliacoes_sem_recebimento(
@@ -1425,6 +1736,8 @@ def test_lista_remessa_com_saldo_e_historico_centrados_no_faturamento(
     )
 
     assert response['total'] == 1
+    assert response['valor_total_conciliado'] == Decimal('0.00')
+    assert response['valor_total_nao_conciliado'] == Decimal('120.00')
     assert response['remessas'][0] == {
         'cd_remessa': CD_REMESSA_TESTE,
         'data_competencia': date(2026, 7, 1),
@@ -1438,6 +1751,56 @@ def test_lista_remessa_com_saldo_e_historico_centrados_no_faturamento(
         'valor_disponivel_conciliacao': Decimal('120.00'),
         'processo_recebimento': None,
         'historico': [],
+    }
+
+
+def test_lista_remessas_encaminha_filtros_separados(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    filtros_recebidos = {}
+
+    def codigos_por_nfse(_session, numero_nfse):
+        filtros_recebidos['numero_nfse'] = numero_nfse
+        return {CD_REMESSA_TESTE}
+
+    def consultar_cards(*_args, **kwargs):
+        filtros_recebidos.update(kwargs)
+        return [], 0
+
+    monkeypatch.setattr(
+        financeiro,
+        '_codigos_remessas_por_nfse',
+        codigos_por_nfse,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_cards_remessas_hpc',
+        consultar_cards,
+    )
+
+    response = financeiro.consultar_remessas_faturamento(
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+        q=None,
+        numero_nfse='5032',
+        cd_remessa='10521',
+        convenio='BRADESCO',
+        limit=25,
+        offset=0,
+    )
+
+    assert response['remessas'] == []
+    assert filtros_recebidos == {
+        'numero_nfse': '5032',
+        'q': None,
+        'numero_remessa': '10521',
+        'convenio': 'BRADESCO',
+        'cd_remessas_nfse': {CD_REMESSA_TESTE},
+        'limit': 25,
+        'offset': 0,
     }
 
 
@@ -1806,7 +2169,11 @@ def test_consulta_gerencial_exibe_conciliacao_recebimento_e_usuarios(
     response = financeiro.consultar_conciliacoes_faturamento(
         usuario_atual=usuario_teste,
         session=session,
-        q='NFSE-ANTERIOR',
+        q=None,
+        numero_nfse='NFSE-ANTERIOR',
+        remessa_filtro=str(CD_REMESSA_TESTE),
+        convenio='Convenio Teste',
+        processo_recebimento='PROC-ANTERIOR',
         situacao='recebido',
         incluir_inativas=False,
         limit=25,
@@ -1821,6 +2188,22 @@ def test_consulta_gerencial_exibe_conciliacao_recebimento_e_usuarios(
     assert nota['usuario_criacao']['id'] == usuario_teste.id
     assert nota['recebimentos'][0]['usuario']['id'] == usuario_teste.id
     assert card['auditoria'][0]['acao'] == 'criacao'
+    assert card['auditoria'][0]['numero_nfse'] == conciliacao.numero_nfse
+
+    sem_correspondencia = financeiro.consultar_conciliacoes_faturamento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=None,
+        numero_nfse='NFSE-ANTERIOR',
+        remessa_filtro=str(CD_REMESSA_TESTE),
+        convenio='Convenio Teste',
+        processo_recebimento='PROCESSO-INEXISTENTE',
+        situacao='recebido',
+        incluir_inativas=False,
+        limit=25,
+        offset=0,
+    )
+    assert sem_correspondencia['total'] == 0
 
 
 def test_consulta_gerencial_reune_historico_de_conciliacao_recriada(
@@ -1872,7 +2255,8 @@ def test_consulta_gerencial_reune_historico_de_conciliacao_recriada(
     response = financeiro.consultar_conciliacoes_faturamento(
         usuario_atual=usuario_teste,
         session=session,
-        q=str(CD_REMESSA_TESTE),
+        q=None,
+        remessa_filtro=str(CD_REMESSA_TESTE),
         situacao=None,
         incluir_inativas=False,
         limit=25,
@@ -1891,6 +2275,9 @@ def test_consulta_gerencial_reune_historico_de_conciliacao_recriada(
     assert {
         evento['conciliacao_origem_id'] for evento in card['auditoria']
     } == {conciliacao_anterior.id, card['notas'][0]['id']}
+    assert {evento['numero_nfse'] for evento in card['auditoria']} == {
+        conciliacao_anterior.numero_nfse
+    }
 
 
 def test_consulta_gerencial_agrupa_notas_por_remessa(
@@ -1927,7 +2314,8 @@ def test_consulta_gerencial_agrupa_notas_por_remessa(
     response = financeiro.consultar_conciliacoes_faturamento(
         usuario_atual=usuario_teste,
         session=session,
-        q=str(CD_REMESSA_TESTE),
+        q=None,
+        remessa_filtro=str(CD_REMESSA_TESTE),
         situacao=None,
         incluir_inativas=False,
         limit=25,
@@ -1940,6 +2328,10 @@ def test_consulta_gerencial_agrupa_notas_por_remessa(
     card = response['conciliacoes'][0]
     assert card['cd_remessa'] == CD_REMESSA_TESTE
     assert {nota['numero_nfse'] for nota in card['notas']} == {
+        '12345',
+        '67890',
+    }
+    assert {evento['numero_nfse'] for evento in card['auditoria']} == {
         '12345',
         '67890',
     }
@@ -2262,7 +2654,7 @@ def test_acato_integral_encerra_saldo_sem_marcar_recebimento_integral(
         )
 
     assert exc_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
-    assert 'deve ser exatamente R$ 100,00' in exc_info.value.detail
+    assert 'excede o saldo em aberto de R$ 0,00' in exc_info.value.detail
 
 
 def test_acato_parcial_reduz_saldo_e_recurso_quita_parte_recursada(
@@ -2463,7 +2855,7 @@ def test_recebimentos_por_remessa_quitam_em_nfses_distintas(
     ] is True
 
 
-def test_recebimento_posterior_exige_valor_exato(
+def test_recebimento_posterior_permite_parcelas_ate_quitacao(  # noqa: PLR0915
     session,
     usuario_teste,
     monkeypatch,
@@ -2506,26 +2898,128 @@ def test_recebimento_posterior_exige_valor_exato(
         conta_centro_custo='CC-10',
         lancamento_extrato_id=lancamento.id,
     )
-    with pytest.raises(HTTPException) as exc_info:
-        financeiro.registrar_recebimento_remessa(
-            payload=payload_recebimento,
-            usuario_atual=usuario_teste,
-            session_postgres=session,
-            session_oracle=OracleComContaFake(),
-        )
-    assert exc_info.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
-    assert 'exatamente R$ 120,00' in exc_info.value.detail
-    assert session.scalar(select(RecebimentoRemessa)) is None
+    primeira_parcela = financeiro.registrar_recebimento_remessa(
+        payload=payload_recebimento,
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=OracleComContaFake(),
+    )
+    assert primeira_parcela['recebimento_integral'] is False
+    assert primeira_parcela['remessa_recebida_integralmente'] is False
+    assert primeira_parcela['valor_total_recebido'] == Decimal('50.00')
+    assert primeira_parcela['saldo_em_aberto'] == Decimal('70.00')
+    conciliacao = session.scalar(select(ConciliacaoFaturamento))
+    assert conciliacao.data_recebimento is None
     assert (
         session.get(LancamentoExtratoBancario, lancamento.id).conciliado
-        is False
+        is True
     )
 
-    payload_exato = payload_recebimento.model_copy(
-        update={'valor_recebido': Decimal('120.00')}
+    fila_parcial = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q='12345',
+        limit=100,
+        offset=0,
+    )
+    assert fila_parcial['total'] == 1
+    nota_pendente = fila_parcial['conciliacoes'][0]['notas'][0]
+    assert nota_pendente['valor_recebido'] == Decimal('50.00')
+    assert nota_pendente['valor_pendente'] == Decimal('70.00')
+    assert nota_pendente['situacao'] == 'recebimento_parcial'
+    assert len(nota_pendente['recebimentos']) == 1
+    assert nota_pendente['recebimentos'][0] == {
+        'id': nota_pendente['recebimentos'][0]['id'],
+        'data_recebimento': date(2026, 7, 10),
+        'valor_recebido': Decimal('50.00'),
+        'saldo_financeiro': Decimal('70.00'),
+        'conta_bancaria_id': 7,
+        'conta_plano_contas': '1.1.1',
+        'conta_centro_custo': 'CC-10',
+        'lancamento_extrato_id': lancamento.id,
+        'lancamento_extrato': {
+            'id': lancamento.id,
+            'conta_bancaria_id': 7,
+            'data_lancamento': date(2026, 7, 10),
+            'valor': Decimal('120.00'),
+            'descricao': 'Recebimento NFS-e 12345',
+            'documento': None,
+        },
+        'data_registro': nota_pendente['recebimentos'][0][
+            'data_registro'
+        ],
+    }
+    ConciliacoesSemRecebimentoList.model_validate(fila_parcial)
+
+    segundo_lancamento = LancamentoExtratoBancario(
+        conta_bancaria_id=CONTA_BANCARIA_TESTE,
+        data_lancamento=date(2026, 7, 11),
+        valor=Decimal('20.00'),
+        descricao='Segunda parcela NFS-e 12345',
+    )
+    segundo_lancamento.data_criacao = datetime(2026, 7, 11, 9, 0)
+    session.add(segundo_lancamento)
+    session.commit()
+    segunda_parcela_payload = payload_recebimento.model_copy(
+        update={
+            'data_recebimento': date(2026, 7, 11),
+            'valor_recebido': Decimal('20.00'),
+            'lancamento_extrato_id': segundo_lancamento.id,
+        }
+    )
+    segunda_parcela = financeiro.registrar_recebimento_remessa(
+        payload=segunda_parcela_payload,
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=OracleComContaFake(),
+    )
+    assert segunda_parcela['recebimento_integral'] is False
+    assert segunda_parcela['remessa_recebida_integralmente'] is False
+    assert segunda_parcela['valor_total_recebido'] == Decimal('70.00')
+    assert segunda_parcela['saldo_em_aberto'] == Decimal('50.00')
+
+    fila_ainda_parcial = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q='12345',
+        limit=100,
+        offset=0,
+    )
+    assert fila_ainda_parcial['total'] == 1
+    nota_ainda_pendente = fila_ainda_parcial['conciliacoes'][0]['notas'][0]
+    assert nota_ainda_pendente['valor_recebido'] == Decimal('70.00')
+    assert nota_ainda_pendente['valor_pendente'] == Decimal('50.00')
+    assert nota_ainda_pendente['situacao'] == 'recebimento_parcial'
+    assert (
+        len(nota_ainda_pendente['recebimentos'])
+        == PARCELAS_ANTES_QUITACAO
+    )
+    assert [
+        (item['valor_recebido'], item['saldo_financeiro'])
+        for item in nota_ainda_pendente['recebimentos']
+    ] == [
+        (Decimal('50.00'), Decimal('70.00')),
+        (Decimal('20.00'), Decimal('50.00')),
+    ]
+
+    terceiro_lancamento = LancamentoExtratoBancario(
+        conta_bancaria_id=CONTA_BANCARIA_TESTE,
+        data_lancamento=date(2026, 7, 12),
+        valor=Decimal('50.00'),
+        descricao='Quitação NFS-e 12345',
+    )
+    terceiro_lancamento.data_criacao = datetime(2026, 7, 12, 9, 0)
+    session.add(terceiro_lancamento)
+    session.commit()
+    terceira_parcela_payload = payload_recebimento.model_copy(
+        update={
+            'data_recebimento': date(2026, 7, 12),
+            'valor_recebido': Decimal('50.00'),
+            'lancamento_extrato_id': terceiro_lancamento.id,
+        }
     )
     response = financeiro.registrar_recebimento_remessa(
-        payload=payload_exato,
+        payload=terceira_parcela_payload,
         usuario_atual=usuario_teste,
         session_postgres=session,
         session_oracle=OracleComContaFake(),
@@ -2534,17 +3028,41 @@ def test_recebimento_posterior_exige_valor_exato(
     assert response['remessa_recebida_integralmente'] is True
     assert response['valor_total_recebido'] == Decimal('120.00')
     assert response['saldo_em_aberto'] == Decimal('0.00')
-    recebimento = session.scalar(select(RecebimentoRemessa))
-    assert recebimento.conta_plano_contas == '1.1.1'
-    assert recebimento.conta_centro_custo == 'CC-10'
-    assert recebimento.lancamento_extrato_id == lancamento.id
+    recebimentos = list(
+        session.scalars(
+            select(RecebimentoRemessa).order_by(RecebimentoRemessa.id)
+        )
+    )
+    assert [item.valor_recebido for item in recebimentos] == [
+        Decimal('50.00'),
+        Decimal('20.00'),
+        Decimal('50.00'),
+    ]
+    assert recebimentos[0].conta_plano_contas == '1.1.1'
+    assert recebimentos[0].conta_centro_custo == 'CC-10'
+    assert recebimentos[0].lancamento_extrato_id == lancamento.id
+    session.refresh(conciliacao)
+    assert conciliacao.data_recebimento == date(2026, 7, 12)
     assert (
-        session.get(LancamentoExtratoBancario, lancamento.id).conciliado
+        session.get(
+            LancamentoExtratoBancario,
+            terceiro_lancamento.id,
+        ).conciliado
         is True
     )
+
+    fila_quitada = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q='12345',
+        limit=100,
+        offset=0,
+    )
+    assert fila_quitada['total'] == 0
+
     with pytest.raises(HTTPException) as duplicate_info:
         financeiro.registrar_recebimento_remessa(
-            payload=payload_exato.model_copy(
+            payload=terceira_parcela_payload.model_copy(
                 update={'lancamento_extrato_id': None}
             ),
             usuario_atual=usuario_teste,

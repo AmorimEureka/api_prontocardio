@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
     Numeric,
     String,
     UniqueConstraint,
@@ -31,6 +32,12 @@ class TipoAtendimento(str, Enum):
     EXTERNO = 'Externo'
     URGENCIA = 'Urgência'
     INTERNACAO = 'Internação'
+
+
+class LocalSolicitacaoNota(str, Enum):
+    CLINICA_1 = 'Clinica 1'
+    CLINICA_2 = 'Clinica 2'
+    EMERGENCIA = 'Emergencia'
 
 
 @table_registry.mapped_as_dataclass
@@ -89,6 +96,7 @@ class RegistroGlosa:
             'conciliacao_remessa_id',
             'conta',
             'cd_lancamento',
+            'sn_glosado',
             name='uq_registro_glosa_conciliacao_item',
         ),
         {'schema': settings.POSTGRES_SCHEMA},
@@ -219,7 +227,9 @@ class RegistroGlosa:
 
     @property
     def status_tratativa(self) -> str:
-        if self.processo_recurso is not None and self.dt_recurso is not None:
+        if self.dt_recurso is not None and (
+            self.sn_glosado == 'not' or self.processo_recurso is not None
+        ):
             return 'acato' if self.sn_glosado == 'not' else 'recurso'
         return 'pendente'
 
@@ -239,8 +249,7 @@ class RegistroGlosa:
             (
                 registro.valor_recursado
                 for registro in registros_ativos
-                if registro.processo_recurso is not None
-                and registro.dt_recurso is not None
+                if registro.status_tratativa != 'pendente'
                 and registro.valor_recursado is not None
             ),
             start=Decimal('0.00'),
@@ -248,7 +257,7 @@ class RegistroGlosa:
         registros_pendentes = [
             registro
             for registro in registros_ativos
-            if registro.processo_recurso is None or registro.dt_recurso is None
+            if registro.status_tratativa == 'pendente'
         ]
         if not registros_pendentes:
             return Decimal('0.00')
@@ -578,10 +587,10 @@ class RecebimentoRemessa:
             name='fk_recebimento_conciliacao_remessa',
             ondelete='CASCADE',
         ),
-        UniqueConstraint(
+        Index(
+            'ix_recebimentos_remessas_conciliacao_remessa',
             'conciliacao_id',
             'cd_remessa',
-            name='uq_recebimento_conciliacao_remessa',
         ),
         {'schema': settings.POSTGRES_SCHEMA},
     )
@@ -651,6 +660,56 @@ class Tiss:
     pagina_pdf: Mapped[int] = mapped_column(init=False)
     data_criacao: Mapped[datetime] = mapped_column(
         'created_at',
+        init=False,
+        server_default=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class SolicitacaoNota:
+    __tablename__ = 'solicitacao_nota'
+    __table_args__ = (
+        CheckConstraint(
+            "local IN ('Clinica 1', 'Clinica 2', 'Emergencia')",
+            name='ck_solicitacao_nota_local',
+        ),
+        Index(
+            'ix_solicitacao_nota_codigo_atendimento',
+            'codigo_atendimento',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    codigo_atendimento: Mapped[int]
+    codigo_paciente: Mapped[int]
+    codigo_convenio: Mapped[int]
+    nm_paciente: Mapped[str] = mapped_column(String(200))
+    convenio: Mapped[str] = mapped_column(String(100))
+    local: Mapped[str] = mapped_column(String(20))
+    procedimento: Mapped[str] = mapped_column(String(500))
+    tipo_atendimento: Mapped[str] = mapped_column(String(50))
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    nr_cpf: Mapped[str | None] = mapped_column(String(20), default=None)
+    nr_cep: Mapped[str | None] = mapped_column(String(20), default=None)
+    ds_endereco: Mapped[str | None] = mapped_column(
+        String(200),
+        default=None,
+    )
+    nr_endereco: Mapped[str | None] = mapped_column(String(30), default=None)
+    nm_bairro: Mapped[str | None] = mapped_column(
+        String(100),
+        default=None,
+    )
+    ds_complemento: Mapped[str | None] = mapped_column(
+        String(100),
+        default=None,
+    )
+    email: Mapped[str | None] = mapped_column(String(150), default=None)
+    nr_fone: Mapped[str | None] = mapped_column(String(50), default=None)
+    data_criacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=func.now(),
     )
@@ -777,3 +836,21 @@ class ModelContaAtendimento:
         init=False,
     )
     dt_ordenacao: Mapped[datetime | None] = mapped_column(DateTime, init=False)
+
+
+@table_registry.mapped_as_dataclass
+class ModelHpcPaciente:
+    __tablename__ = 'HPC_V_PACIENTES'
+    __table_args__ = {'schema': 'DBAMV'}
+
+    cd_paciente: Mapped[int] = mapped_column(primary_key=True, init=False)
+    paciente: Mapped[str] = mapped_column(String, init=False)
+    nome_mae: Mapped[str | None] = mapped_column(String, init=False)
+    cpf: Mapped[str | None] = mapped_column(String, init=False)
+    cep: Mapped[str | None] = mapped_column(String, init=False)
+    rua: Mapped[str | None] = mapped_column(String, init=False)
+    numero_casa: Mapped[int | None] = mapped_column(init=False)
+    bairro: Mapped[str | None] = mapped_column(String, init=False)
+    complemento: Mapped[str | None] = mapped_column(String, init=False)
+    email: Mapped[str | None] = mapped_column(String, init=False)
+    contato: Mapped[str | None] = mapped_column(String, init=False)
