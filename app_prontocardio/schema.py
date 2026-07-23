@@ -198,10 +198,13 @@ class EmissaoNfsePublic(BaseModel):
     id: int
     solicitacao_nota_id: int
     lote_id: int
+    usuario_id: int
     status: str
     numero_nfse: str | None = None
     protocolo: str | None = None
+    erro: str | None = None
     data_criacao: datetime
+    data_atualizacao: datetime
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -212,8 +215,11 @@ class LoteEmissaoNfsePublic(BaseModel):
     status: str
     quantidade: int
     dag_run_id: str | None = None
+    airflow_disparado_em: datetime | None = None
+    erro_disparo: str | None = None
+    data_criacao: datetime
     emissoes: list[EmissaoNfsePublic]
-    message: str
+    message: str | None = None
 
 
 class RegistroGlosaCreate(BaseModel):

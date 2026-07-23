@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app_prontocardio.database import (
@@ -41,6 +41,7 @@ from app_prontocardio.schema import (
 )
 from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.airflow_nfse import (
+    AirflowNfseIndisponivelError,
     AirflowNfseTriggerError,
     airflow_nfse_configurado,
     disparar_dag_emissao_nfse,
@@ -99,6 +100,258 @@ def _workflow_public(
         validado_em=workflow.validado_em,
         workflow_atualizado_em=workflow.data_atualizacao,
     )
+
+
+def _lote_emissao_public(
+    lote: LoteEmissaoNfse,
+    emissoes: list[EmissaoNfse],
+    message: str | None = None,
+) -> LoteEmissaoNfsePublic:
+    return LoteEmissaoNfsePublic(
+        lote_id=lote.id,
+        tipo=lote.tipo,
+        status=lote.status,
+        quantidade=len(emissoes),
+        dag_run_id=lote.dag_run_id,
+        airflow_disparado_em=lote.airflow_disparado_em,
+        erro_disparo=lote.erro_disparo,
+        data_criacao=lote.data_criacao,
+        emissoes=[
+            EmissaoNfsePublic.model_validate(emissao)
+            for emissao in emissoes
+        ],
+        message=message,
+    )
+
+
+def _possui_dados_fiscais_obrigatorios(
+    solicitacao: SolicitacaoNota,
+) -> bool:
+    return all(
+        _texto(value)
+        for value in (
+            solicitacao.nr_cpf,
+            solicitacao.nm_paciente,
+            solicitacao.procedimento,
+            solicitacao.local,
+            solicitacao.tipo_atendimento,
+        )
+    )
+
+
+def _carregar_workflows_para_emissao(
+    solicitacao_ids: list[int],
+    session_postgres: Session,
+) -> dict[int, SolicitacaoNotaWorkflow]:
+    rows = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNota.id
+            == SolicitacaoNotaWorkflow.solicitacao_nota_id,
+        )
+        .where(SolicitacaoNota.id.in_(solicitacao_ids))
+        .with_for_update()
+    ).all()
+    solicitacoes = {
+        solicitacao.id: solicitacao for solicitacao, _workflow in rows
+    }
+    workflows = {
+        solicitacao.id: workflow for solicitacao, workflow in rows
+    }
+    estados_ativos = (
+        StatusEmissaoNfse.PENDENTE.value,
+        StatusEmissaoNfse.PROCESSANDO.value,
+        StatusEmissaoNfse.EMITIDA.value,
+    )
+    emissoes_existentes = set(
+        session_postgres.scalars(
+            select(EmissaoNfse.solicitacao_nota_id)
+            .where(
+                EmissaoNfse.solicitacao_nota_id.in_(solicitacao_ids),
+                EmissaoNfse.status.in_(estados_ativos),
+            )
+            .with_for_update()
+        ).all()
+    )
+    indisponiveis = [
+        solicitacao_id
+        for solicitacao_id in solicitacao_ids
+        if (
+            solicitacao_id not in solicitacoes
+            or solicitacao_id in emissoes_existentes
+            or workflows[solicitacao_id].status
+            != StatusWorkflowSolicitacao.VALIDADA.value
+            or workflows[solicitacao_id].validacao
+            != StatusWorkflowSolicitacao.VALIDADA.value
+            or solicitacoes[solicitacao_id].valor_nota is None
+            or solicitacoes[solicitacao_id].valor_nota <= 0
+            or not _possui_dados_fiscais_obrigatorios(
+                solicitacoes[solicitacao_id]
+            )
+        )
+    ]
+    if indisponiveis:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'Somente solicitações validadas podem ser emitidas. '
+                f'Verifique os registros: {indisponiveis}.'
+            ),
+        )
+    return workflows
+
+
+def _preparar_lote_emissao(
+    solicitacao_ids: list[int],
+    workflows: dict[int, SolicitacaoNotaWorkflow],
+    usuario_atual: Usuario,
+    session_postgres: Session,
+) -> tuple[LoteEmissaoNfse, list[EmissaoNfse]]:
+    tipo = (
+        TipoLoteEmissaoNfse.LOTE
+        if len(solicitacao_ids) > 1
+        else TipoLoteEmissaoNfse.INDIVIDUAL
+    )
+    lote = LoteEmissaoNfse(
+        tipo=tipo.value,
+        usuario_id=usuario_atual.id,
+        status=StatusEmissaoNfse.PENDENTE.value,
+    )
+    agora = _agora_local()
+    try:
+        session_postgres.add(lote)
+        session_postgres.flush()
+        emissoes = []
+        for solicitacao_id in solicitacao_ids:
+            emissao = EmissaoNfse(
+                solicitacao_nota_id=solicitacao_id,
+                lote_id=lote.id,
+                usuario_id=usuario_atual.id,
+                status=StatusEmissaoNfse.PENDENTE.value,
+            )
+            emissoes.append(emissao)
+            workflow = workflows[solicitacao_id]
+            workflow.status = (
+                StatusWorkflowSolicitacao.EMISSAO_SOLICITADA.value
+            )
+            workflow.data_atualizacao = agora
+            session_postgres.add(
+                SolicitacaoNotaEvento(
+                    solicitacao_nota_id=solicitacao_id,
+                    usuario_id=usuario_atual.id,
+                    tipo_acao='EMISSAO_SOLICITADA',
+                    observacao=f'Lote de emissão #{lote.id}.',
+                )
+            )
+        session_postgres.add_all(emissoes)
+        session_postgres.commit()
+        for emissao in emissoes:
+            session_postgres.refresh(emissao)
+    except IntegrityError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'Uma ou mais solicitações já possuem emissão ativa. '
+                'Atualize a lista e tente novamente.'
+            ),
+        ) from exc
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível colocar as NFS-e na fila de emissão.',
+        ) from exc
+    return lote, emissoes
+
+
+def _restaurar_apos_falha_airflow(
+    lote: LoteEmissaoNfse,
+    emissoes: list[EmissaoNfse],
+    usuario_atual: Usuario,
+    erro: AirflowNfseTriggerError,
+    session_postgres: Session,
+) -> None:
+    erro_tecnico = str(erro)[:1000]
+    workflows = {
+        workflow.solicitacao_nota_id: workflow
+        for workflow in session_postgres.scalars(
+            select(SolicitacaoNotaWorkflow).where(
+                SolicitacaoNotaWorkflow.solicitacao_nota_id.in_(
+                    [
+                        emissao.solicitacao_nota_id
+                        for emissao in emissoes
+                    ]
+                )
+            )
+        ).all()
+    }
+    lote.status = StatusEmissaoNfse.ERRO.value
+    lote.erro_disparo = erro_tecnico
+    for emissao in emissoes:
+        emissao.status = StatusEmissaoNfse.ERRO.value
+        emissao.erro = erro_tecnico
+        workflow = workflows[emissao.solicitacao_nota_id]
+        workflow.status = StatusWorkflowSolicitacao.VALIDADA.value
+        workflow.data_atualizacao = _agora_local()
+        session_postgres.add(
+            SolicitacaoNotaEvento(
+                solicitacao_nota_id=emissao.solicitacao_nota_id,
+                usuario_id=usuario_atual.id,
+                tipo_acao='ERRO_DISPARO_EMISSAO',
+                observacao=erro_tecnico[:500],
+            )
+        )
+    try:
+        session_postgres.commit()
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail=(
+                'Falha ao restaurar as solicitações após o erro '
+                'de comunicação com o Airflow.'
+            ),
+        ) from exc
+
+
+def _registrar_disparo_airflow(
+    lote: LoteEmissaoNfse,
+    emissoes: list[EmissaoNfse],
+    dag_run_id: str,
+    usuario_atual: Usuario,
+    session_postgres: Session,
+) -> None:
+    lote.status = StatusEmissaoNfse.PROCESSANDO.value
+    lote.dag_run_id = dag_run_id
+    lote.airflow_disparado_em = _agora_local()
+    lote.erro_disparo = None
+    for emissao in emissoes:
+        session_postgres.add(
+            SolicitacaoNotaEvento(
+                solicitacao_nota_id=emissao.solicitacao_nota_id,
+                usuario_id=usuario_atual.id,
+                tipo_acao='AIRFLOW_DISPARADO',
+                observacao=(
+                    f'Lote #{lote.id}; dag_run_id={dag_run_id}.'
+                )[:500],
+            )
+        )
+    try:
+        session_postgres.commit()
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail=(
+                'O Airflow aceitou o lote, mas não foi possível '
+                'persistir os dados do disparo.'
+            ),
+        ) from exc
 
 
 def _consultar_atendimento(
@@ -422,97 +675,16 @@ def solicitar_emissao_nfse(
             ),
         )
 
-    rows = session_postgres.execute(
-        select(
-            SolicitacaoNotaWorkflow,
-            SolicitacaoNota.valor_nota,
-        )
-        .join(
-            SolicitacaoNota,
-            SolicitacaoNota.id
-            == SolicitacaoNotaWorkflow.solicitacao_nota_id,
-        )
-        .where(
-            SolicitacaoNotaWorkflow.solicitacao_nota_id.in_(
-                payload.solicitacao_ids
-            )
-        )
-        .with_for_update()
-    ).all()
-    workflows = {
-        workflow.solicitacao_nota_id: workflow
-        for workflow, _valor_nota in rows
-    }
-    valores = {
-        workflow.solicitacao_nota_id: valor_nota
-        for workflow, valor_nota in rows
-    }
-    indisponiveis = [
-        solicitacao_id
-        for solicitacao_id in payload.solicitacao_ids
-        if (
-            solicitacao_id not in workflows
-            or workflows[solicitacao_id].status
-            != StatusWorkflowSolicitacao.VALIDADA.value
-            or valores.get(solicitacao_id) is None
-            or valores[solicitacao_id] <= 0
-        )
-    ]
-    if indisponiveis:
-        raise HTTPException(
-            status_code=HTTPStatus.CONFLICT,
-            detail=(
-                'Somente solicitações validadas podem ser emitidas. '
-                f'Verifique os registros: {indisponiveis}.'
-            ),
-        )
-
-    tipo = (
-        TipoLoteEmissaoNfse.LOTE
-        if len(payload.solicitacao_ids) > 1
-        else TipoLoteEmissaoNfse.INDIVIDUAL
+    workflows = _carregar_workflows_para_emissao(
+        payload.solicitacao_ids,
+        session_postgres,
     )
-    lote = LoteEmissaoNfse(
-        tipo=tipo.value,
-        usuario_id=usuario_atual.id,
-        status=StatusEmissaoNfse.PENDENTE.value,
+    lote, emissoes = _preparar_lote_emissao(
+        payload.solicitacao_ids,
+        workflows,
+        usuario_atual,
+        session_postgres,
     )
-    agora = _agora_local()
-    try:
-        session_postgres.add(lote)
-        session_postgres.flush()
-        emissoes = []
-        for solicitacao_id in payload.solicitacao_ids:
-            emissao = EmissaoNfse(
-                solicitacao_nota_id=solicitacao_id,
-                lote_id=lote.id,
-                usuario_id=usuario_atual.id,
-                status=StatusEmissaoNfse.PENDENTE.value,
-            )
-            emissoes.append(emissao)
-            workflow = workflows[solicitacao_id]
-            workflow.status = (
-                StatusWorkflowSolicitacao.EMISSAO_SOLICITADA.value
-            )
-            workflow.data_atualizacao = agora
-            session_postgres.add(
-                SolicitacaoNotaEvento(
-                    solicitacao_nota_id=solicitacao_id,
-                    usuario_id=usuario_atual.id,
-                    tipo_acao='EMISSAO_SOLICITADA',
-                    observacao=f'Lote de emissão #{lote.id}.',
-                )
-            )
-        session_postgres.add_all(emissoes)
-        session_postgres.commit()
-        for emissao in emissoes:
-            session_postgres.refresh(emissao)
-    except SQLAlchemyError as exc:
-        session_postgres.rollback()
-        raise HTTPException(
-            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
-            detail='Não foi possível colocar as NFS-e na fila de emissão.',
-        ) from exc
 
     try:
         dag_run = disparar_dag_emissao_nfse(
@@ -520,52 +692,68 @@ def solicitar_emissao_nfse(
             payload.solicitacao_ids,
         )
     except AirflowNfseTriggerError as exc:
-        lote.status = StatusEmissaoNfse.ERRO.value
-        lote.erro_disparo = str(exc)
-        for emissao in emissoes:
-            emissao.status = StatusEmissaoNfse.ERRO.value
-            emissao.erro = str(exc)
-            workflow = workflows[emissao.solicitacao_nota_id]
-            workflow.status = StatusWorkflowSolicitacao.VALIDADA.value
-            workflow.data_atualizacao = _agora_local()
-            session_postgres.add(
-                SolicitacaoNotaEvento(
-                    solicitacao_nota_id=emissao.solicitacao_nota_id,
-                    usuario_id=usuario_atual.id,
-                    tipo_acao='ERRO_DISPARO_EMISSAO',
-                    observacao=str(exc),
-                )
-            )
-        session_postgres.commit()
+        _restaurar_apos_falha_airflow(
+            lote,
+            emissoes,
+            usuario_atual,
+            exc,
+            session_postgres,
+        )
+        status_code = (
+            HTTPStatus.SERVICE_UNAVAILABLE
+            if isinstance(exc, AirflowNfseIndisponivelError)
+            else HTTPStatus.BAD_GATEWAY
+        )
         raise HTTPException(
-            status_code=HTTPStatus.BAD_GATEWAY,
+            status_code=status_code,
             detail=(
                 'Não foi possível acionar o Airflow. As solicitações '
                 'continuam disponíveis para uma nova tentativa.'
             ),
         ) from exc
 
-    lote.status = StatusEmissaoNfse.PROCESSANDO.value
-    lote.dag_run_id = dag_run.dag_run_id
-    lote.airflow_disparado_em = _agora_local()
-    lote.erro_disparo = None
-    session_postgres.commit()
+    _registrar_disparo_airflow(
+        lote,
+        emissoes,
+        dag_run.dag_run_id,
+        usuario_atual,
+        session_postgres,
+    )
 
-    return LoteEmissaoNfsePublic(
-        lote_id=lote.id,
-        tipo=lote.tipo,
-        status=lote.status,
-        quantidade=len(emissoes),
-        dag_run_id=lote.dag_run_id,
-        emissoes=[
-            EmissaoNfsePublic.model_validate(emissao)
-            for emissao in emissoes
-        ],
+    return _lote_emissao_public(
+        lote,
+        emissoes,
         message=(
             'Solicitação registrada e DAG do Airflow acionada. '
             f'Execução: {lote.dag_run_id}.'
         ),
     )
+
+
+@router.get(
+    '/emissoes-nfse/{lote_id}',
+    status_code=HTTPStatus.OK,
+    response_model=LoteEmissaoNfsePublic,
+)
+def consultar_emissao_nfse(
+    lote_id: int,
+    _usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    lote = session_postgres.get(LoteEmissaoNfse, lote_id)
+    if lote is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Lote de emissão de NFS-e não encontrado.',
+        )
+    emissoes = list(
+        session_postgres.scalars(
+            select(EmissaoNfse)
+            .where(EmissaoNfse.lote_id == lote_id)
+            .order_by(EmissaoNfse.id)
+        ).all()
+    )
+    return _lote_emissao_public(lote, emissoes)
 
 
 @router.post(

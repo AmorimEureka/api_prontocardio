@@ -889,6 +889,17 @@ class EmissaoNfse:
             'status',
             'solicitacao_nota_id',
         ),
+        Index(
+            'uq_emissao_nfse_solicitacao_ativa',
+            'solicitacao_nota_id',
+            unique=True,
+            postgresql_where=text(
+                "status IN ('PENDENTE', 'PROCESSANDO', 'EMITIDA')"
+            ),
+            sqlite_where=text(
+                "status IN ('PENDENTE', 'PROCESSANDO', 'EMITIDA')"
+            ),
+        ),
         {'schema': settings.POSTGRES_SCHEMA},
     )
 

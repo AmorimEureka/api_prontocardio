@@ -17,14 +17,14 @@ Se o Airflow recusar ou não responder ao disparo, os itens retornam ao status
 ## Configuração da API
 
 ```env
-AIRFLOW_NFSE_BASE_URL=https://airflow.exemplo.local
+AIRFLOW_NFSE_BASE_URL=http://host.docker.internal:8082
 AIRFLOW_NFSE_DAG_ID=emissao_nfse
 AIRFLOW_NFSE_DAG_RUNS_PATH=/api/v1/dags/{dag_id}/dagRuns
 AIRFLOW_NFSE_TOKEN=
-AIRFLOW_NFSE_USERNAME=
-AIRFLOW_NFSE_PASSWORD=
+AIRFLOW_NFSE_USERNAME=admin
+AIRFLOW_NFSE_PASSWORD=admin
 AIRFLOW_NFSE_TIMEOUT_SECONDS=15
-AIRFLOW_NFSE_VERIFY_SSL=true
+AIRFLOW_NFSE_VERIFY_SSL=false
 ```
 
 Use `AIRFLOW_NFSE_TOKEN` para autenticação Bearer. Quando ele não estiver
@@ -49,6 +49,15 @@ O `POST` para a API do Airflow envia:
 
 O `dag_run_id` retornado pelo Airflow e a data do disparo ficam registrados no
 lote para rastreabilidade.
+
+O andamento pode ser consultado em:
+
+```text
+GET /app_glosas/requisicoes/emissoes-nfse/{lote_id}
+```
+
+A consulta retorna o estado do lote, o horário do disparo e o estado,
+número, protocolo, erro e horários de cada emissão.
 
 ## Consulta dos itens pela DAG
 

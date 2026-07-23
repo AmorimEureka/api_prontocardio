@@ -24,6 +24,7 @@ from app_prontocardio.schema import (
 )
 from app_prontocardio.services.airflow_nfse import (
     AirflowDagRun,
+    AirflowNfseIndisponivelError,
     AirflowNfseTriggerError,
 )
 
@@ -441,3 +442,307 @@ def test_falha_no_airflow_devolve_itens_para_emissao(
     assert exc_info.value.status_code == HTTPStatus.BAD_GATEWAY
     workflow = session.scalar(select(SolicitacaoNotaWorkflow))
     assert workflow.status == StatusWorkflowSolicitacao.VALIDADA
+    lote = session.scalar(select(LoteEmissaoNfse))
+    emissao = session.scalar(select(EmissaoNfse))
+    assert lote.status == 'ERRO'
+    assert emissao.status == 'ERRO'
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'ERRO_DISPARO_EMISSAO'
+        )
+    )
+    assert evento.usuario_id == usuario_teste.id
+
+
+def _preparar_emissao(
+    session,
+    usuario_teste,
+    monkeypatch,
+    procedimento='Consulta',
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        procedimento,
+    )
+    requisicoes.validar_solicitacao_nota(
+        solicitacao.id,
+        ValidacaoSolicitacaoNotaInput(decisao='VALIDADA'),
+        usuario_teste,
+        session,
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        'airflow_nfse_configurado',
+        lambda: True,
+    )
+    return solicitacao
+
+
+def test_emissao_individual_persiste_dados_do_disparo(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        'disparar_dag_emissao_nfse',
+        lambda lote_id, _ids: AirflowDagRun(
+            dag_run_id=f'run-{lote_id}',
+            state='queued',
+        ),
+    )
+
+    response = requisicoes.solicitar_emissao_nfse(
+        EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+        usuario_teste,
+        session,
+    )
+
+    assert response.tipo == 'INDIVIDUAL'
+    assert response.status == 'PROCESSANDO'
+    assert response.airflow_disparado_em is not None
+    assert response.dag_run_id == f'run-{response.lote_id}'
+    assert response.emissoes[0].status == 'PENDENTE'
+    assert response.emissoes[0].usuario_id == usuario_teste.id
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'AIRFLOW_DISPARADO'
+        )
+    )
+    assert response.dag_run_id in evento.observacao
+
+
+@pytest.mark.parametrize(
+    'campo',
+    [
+        'nr_cpf',
+        'nm_paciente',
+        'procedimento',
+        'tipo_atendimento',
+    ],
+)
+def test_emissao_exige_dados_fiscais_obrigatorios(
+    campo,
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    setattr(session.get(SolicitacaoNota, solicitacao.id), campo, ' ')
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.solicitar_emissao_nfse(
+            EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.CONFLICT
+    assert session.scalar(
+        select(func.count()).select_from(EmissaoNfse)
+    ) == 0
+
+
+def test_emissao_exige_validacao_e_status_validado(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    workflow = session.scalar(select(SolicitacaoNotaWorkflow))
+    workflow.validacao = None
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.solicitar_emissao_nfse(
+            EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.CONFLICT
+
+
+def test_emissao_exige_valor_positivo(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    session.get(SolicitacaoNota, solicitacao.id).valor_nota = None
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.solicitar_emissao_nfse(
+            EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.CONFLICT
+
+
+def test_emissao_ativa_nao_cria_outro_lote(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    disparos = 0
+
+    def disparar(lote_id, _ids):
+        nonlocal disparos
+        disparos += 1
+        return AirflowDagRun(dag_run_id=f'run-{lote_id}')
+
+    monkeypatch.setattr(
+        requisicoes,
+        'disparar_dag_emissao_nfse',
+        disparar,
+    )
+    requisicoes.solicitar_emissao_nfse(
+        EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+        usuario_teste,
+        session,
+    )
+    workflow = session.scalar(select(SolicitacaoNotaWorkflow))
+    workflow.status = StatusWorkflowSolicitacao.VALIDADA.value
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.solicitar_emissao_nfse(
+            EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.CONFLICT
+    assert session.scalar(
+        select(func.count()).select_from(LoteEmissaoNfse)
+    ) == 1
+    assert disparos == 1
+
+
+def test_timeout_airflow_retorna_503_e_restaura_workflow(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+
+    def timeout(_lote_id, _ids):
+        raise AirflowNfseIndisponivelError('Tempo limite excedido.')
+
+    monkeypatch.setattr(
+        requisicoes,
+        'disparar_dag_emissao_nfse',
+        timeout,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.solicitar_emissao_nfse(
+            EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.SERVICE_UNAVAILABLE
+    workflow = session.scalar(select(SolicitacaoNotaWorkflow))
+    assert workflow.status == StatusWorkflowSolicitacao.VALIDADA
+
+
+def test_consulta_andamento_do_lote(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        'disparar_dag_emissao_nfse',
+        lambda lote_id, _ids: AirflowDagRun(
+            dag_run_id=f'run-{lote_id}'
+        ),
+    )
+    criado = requisicoes.solicitar_emissao_nfse(
+        EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+        usuario_teste,
+        session,
+    )
+    emissao = session.scalar(select(EmissaoNfse))
+    emissao.status = 'EMITIDA'
+    emissao.numero_nfse = '1234'
+    emissao.protocolo = 'PROTOCOLO-1'
+    session.commit()
+
+    response = requisicoes.consultar_emissao_nfse(
+        criado.lote_id,
+        usuario_teste,
+        session,
+    )
+
+    assert response.lote_id == criado.lote_id
+    assert response.dag_run_id == f'run-{criado.lote_id}'
+    assert response.quantidade == 1
+    assert response.emissoes[0].numero_nfse == '1234'
+    assert response.emissoes[0].protocolo == 'PROTOCOLO-1'
+    assert response.emissoes[0].data_atualizacao is not None
+
+
+def test_consulta_lote_inexistente_retorna_404(
+    session,
+    usuario_teste,
+):
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.consultar_emissao_nfse(
+            999,
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.NOT_FOUND
+
+
+@pytest.mark.parametrize(
+    'solicitacao_ids',
+    [
+        [],
+        [1, 1],
+        [0],
+    ],
+)
+def test_payload_emissao_rejeita_lista_invalida(solicitacao_ids):
+    with pytest.raises(ValidationError):
+        EmissaoNfseCreate(solicitacao_ids=solicitacao_ids)
