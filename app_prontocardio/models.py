@@ -40,6 +40,32 @@ class LocalSolicitacaoNota(str, Enum):
     EMERGENCIA = 'Emergencia'
 
 
+class StatusWorkflowSolicitacao(str, Enum):
+    PENDENTE_VALIDACAO = 'PENDENTE_VALIDACAO'
+    RECUSADA = 'RECUSADA'
+    VALIDADA = 'VALIDADA'
+    EMISSAO_SOLICITADA = 'EMISSAO_SOLICITADA'
+    EMITIDA = 'EMITIDA'
+    ERRO_EMISSAO = 'ERRO_EMISSAO'
+
+
+class DecisaoValidacaoSolicitacao(str, Enum):
+    VALIDADA = 'VALIDADA'
+    RECUSADA = 'RECUSADA'
+
+
+class TipoLoteEmissaoNfse(str, Enum):
+    INDIVIDUAL = 'INDIVIDUAL'
+    LOTE = 'LOTE'
+
+
+class StatusEmissaoNfse(str, Enum):
+    PENDENTE = 'PENDENTE'
+    PROCESSANDO = 'PROCESSANDO'
+    EMITIDA = 'EMITIDA'
+    ERRO = 'ERRO'
+
+
 @table_registry.mapped_as_dataclass
 class Usuario:
     __tablename__ = 'usuarios_api'
@@ -712,6 +738,186 @@ class SolicitacaoNota:
     data_criacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class SolicitacaoNotaWorkflow:
+    __tablename__ = 'solicitacao_nota_workflow'
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ("
+            "'PENDENTE_VALIDACAO', 'RECUSADA', 'VALIDADA', "
+            "'EMISSAO_SOLICITADA', 'EMITIDA', 'ERRO_EMISSAO'"
+            ')',
+            name='ck_solicitacao_nota_workflow_status',
+        ),
+        CheckConstraint(
+            "validacao IS NULL OR validacao IN ('VALIDADA', 'RECUSADA')",
+            name='ck_solicitacao_nota_workflow_validacao',
+        ),
+        Index(
+            'ix_solicitacao_nota_workflow_status',
+            'status',
+            'solicitacao_nota_id',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    solicitacao_nota_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.solicitacao_nota.id',
+            ondelete='CASCADE',
+        ),
+        unique=True,
+    )
+    status: Mapped[str] = mapped_column(String(30))
+    validacao: Mapped[str | None] = mapped_column(
+        String(20),
+        default=None,
+    )
+    motivo_recusa: Mapped[str | None] = mapped_column(
+        String(500),
+        default=None,
+    )
+    validado_por_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        default=None,
+    )
+    validado_em: Mapped[datetime | None] = mapped_column(default=None)
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class SolicitacaoNotaEvento:
+    __tablename__ = 'solicitacao_nota_evento'
+    __table_args__ = (
+        Index(
+            'ix_solicitacao_nota_evento_solicitacao',
+            'solicitacao_nota_id',
+            'data_criacao',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    solicitacao_nota_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.solicitacao_nota.id',
+            ondelete='CASCADE',
+        )
+    )
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    tipo_acao: Mapped[str] = mapped_column(String(40))
+    observacao: Mapped[str | None] = mapped_column(
+        String(500),
+        default=None,
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class LoteEmissaoNfse:
+    __tablename__ = 'lote_emissao_nfse'
+    __table_args__ = (
+        CheckConstraint(
+            "tipo IN ('INDIVIDUAL', 'LOTE')",
+            name='ck_lote_emissao_nfse_tipo',
+        ),
+        CheckConstraint(
+            "status IN ('PENDENTE', 'PROCESSANDO', 'EMITIDA', 'ERRO')",
+            name='ck_lote_emissao_nfse_status',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    tipo: Mapped[str] = mapped_column(String(20))
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    status: Mapped[str] = mapped_column(String(20))
+    dag_run_id: Mapped[str | None] = mapped_column(
+        String(250),
+        default=None,
+    )
+    airflow_disparado_em: Mapped[datetime | None] = mapped_column(
+        default=None,
+    )
+    erro_disparo: Mapped[str | None] = mapped_column(
+        String(1000),
+        default=None,
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class EmissaoNfse:
+    __tablename__ = 'emissao_nfse'
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDENTE', 'PROCESSANDO', 'EMITIDA', 'ERRO')",
+            name='ck_emissao_nfse_status',
+        ),
+        Index(
+            'ix_emissao_nfse_status',
+            'status',
+            'solicitacao_nota_id',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    solicitacao_nota_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.solicitacao_nota.id',
+            ondelete='RESTRICT',
+        )
+    )
+    lote_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.lote_emissao_nfse.id',
+            ondelete='RESTRICT',
+        )
+    )
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
+    )
+    status: Mapped[str] = mapped_column(String(20))
+    numero_nfse: Mapped[str | None] = mapped_column(
+        String(100),
+        default=None,
+    )
+    protocolo: Mapped[str | None] = mapped_column(
+        String(200),
+        default=None,
+    )
+    erro: Mapped[str | None] = mapped_column(String(1000), default=None)
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
 

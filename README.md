@@ -521,6 +521,18 @@ docker compose -f docker-compose.prod.yml up -d --build
 Configuracoes locais de Nginx, certificados e ACME nao devem ser versionadas
 neste repositorio.
 
+## Emissao de NFS-e via Airflow
+
+As emissões individuais e em lote são registradas no PostgreSQL antes do
+disparo da DAG. A DAG recebe o identificador do lote, consulta somente os
+itens aprovados e sinalizados e grava o resultado da emissão nas tabelas
+relacionadas. A ausência ou falha da integração não remove solicitações da
+fila de emissão.
+
+O contrato de configuração, payload, consulta, atualização de status,
+rastreabilidade e idempotência está documentado em
+[`docs/airflow_emissao_nfse.md`](docs/airflow_emissao_nfse.md).
+
 ## Observacoes operacionais
 
 - O projeto usa Oracle driver em `thick_mode=True` para compatibilidade com
