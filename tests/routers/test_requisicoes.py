@@ -215,6 +215,9 @@ def test_lista_solicitacoes_com_paginacao(
     assert response.solicitacoes[0].id == ids[-2]
     assert response.solicitacoes[0].valor_nota == Decimal('60.75')
     assert response.solicitacoes[0].cadastrado_por == usuario_teste.nome
+    assert response.solicitacoes[0].status == (
+        StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
+    )
 
 
 def _criar_solicitacao(

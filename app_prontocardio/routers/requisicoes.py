@@ -68,10 +68,14 @@ def _agora_local() -> datetime:
 def _solicitacao_public(
     solicitacao: SolicitacaoNota,
     cadastrado_por: str | None = None,
+    status: str | None = None,
 ) -> SolicitacaoNotaPublic:
     public = SolicitacaoNotaPublic.model_validate(solicitacao)
     return public.model_copy(
-        update={'cadastrado_por': cadastrado_por},
+        update={
+            'cadastrado_por': cadastrado_por,
+            'status': status,
+        },
     )
 
 
@@ -85,9 +89,9 @@ def _workflow_public(
         **_solicitacao_public(
             solicitacao,
             cadastrado_por,
+            workflow.status,
         ).model_dump(),
         workflow_id=workflow.id,
-        status=workflow.status,
         validacao=workflow.validacao,
         motivo_recusa=workflow.motivo_recusa,
         validado_por_id=workflow.validado_por_id,
@@ -213,6 +217,12 @@ def listar_solicitacoes_nota(
         select(
             SolicitacaoNota,
             Usuario.nome.label('cadastrado_por'),
+            SolicitacaoNotaWorkflow.status,
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id
+            == SolicitacaoNota.id,
         )
         .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
         .order_by(
@@ -224,8 +234,8 @@ def listar_solicitacoes_nota(
     ).all()
     return SolicitacaoNotaList(
         solicitacoes=[
-            _solicitacao_public(solicitacao, cadastrado_por)
-            for solicitacao, cadastrado_por in rows
+            _solicitacao_public(solicitacao, cadastrado_por, status)
+            for solicitacao, cadastrado_por, status in rows
         ],
         total=total,
         limit=limit,
