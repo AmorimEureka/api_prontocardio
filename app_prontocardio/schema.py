@@ -15,6 +15,7 @@ from pydantic import (
 from app_prontocardio.models import (
     DecisaoValidacaoSolicitacao,
     LocalSolicitacaoNota,
+    StatusEmissaoNfse,
     StatusWorkflowSolicitacao,
     TipoAtendimento,
 )
@@ -159,6 +160,15 @@ class SolicitacaoNotaWorkflowFilter(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
+class SolicitacaoNotaEmissaoFilter(BaseModel):
+    nome_paciente: str | None = Field(default=None, max_length=200)
+    cpf: str | None = Field(default=None, max_length=20)
+    tipo_atendimento: str | None = Field(default=None, max_length=50)
+    local: str | None = Field(default=None, max_length=20)
+    limit: int = Field(default=10, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
 class ValidacaoSolicitacaoNotaInput(BaseModel):
     decisao: DecisaoValidacaoSolicitacao
     motivo_recusa: str | None = Field(default=None, max_length=500)
@@ -207,6 +217,25 @@ class EmissaoNfsePublic(BaseModel):
     data_atualizacao: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SolicitacaoNotaEmissaoPublic(SolicitacaoNotaWorkflowPublic):
+    emissao_id: int | None = None
+    lote_id: int | None = None
+    status_emissao: StatusEmissaoNfse | None = None
+    numero_nfse: str | None = None
+    protocolo: str | None = None
+    erro_emissao: str | None = None
+    emissao_criada_em: datetime | None = None
+    emissao_atualizada_em: datetime | None = None
+    arquivo_disponivel: bool = False
+
+
+class SolicitacaoNotaEmissaoList(BaseModel):
+    solicitacoes: list[SolicitacaoNotaEmissaoPublic]
+    total: int
+    limit: int
+    offset: int
 
 
 class LoteEmissaoNfsePublic(BaseModel):

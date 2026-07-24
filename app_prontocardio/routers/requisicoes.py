@@ -1,9 +1,11 @@
+import hashlib
 from datetime import datetime
 from http import HTTPStatus
 from typing import Annotated
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
@@ -15,6 +17,7 @@ from app_prontocardio.database import (
 from app_prontocardio.models import (
     DecisaoValidacaoSolicitacao,
     EmissaoNfse,
+    EmissaoNfseArquivo,
     LoteEmissaoNfse,
     ModelContaAtendimento,
     ModelHpcPaciente,
@@ -32,6 +35,9 @@ from app_prontocardio.schema import (
     EmissaoNfsePublic,
     LoteEmissaoNfsePublic,
     SolicitacaoNotaCreate,
+    SolicitacaoNotaEmissaoFilter,
+    SolicitacaoNotaEmissaoList,
+    SolicitacaoNotaEmissaoPublic,
     SolicitacaoNotaList,
     SolicitacaoNotaPublic,
     SolicitacaoNotaWorkflowFilter,
@@ -121,6 +127,35 @@ def _lote_emissao_public(
             for emissao in emissoes
         ],
         message=message,
+    )
+
+
+def _solicitacao_emissao_public(
+    solicitacao: SolicitacaoNota,
+    workflow: SolicitacaoNotaWorkflow,
+    usuarios: tuple[str | None, str | None],
+    emissao: EmissaoNfse | None,
+    arquivo_disponivel: bool,
+) -> SolicitacaoNotaEmissaoPublic:
+    cadastrado_por, validado_por = usuarios
+    return SolicitacaoNotaEmissaoPublic(
+        **_workflow_public(
+            solicitacao,
+            workflow,
+            cadastrado_por,
+            validado_por,
+        ).model_dump(),
+        emissao_id=emissao.id if emissao else None,
+        lote_id=emissao.lote_id if emissao else None,
+        status_emissao=emissao.status if emissao else None,
+        numero_nfse=emissao.numero_nfse if emissao else None,
+        protocolo=emissao.protocolo if emissao else None,
+        erro_emissao=emissao.erro if emissao else None,
+        emissao_criada_em=emissao.data_criacao if emissao else None,
+        emissao_atualizada_em=(
+            emissao.data_atualizacao if emissao else None
+        ),
+        arquivo_disponivel=arquivo_disponivel,
     )
 
 
@@ -656,6 +691,128 @@ def validar_solicitacao_nota(
     )
 
 
+@router.get(
+    '/emissoes-nfse',
+    status_code=HTTPStatus.OK,
+    response_model=SolicitacaoNotaEmissaoList,
+)
+def listar_emissoes_nfse(
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    filtros_query: Annotated[SolicitacaoNotaEmissaoFilter, Query()],
+):
+    del usuario_atual
+    status_visiveis = (
+        StatusWorkflowSolicitacao.VALIDADA.value,
+        StatusWorkflowSolicitacao.EMISSAO_SOLICITADA.value,
+        StatusWorkflowSolicitacao.EMITIDA.value,
+        StatusWorkflowSolicitacao.ERRO_EMISSAO.value,
+    )
+    filtros = [
+        SolicitacaoNotaWorkflow.validacao
+        == DecisaoValidacaoSolicitacao.VALIDADA.value,
+        SolicitacaoNotaWorkflow.status.in_(status_visiveis),
+    ]
+    if nome_paciente := _texto(filtros_query.nome_paciente):
+        filtros.append(
+            SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%')
+        )
+    if cpf := _texto(filtros_query.cpf):
+        filtros.append(SolicitacaoNota.nr_cpf.ilike(f'%{cpf}%'))
+    if tipo_atendimento := _texto(filtros_query.tipo_atendimento):
+        filtros.append(
+            SolicitacaoNota.tipo_atendimento == tipo_atendimento
+        )
+    if local := _texto(filtros_query.local):
+        filtros.append(SolicitacaoNota.local == local)
+
+    ultima_emissao = (
+        select(
+            EmissaoNfse.solicitacao_nota_id.label(
+                'solicitacao_nota_id'
+            ),
+            func.max(EmissaoNfse.id).label('emissao_id'),
+        )
+        .group_by(EmissaoNfse.solicitacao_nota_id)
+        .subquery()
+    )
+    criador = aliased(Usuario)
+    validador = aliased(Usuario)
+    base_query = (
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+            criador.nome.label('cadastrado_por'),
+            validador.nome.label('validado_por'),
+            EmissaoNfse,
+            EmissaoNfseArquivo.id.label('arquivo_id'),
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id
+            == SolicitacaoNota.id,
+        )
+        .join(criador, criador.id == SolicitacaoNota.usuario_id)
+        .outerjoin(
+            validador,
+            validador.id == SolicitacaoNotaWorkflow.validado_por_id,
+        )
+        .outerjoin(
+            ultima_emissao,
+            ultima_emissao.c.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            EmissaoNfse,
+            EmissaoNfse.id == ultima_emissao.c.emissao_id,
+        )
+        .outerjoin(
+            EmissaoNfseArquivo,
+            EmissaoNfseArquivo.emissao_nfse_id == EmissaoNfse.id,
+        )
+        .where(*filtros)
+    )
+    total = session_postgres.scalar(
+        select(func.count()).select_from(base_query.subquery())
+    ) or 0
+    rows = session_postgres.execute(
+        base_query.order_by(
+            SolicitacaoNotaWorkflow.data_atualizacao.desc(),
+            SolicitacaoNota.id.desc(),
+        )
+        .limit(filtros_query.limit)
+        .offset(filtros_query.offset)
+    ).all()
+    solicitacoes = []
+    for (
+        solicitacao,
+        workflow,
+        cadastrado_por,
+        validado_por,
+        emissao,
+        arquivo_id,
+    ) in rows:
+        arquivo_disponivel = bool(
+            emissao
+            and emissao.status == StatusEmissaoNfse.EMITIDA.value
+            and arquivo_id is not None
+        )
+        solicitacoes.append(
+            _solicitacao_emissao_public(
+                solicitacao,
+                workflow,
+                (cadastrado_por, validado_por),
+                emissao,
+                arquivo_disponivel,
+            )
+        )
+    return SolicitacaoNotaEmissaoList(
+        solicitacoes=solicitacoes,
+        total=total,
+        limit=filtros_query.limit,
+        offset=filtros_query.offset,
+    )
+
+
 @router.post(
     '/emissoes-nfse',
     status_code=HTTPStatus.ACCEPTED,
@@ -727,6 +884,102 @@ def solicitar_emissao_nfse(
             'Solicitação registrada e DAG do Airflow acionada. '
             f'Execução: {lote.dag_run_id}.'
         ),
+    )
+
+
+@router.get(
+    '/emissoes-nfse/itens/{emissao_id}/pdf',
+    status_code=HTTPStatus.OK,
+    response_class=Response,
+)
+def consultar_pdf_emissao_nfse(
+    emissao_id: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    download: bool = Query(default=False),
+):
+    emissao = session_postgres.get(EmissaoNfse, emissao_id)
+    if emissao is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Emissão de NFS-e não encontrada.',
+        )
+    if emissao.status != StatusEmissaoNfse.EMITIDA.value:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A NFS-e ainda não está disponível.',
+        )
+    arquivo = session_postgres.scalar(
+        select(EmissaoNfseArquivo).where(
+            EmissaoNfseArquivo.emissao_nfse_id == emissao.id
+        )
+    )
+    if arquivo is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Arquivo PDF da NFS-e não encontrado.',
+        )
+
+    conteudo = bytes(arquivo.conteudo)
+    if (
+        arquivo.tipo_mime != 'application/pdf'
+        or not conteudo.startswith(b'%PDF')
+        or arquivo.tamanho_bytes != len(conteudo)
+        or arquivo.sha256 != hashlib.sha256(conteudo).hexdigest()
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+            detail='O arquivo PDF da NFS-e está inválido ou corrompido.',
+        )
+
+    nome_arquivo = (
+        arquivo.nome_arquivo.replace('\\', '/')
+        .rsplit('/', maxsplit=1)[-1]
+        .replace('\r', '')
+        .replace('\n', '')
+        .strip()
+    )
+    if not nome_arquivo:
+        identificador = emissao.numero_nfse or str(emissao.id)
+        nome_arquivo = f'NFS-e {identificador}.pdf'
+    identificador_fallback = ''.join(
+        caractere
+        for caractere in str(emissao.numero_nfse or emissao.id)
+        if caractere.isalnum() or caractere in '-_'
+    )[:80]
+    fallback = f'nfse-{identificador_fallback or emissao.id}.pdf'
+    disposicao = 'attachment' if download else 'inline'
+    tipo_acao = 'DOWNLOAD_NFSE' if download else 'VISUALIZACAO_NFSE'
+    evento = SolicitacaoNotaEvento(
+        solicitacao_nota_id=emissao.solicitacao_nota_id,
+        usuario_id=usuario_atual.id,
+        tipo_acao=tipo_acao,
+        observacao=(
+            f'Emissão #{emissao.id}; NFS-e '
+            f'{emissao.numero_nfse or "-"}; arquivo {nome_arquivo}.'
+        )[:500],
+    )
+    try:
+        session_postgres.add(evento)
+        session_postgres.commit()
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível registrar o acesso à NFS-e.',
+        ) from exc
+
+    return Response(
+        content=conteudo,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': (
+                f'{disposicao}; filename="{fallback}"; '
+                f"filename*=UTF-8''{quote(nome_arquivo, safe='')}"
+            ),
+            'Content-Length': str(len(conteudo)),
+            'X-Content-Type-Options': 'nosniff',
+        },
     )
 
 
