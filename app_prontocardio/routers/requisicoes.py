@@ -6,7 +6,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
@@ -34,6 +34,7 @@ from app_prontocardio.schema import (
     EmissaoNfseCreate,
     EmissaoNfsePublic,
     LoteEmissaoNfsePublic,
+    ProcedimentoAtendimentoPublic,
     SolicitacaoNotaCreate,
     SolicitacaoNotaEmissaoFilter,
     SolicitacaoNotaEmissaoList,
@@ -94,7 +95,13 @@ def _workflow_public(
     workflow: SolicitacaoNotaWorkflow,
     cadastrado_por: str | None = None,
     validado_por: str | None = None,
+    inativacao: tuple[int | None, str | None, datetime | None] | None = None,
 ) -> SolicitacaoNotaWorkflowPublic:
+    inativado_por_id, inativado_por, inativado_em = inativacao or (
+        None,
+        None,
+        None,
+    )
     return SolicitacaoNotaWorkflowPublic(
         **_solicitacao_public(
             solicitacao,
@@ -107,6 +114,9 @@ def _workflow_public(
         validado_por_id=workflow.validado_por_id,
         validado_por=validado_por,
         validado_em=workflow.validado_em,
+        inativado_por_id=inativado_por_id,
+        inativado_por=inativado_por,
+        inativado_em=inativado_em,
         workflow_atualizado_em=workflow.data_atualizacao,
     )
 
@@ -173,6 +183,80 @@ def _ultima_emissao_subquery():
         .group_by(EmissaoNfse.solicitacao_nota_id)
         .subquery()
     )
+
+
+def _ultima_inativacao_subquery():
+    return (
+        select(
+            SolicitacaoNotaEvento.solicitacao_nota_id.label(
+                'solicitacao_nota_id'
+            ),
+            func.max(SolicitacaoNotaEvento.id).label('evento_id'),
+        )
+        .where(SolicitacaoNotaEvento.tipo_acao == 'INATIVACAO')
+        .group_by(SolicitacaoNotaEvento.solicitacao_nota_id)
+        .subquery()
+    )
+
+
+def _consultar_procedimentos_atendimentos(
+    codigos_atendimento: set[int],
+    session_oracle: Session,
+) -> tuple[dict[int, list[ProcedimentoAtendimentoPublic]], bool]:
+    procedimentos_por_atendimento = {
+        codigo: [] for codigo in codigos_atendimento
+    }
+    if not codigos_atendimento:
+        return procedimentos_por_atendimento, True
+
+    try:
+        rows = session_oracle.execute(
+            select(
+                ModelContaAtendimento.cd_atendimento,
+                ModelContaAtendimento.cd_pro_fat,
+                ModelContaAtendimento.descricao,
+                ModelContaAtendimento.ds_gru_fat,
+                ModelContaAtendimento.qt_lancamento,
+                ModelContaAtendimento.dt_lancamento,
+                ModelContaAtendimento.nm_prestador,
+            )
+            .where(
+                ModelContaAtendimento.cd_atendimento.in_(
+                    codigos_atendimento
+                )
+            )
+            .order_by(
+                ModelContaAtendimento.cd_atendimento,
+                ModelContaAtendimento.dt_ordenacao,
+                ModelContaAtendimento.cd_reg,
+                ModelContaAtendimento.cd_lancamento,
+            )
+        ).all()
+    except SQLAlchemyError:
+        return procedimentos_por_atendimento, False
+
+    for row in rows:
+        if row.cd_atendimento is None:
+            continue
+        codigo = _texto(row.cd_pro_fat)
+        descricao = _texto(row.descricao)
+        if not codigo and not descricao:
+            continue
+        procedimentos_por_atendimento.setdefault(
+            int(row.cd_atendimento),
+            [],
+        ).append(
+            ProcedimentoAtendimentoPublic(
+                codigo=codigo,
+                descricao=descricao or f'Procedimento {codigo}',
+                grupo=_texto(row.ds_gru_fat),
+                quantidade=row.qt_lancamento,
+                realizado_em=row.dt_lancamento,
+                prestador=_texto(row.nm_prestador),
+            )
+        )
+
+    return procedimentos_por_atendimento, True
 
 
 def _possui_dados_fiscais_obrigatorios(
@@ -810,12 +894,24 @@ def listar_workflow_solicitacoes_nota(
     usuario_atual: ValidaUsuarioAtual,
     session_postgres: SessionPostgres,
     filtros_query: Annotated[SolicitacaoNotaWorkflowFilter, Query()],
+    session_oracle: SessionOracle,
 ):
     del usuario_atual
-    filtros = [
-        SolicitacaoNota.ativo.is_(True),
-        SolicitacaoNotaWorkflow.status == filtros_query.status.value,
-    ]
+    filtro_status = (
+        SolicitacaoNotaWorkflow.status == filtros_query.status.value
+    )
+    if filtros_query.incluir_inativas:
+        filtros = [
+            or_(
+                filtro_status,
+                SolicitacaoNota.ativo.is_(False),
+            )
+        ]
+    else:
+        filtros = [
+            SolicitacaoNota.ativo.is_(True),
+            filtro_status,
+        ]
     if nome_paciente := _texto(filtros_query.nome_paciente):
         filtros.append(
             SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%')
@@ -831,12 +927,18 @@ def listar_workflow_solicitacoes_nota(
 
     criador = aliased(Usuario)
     validador = aliased(Usuario)
+    inativador = aliased(Usuario)
+    inativacao = aliased(SolicitacaoNotaEvento)
+    ultima_inativacao = _ultima_inativacao_subquery()
     base_query = (
         select(
             SolicitacaoNota,
             SolicitacaoNotaWorkflow,
             criador.nome.label('cadastrado_por'),
             validador.nome.label('validado_por'),
+            inativacao.usuario_id.label('inativado_por_id'),
+            inativador.nome.label('inativado_por'),
+            inativacao.data_criacao.label('inativado_em'),
         )
         .join(
             SolicitacaoNotaWorkflow,
@@ -851,6 +953,19 @@ def listar_workflow_solicitacoes_nota(
             validador,
             validador.id == SolicitacaoNotaWorkflow.validado_por_id,
         )
+        .outerjoin(
+            ultima_inativacao,
+            ultima_inativacao.c.solicitacao_nota_id
+            == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            inativacao,
+            inativacao.id == ultima_inativacao.c.evento_id,
+        )
+        .outerjoin(
+            inativador,
+            inativador.id == inativacao.usuario_id,
+        )
         .where(*filtros)
     )
     total = session_postgres.scalar(
@@ -864,6 +979,21 @@ def listar_workflow_solicitacoes_nota(
         .limit(filtros_query.limit)
         .offset(filtros_query.offset)
     ).all()
+    procedimentos_por_atendimento = {}
+    procedimentos_disponiveis = True
+    if (
+        filtros_query.status
+        == StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
+    ):
+        procedimentos_por_atendimento, procedimentos_disponiveis = (
+            _consultar_procedimentos_atendimentos(
+                {
+                    solicitacao.codigo_atendimento
+                    for solicitacao, *_restante in rows
+                },
+                session_oracle,
+            )
+        )
     return SolicitacaoNotaWorkflowList(
         solicitacoes=[
             _workflow_public(
@@ -871,12 +1001,32 @@ def listar_workflow_solicitacoes_nota(
                 workflow,
                 cadastrado_por,
                 validado_por,
+                (
+                    inativado_por_id,
+                    inativado_por,
+                    inativado_em,
+                ),
+            ).model_copy(
+                update={
+                    'procedimentos_atendimento': (
+                        procedimentos_por_atendimento.get(
+                            solicitacao.codigo_atendimento,
+                            [],
+                        )
+                    ),
+                    'procedimentos_atendimento_disponiveis': (
+                        procedimentos_disponiveis
+                    ),
+                }
             )
             for (
                 solicitacao,
                 workflow,
                 cadastrado_por,
                 validado_por,
+                inativado_por_id,
+                inativado_por,
+                inativado_em,
             ) in rows
         ],
         total=total,
@@ -920,10 +1070,21 @@ def validar_solicitacao_nota(
             detail='Solicitação de nota não encontrada.',
         )
     solicitacao, workflow, cadastrado_por = row
-    if workflow.status != StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value:
+    reversao_para_recusa = (
+        workflow.status == StatusWorkflowSolicitacao.VALIDADA.value
+        and payload.decisao == DecisaoValidacaoSolicitacao.RECUSADA
+    )
+    if (
+        workflow.status
+        != StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value
+        and not reversao_para_recusa
+    ):
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
-            detail='A solicitação não está pendente de validação.',
+            detail=(
+                'A solicitação não está disponível para validação '
+                'ou reversão.'
+            ),
         )
     if (
         payload.decisao == DecisaoValidacaoSolicitacao.VALIDADA
@@ -944,7 +1105,11 @@ def validar_solicitacao_nota(
     evento = SolicitacaoNotaEvento(
         solicitacao_nota_id=solicitacao.id,
         usuario_id=usuario_atual.id,
-        tipo_acao=payload.decisao.value,
+        tipo_acao=(
+            'REVERSAO_RECUSA'
+            if reversao_para_recusa
+            else payload.decisao.value
+        ),
         observacao=payload.motivo_recusa,
     )
     try:

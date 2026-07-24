@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime
 from decimal import Decimal
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from app_prontocardio.schema import (
     SolicitacaoNotaEmissaoFilter,
     SolicitacaoNotaFilter,
     SolicitacaoNotaUpdate,
+    SolicitacaoNotaWorkflowFilter,
     ValidacaoSolicitacaoNotaInput,
 )
 from app_prontocardio.services.airflow_nfse import (
@@ -37,6 +39,7 @@ from app_prontocardio.services.airflow_nfse import (
 CODIGO_ATENDIMENTO = 123456
 CODIGO_CONVENIO = 20
 TOTAL_SOLICITACOES = 3
+TOTAL_SOLICITACOES_RECUSAS = 2
 QUANTIDADE_LOTE = 2
 
 
@@ -389,6 +392,138 @@ def test_edicao_reinicia_validacao_e_inativacao_preserva_historico(
     assert lista.resumo_status == []
 
 
+def test_fila_de_recusas_reune_recusadas_ativas_e_inativadas(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    recusada = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Solicitação recusada',
+    )
+    requisicoes.validar_solicitacao_nota(
+        recusada.id,
+        ValidacaoSolicitacaoNotaInput(
+            decisao='RECUSADA',
+            motivo_recusa='Dados divergentes.',
+        ),
+        usuario_teste,
+        session,
+    )
+    inativada = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Solicitação inativada',
+    )
+    requisicoes.inativar_solicitacao_nota(
+        inativada.id,
+        usuario_teste,
+        session,
+    )
+
+    fila = requisicoes.listar_workflow_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaWorkflowFilter(
+            status='RECUSADA',
+            incluir_inativas=True,
+        ),
+        object(),
+    )
+
+    solicitacoes_por_id = {
+        solicitacao.id: solicitacao
+        for solicitacao in fila.solicitacoes
+    }
+    assert fila.total == TOTAL_SOLICITACOES_RECUSAS
+    assert solicitacoes_por_id[recusada.id].ativo is True
+    assert solicitacoes_por_id[recusada.id].status == 'RECUSADA'
+    assert solicitacoes_por_id[inativada.id].ativo is False
+    assert solicitacoes_por_id[inativada.id].status == (
+        'PENDENTE_VALIDACAO'
+    )
+    assert solicitacoes_por_id[inativada.id].inativado_por_id == (
+        usuario_teste.id
+    )
+    assert solicitacoes_por_id[inativada.id].inativado_por == (
+        usuario_teste.nome
+    )
+    assert solicitacoes_por_id[inativada.id].inativado_em is not None
+
+
+def test_workflow_pendente_inclui_procedimentos_do_atendimento(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+
+    class ResultadoOracle:
+        @staticmethod
+        def all():
+            return [
+                SimpleNamespace(
+                    cd_atendimento=CODIGO_ATENDIMENTO,
+                    cd_pro_fat='40304361',
+                    descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
+                    ds_gru_fat='EXAMES CARDIOLÓGICOS',
+                    qt_lancamento=Decimal('1'),
+                    dt_lancamento=datetime(2026, 7, 23, 10, 30),
+                    nm_prestador='DR. TESTE',
+                ),
+                SimpleNamespace(
+                    cd_atendimento=CODIGO_ATENDIMENTO,
+                    cd_pro_fat='10101012',
+                    descricao='CONSULTA EM CARDIOLOGIA',
+                    ds_gru_fat='PROCEDIMENTOS',
+                    qt_lancamento=Decimal('1'),
+                    dt_lancamento=datetime(2026, 7, 23, 9, 45),
+                    nm_prestador=None,
+                ),
+            ]
+
+    class OracleSession:
+        @staticmethod
+        def execute(_query):
+            return ResultadoOracle()
+
+    fila = requisicoes.listar_workflow_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaWorkflowFilter(),
+        OracleSession(),
+    )
+
+    assert fila.total == 1
+    assert fila.solicitacoes[0].id == solicitacao.id
+    assert fila.solicitacoes[
+        0
+    ].procedimentos_atendimento_disponiveis is True
+    procedimentos = fila.solicitacoes[0].procedimentos_atendimento
+    assert [item.codigo for item in procedimentos] == [
+        '40304361',
+        '10101012',
+    ]
+    assert procedimentos[0].descricao == 'ECOCARDIOGRAMA TRANSTORÁCICO'
+    assert procedimentos[0].grupo == 'EXAMES CARDIOLÓGICOS'
+    assert procedimentos[0].quantidade == Decimal('1')
+    assert procedimentos[0].realizado_em == datetime(
+        2026,
+        7,
+        23,
+        10,
+        30,
+    )
+    assert procedimentos[0].prestador == 'DR. TESTE'
+
+
 @pytest.mark.parametrize(
     'status',
     [
@@ -468,6 +603,46 @@ def test_validacao_move_solicitacao_para_fila_de_emissao(
         .where(SolicitacaoNotaEvento.tipo_acao == 'VALIDADA')
     )
     assert evento.usuario_id == usuario_teste.id
+
+
+def test_solicitacao_validada_pode_ser_revertida_para_recusa(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    requisicoes.validar_solicitacao_nota(
+        solicitacao.id,
+        ValidacaoSolicitacaoNotaInput(decisao='VALIDADA'),
+        usuario_teste,
+        session,
+    )
+
+    response = requisicoes.validar_solicitacao_nota(
+        solicitacao.id,
+        ValidacaoSolicitacaoNotaInput(
+            decisao='RECUSADA',
+            motivo_recusa='Convênio divergente.',
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert response.status == StatusWorkflowSolicitacao.RECUSADA
+    assert response.validacao == 'RECUSADA'
+    assert response.motivo_recusa == 'Convênio divergente.'
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'REVERSAO_RECUSA'
+        )
+    )
+    assert evento is not None
+    assert evento.usuario_id == usuario_teste.id
+    assert evento.observacao == 'Convênio divergente.'
 
 
 def test_recusa_exige_motivo_e_fica_na_fila_de_recusadas(

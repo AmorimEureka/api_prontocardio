@@ -138,6 +138,15 @@ class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
     data_criacao: datetime
 
 
+class ProcedimentoAtendimentoPublic(BaseModel):
+    codigo: str | None = None
+    descricao: str
+    grupo: str | None = None
+    quantidade: Decimal | None = None
+    realizado_em: datetime | None = None
+    prestador: str | None = None
+
+
 class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
     workflow_id: int
     status: StatusWorkflowSolicitacao
@@ -146,6 +155,13 @@ class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
     validado_por_id: int | None = None
     validado_por: str | None = None
     validado_em: datetime | None = None
+    inativado_por_id: int | None = None
+    inativado_por: str | None = None
+    inativado_em: datetime | None = None
+    procedimentos_atendimento: list[ProcedimentoAtendimentoPublic] = Field(
+        default_factory=list
+    )
+    procedimentos_atendimento_disponiveis: bool = True
     workflow_atualizado_em: datetime
 
 
@@ -160,6 +176,7 @@ class SolicitacaoNotaWorkflowFilter(BaseModel):
     status: StatusWorkflowSolicitacao = (
         StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
     )
+    incluir_inativas: bool = False
     nome_paciente: str | None = Field(default=None, max_length=200)
     cpf: str | None = Field(default=None, max_length=20)
     tipo_atendimento: str | None = Field(default=None, max_length=50)
