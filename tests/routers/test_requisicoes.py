@@ -59,6 +59,16 @@ def dados_atendimento():
         email='maria@example.com',
         nr_fone='85999999999',
         tipo_atendimento='Ambulatório',
+        procedimentos_atendimento=[
+            {
+                'codigo': '40304361',
+                'descricao': 'ECOCARDIOGRAMA TRANSTORÁCICO',
+                'grupo': 'EXAMES CARDIOLÓGICOS',
+                'quantidade': Decimal('1'),
+                'realizado_em': datetime(2026, 7, 23, 10, 30),
+                'prestador': 'DR. TESTE',
+            }
+        ],
     )
 
 
@@ -74,10 +84,30 @@ def test_consulta_atendimento_combina_conta_e_paciente():
                 tp_atendimento='Ambulatório',
             )
 
-    class OracleSession:
+    class ResultadoProcedimentos:
         @staticmethod
-        def execute(_query):
-            return ResultadoAtendimento()
+        def all():
+            return [
+                SimpleNamespace(
+                    cd_atendimento=CODIGO_ATENDIMENTO,
+                    cd_pro_fat='40304361',
+                    descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
+                    ds_gru_fat='EXAMES CARDIOLÓGICOS',
+                    qt_lancamento=Decimal('1'),
+                    dt_lancamento=datetime(2026, 7, 23, 10, 30),
+                    nm_prestador='DR. TESTE',
+                )
+            ]
+
+    class OracleSession:
+        consultas = 0
+
+        @classmethod
+        def execute(cls, _query):
+            cls.consultas += 1
+            if cls.consultas == 1:
+                return ResultadoAtendimento()
+            return ResultadoProcedimentos()
 
         @staticmethod
         def scalar(_query):
