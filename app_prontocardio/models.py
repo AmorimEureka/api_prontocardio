@@ -6,6 +6,7 @@ from enum import Enum
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Date,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    LargeBinary,
     Numeric,
     String,
     UniqueConstraint,
@@ -929,6 +931,44 @@ class EmissaoNfse:
         default=None,
     )
     erro: Mapped[str | None] = mapped_column(String(1000), default=None)
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class EmissaoNfseArquivo:
+    __tablename__ = 'emissao_nfse_arquivo'
+    __table_args__ = (
+        CheckConstraint(
+            'tamanho_bytes >= 0',
+            name='ck_emissao_nfse_arquivo_tamanho',
+        ),
+        UniqueConstraint(
+            'emissao_nfse_id',
+            name='uq_emissao_nfse_arquivo_emissao',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    emissao_nfse_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.emissao_nfse.id',
+            ondelete='CASCADE',
+        )
+    )
+    nome_arquivo: Mapped[str] = mapped_column(String(255))
+    tipo_mime: Mapped[str] = mapped_column(String(100))
+    conteudo: Mapped[bytes] = mapped_column(LargeBinary)
+    tamanho_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(String(64))
     data_criacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=func.now(),

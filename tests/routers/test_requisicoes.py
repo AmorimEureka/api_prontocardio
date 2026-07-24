@@ -1,3 +1,4 @@
+import hashlib
 from decimal import Decimal
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -7,8 +8,10 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
+from app_prontocardio.app import app
 from app_prontocardio.models import (
     EmissaoNfse,
+    EmissaoNfseArquivo,
     LoteEmissaoNfse,
     SolicitacaoNota,
     SolicitacaoNotaEvento,
@@ -20,6 +23,7 @@ from app_prontocardio.schema import (
     AtendimentoSolicitacaoNotaPublic,
     EmissaoNfseCreate,
     SolicitacaoNotaCreate,
+    SolicitacaoNotaEmissaoFilter,
     ValidacaoSolicitacaoNotaInput,
 )
 from app_prontocardio.services.airflow_nfse import (
@@ -746,3 +750,347 @@ def test_consulta_lote_inexistente_retorna_404(
 def test_payload_emissao_rejeita_lista_invalida(solicitacao_ids):
     with pytest.raises(ValidationError):
         EmissaoNfseCreate(solicitacao_ids=solicitacao_ids)
+
+
+def _solicitar_emissao_teste(
+    session,
+    usuario_teste,
+    monkeypatch,
+    solicitacao,
+):
+    monkeypatch.setattr(
+        requisicoes,
+        'disparar_dag_emissao_nfse',
+        lambda lote_id, _ids: AirflowDagRun(
+            dag_run_id=f'run-{lote_id}'
+        ),
+    )
+    return requisicoes.solicitar_emissao_nfse(
+        EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+        usuario_teste,
+        session,
+    )
+
+
+def _criar_emissao_emitida(
+    session,
+    usuario_teste,
+    monkeypatch,
+    *,
+    com_arquivo=True,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    lote_public = _solicitar_emissao_teste(
+        session,
+        usuario_teste,
+        monkeypatch,
+        solicitacao,
+    )
+    emissao = session.scalar(
+        select(EmissaoNfse).where(
+            EmissaoNfse.lote_id == lote_public.lote_id
+        )
+    )
+    workflow = session.scalar(
+        select(SolicitacaoNotaWorkflow).where(
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == solicitacao.id
+        )
+    )
+    lote = session.get(LoteEmissaoNfse, lote_public.lote_id)
+    emissao.status = 'EMITIDA'
+    emissao.numero_nfse = '98765'
+    emissao.protocolo = 'PROTOCOLO-98765'
+    workflow.status = 'EMITIDA'
+    lote.status = 'EMITIDA'
+    arquivo = None
+    if com_arquivo:
+        conteudo = b'%PDF-1.7\nconteudo de teste'
+        arquivo = EmissaoNfseArquivo(
+            emissao_nfse_id=emissao.id,
+            nome_arquivo='98765 - MARIA DA SILVA.pdf',
+            tipo_mime='application/pdf',
+            conteudo=conteudo,
+            tamanho_bytes=len(conteudo),
+            sha256=hashlib.sha256(conteudo).hexdigest(),
+        )
+        session.add(arquivo)
+    session.commit()
+    session.refresh(emissao)
+    if arquivo:
+        session.refresh(arquivo)
+    return solicitacao, emissao, arquivo
+
+
+def test_fila_emissao_mantem_item_solicitado_e_usa_tentativa_mais_recente(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    lote_anterior = LoteEmissaoNfse(
+        tipo='INDIVIDUAL',
+        usuario_id=usuario_teste.id,
+        status='ERRO',
+    )
+    session.add(lote_anterior)
+    session.flush()
+    tentativa_anterior = EmissaoNfse(
+        solicitacao_nota_id=solicitacao.id,
+        lote_id=lote_anterior.id,
+        usuario_id=usuario_teste.id,
+        status='ERRO',
+        erro='Falha anterior.',
+    )
+    session.add(tentativa_anterior)
+    session.commit()
+
+    lote_atual = _solicitar_emissao_teste(
+        session,
+        usuario_teste,
+        monkeypatch,
+        solicitacao,
+    )
+    emissao_atual = session.scalar(
+        select(EmissaoNfse).where(
+            EmissaoNfse.lote_id == lote_atual.lote_id
+        )
+    )
+
+    response = requisicoes.listar_emissoes_nfse(
+        usuario_teste,
+        session,
+        SolicitacaoNotaEmissaoFilter(),
+    )
+
+    assert response.total == 1
+    assert len(response.solicitacoes) == 1
+    item = response.solicitacoes[0]
+    assert item.id == solicitacao.id
+    assert item.status == 'EMISSAO_SOLICITADA'
+    assert item.emissao_id == emissao_atual.id
+    assert item.status_emissao == 'PENDENTE'
+    assert item.erro_emissao is None
+    assert item.arquivo_disponivel is False
+
+
+def test_fila_emissao_exibe_numero_e_pdf_da_nfse_emitida(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao, emissao, _arquivo = _criar_emissao_emitida(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+
+    response = requisicoes.listar_emissoes_nfse(
+        usuario_teste,
+        session,
+        SolicitacaoNotaEmissaoFilter(
+            nome_paciente='maria',
+            cpf='456789',
+            tipo_atendimento='Ambulatório',
+            local='Clinica 1',
+        ),
+    )
+
+    assert response.total == 1
+    item = response.solicitacoes[0]
+    assert item.id == solicitacao.id
+    assert item.status == 'EMITIDA'
+    assert item.emissao_id == emissao.id
+    assert item.numero_nfse == '98765'
+    assert item.protocolo == 'PROTOCOLO-98765'
+    assert item.arquivo_disponivel is True
+
+    sem_resultado = requisicoes.listar_emissoes_nfse(
+        usuario_teste,
+        session,
+        SolicitacaoNotaEmissaoFilter(nome_paciente='OUTRA PESSOA'),
+    )
+    assert sem_resultado.total == 0
+    assert sem_resultado.solicitacoes == []
+
+
+def test_fila_emissao_pagina_solicitacoes_validadas_sem_emissao(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    for procedimento in ('Consulta', 'Exame'):
+        _preparar_emissao(
+            session,
+            usuario_teste,
+            monkeypatch,
+            procedimento,
+        )
+
+    response = requisicoes.listar_emissoes_nfse(
+        usuario_teste,
+        session,
+        SolicitacaoNotaEmissaoFilter(limit=1, offset=1),
+    )
+
+    assert response.total == QUANTIDADE_LOTE
+    assert response.limit == 1
+    assert response.offset == 1
+    assert len(response.solicitacoes) == 1
+    assert response.solicitacoes[0].status == 'VALIDADA'
+    assert response.solicitacoes[0].emissao_id is None
+
+
+@pytest.mark.parametrize(
+    'cenario',
+    [
+        (False, 'inline', 'VISUALIZACAO_NFSE'),
+        (True, 'attachment', 'DOWNLOAD_NFSE'),
+    ],
+)
+def test_pdf_emitido_pode_ser_visualizado_ou_baixado_com_auditoria(
+    cenario,
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    download, disposicao, tipo_acao = cenario
+    solicitacao, emissao, arquivo = _criar_emissao_emitida(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+
+    response = requisicoes.consultar_pdf_emissao_nfse(
+        emissao.id,
+        usuario_teste,
+        session,
+        download=download,
+    )
+
+    assert response.status_code == HTTPStatus.OK
+    assert response.media_type == 'application/pdf'
+    assert response.body == arquivo.conteudo
+    assert response.headers['content-disposition'].startswith(disposicao)
+    assert "filename*=UTF-8''98765%20-%20MARIA%20DA%20SILVA.pdf" in (
+        response.headers['content-disposition']
+    )
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento)
+        .where(
+            SolicitacaoNotaEvento.solicitacao_nota_id == solicitacao.id,
+            SolicitacaoNotaEvento.tipo_acao == tipo_acao,
+        )
+    )
+    assert evento is not None
+    assert evento.usuario_id == usuario_teste.id
+    assert 'NFS-e 98765' in evento.observacao
+
+
+def test_pdf_exige_emissao_concluida(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    lote = _solicitar_emissao_teste(
+        session,
+        usuario_teste,
+        monkeypatch,
+        solicitacao,
+    )
+    emissao = session.scalar(
+        select(EmissaoNfse).where(EmissaoNfse.lote_id == lote.lote_id)
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.consultar_pdf_emissao_nfse(
+            emissao.id,
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.CONFLICT
+
+
+def test_pdf_emitido_sem_arquivo_retorna_404(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    _solicitacao, emissao, _arquivo = _criar_emissao_emitida(
+        session,
+        usuario_teste,
+        monkeypatch,
+        com_arquivo=False,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.consultar_pdf_emissao_nfse(
+            emissao.id,
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.NOT_FOUND
+
+
+def test_pdf_corrompido_nao_e_entregue_nem_auditado(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao, emissao, arquivo = _criar_emissao_emitida(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    arquivo.conteudo = b'<html>arquivo invalido</html>'
+    arquivo.tamanho_bytes = len(arquivo.conteudo)
+    arquivo.sha256 = hashlib.sha256(arquivo.conteudo).hexdigest()
+    session.commit()
+
+    with pytest.raises(HTTPException) as exc_info:
+        requisicoes.consultar_pdf_emissao_nfse(
+            emissao.id,
+            usuario_teste,
+            session,
+        )
+
+    assert exc_info.value.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.solicitacao_nota_id == solicitacao.id,
+            SolicitacaoNotaEvento.tipo_acao == 'VISUALIZACAO_NFSE',
+        )
+    )
+    assert evento is None
+    assert (
+        exc_info.value.detail
+        == 'O arquivo PDF da NFS-e está inválido ou corrompido.'
+    )
+
+
+def test_endpoint_pdf_exige_autenticacao():
+    rota = next(
+        rota
+        for rota in app.routes
+        if rota.path
+        == '/app_glosas/requisicoes/emissoes-nfse/itens/{emissao_id}/pdf'
+    )
+
+    dependencias = {
+        dependencia.call for dependencia in rota.dependant.dependencies
+    }
+    assert requisicoes.valida_token_usuario_atual in dependencias
