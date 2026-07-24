@@ -555,6 +555,12 @@ def _consultar_atendimento(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail='O atendimento não possui nome de paciente.',
         )
+    procedimentos, procedimentos_disponiveis = (
+        _consultar_procedimentos_atendimentos(
+            {codigo_atendimento},
+            session_oracle,
+        )
+    )
     return AtendimentoSolicitacaoNotaPublic(
         codigo_atendimento=codigo_atendimento,
         codigo_paciente=int(atendimento.cd_paciente),
@@ -572,6 +578,11 @@ def _consultar_atendimento(
         tipo_atendimento=(
             _texto(atendimento.tp_atendimento) or 'Não informado'
         ),
+        procedimentos_atendimento=procedimentos.get(
+            codigo_atendimento,
+            [],
+        ),
+        procedimentos_atendimento_disponiveis=procedimentos_disponiveis,
     )
 
 

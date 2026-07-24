@@ -107,6 +107,15 @@ class SolicitacaoNotaUpdate(BaseModel):
         return procedimento
 
 
+class ProcedimentoAtendimentoPublic(BaseModel):
+    codigo: str | None = None
+    descricao: str
+    grupo: str | None = None
+    quantidade: Decimal | None = None
+    realizado_em: datetime | None = None
+    prestador: str | None = None
+
+
 class AtendimentoSolicitacaoNotaPublic(BaseModel):
     codigo_atendimento: int
     codigo_paciente: int
@@ -122,6 +131,10 @@ class AtendimentoSolicitacaoNotaPublic(BaseModel):
     email: str | None = None
     nr_fone: str | None = None
     tipo_atendimento: str
+    procedimentos_atendimento: list[ProcedimentoAtendimentoPublic] = Field(
+        default_factory=list
+    )
+    procedimentos_atendimento_disponiveis: bool = True
 
 
 class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
@@ -138,15 +151,6 @@ class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
     data_criacao: datetime
 
 
-class ProcedimentoAtendimentoPublic(BaseModel):
-    codigo: str | None = None
-    descricao: str
-    grupo: str | None = None
-    quantidade: Decimal | None = None
-    realizado_em: datetime | None = None
-    prestador: str | None = None
-
-
 class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
     workflow_id: int
     status: StatusWorkflowSolicitacao
@@ -158,10 +162,6 @@ class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
     inativado_por_id: int | None = None
     inativado_por: str | None = None
     inativado_em: datetime | None = None
-    procedimentos_atendimento: list[ProcedimentoAtendimentoPublic] = Field(
-        default_factory=list
-    )
-    procedimentos_atendimento_disponiveis: bool = True
     workflow_atualizado_em: datetime
 
 
