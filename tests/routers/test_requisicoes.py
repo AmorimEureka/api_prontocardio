@@ -24,6 +24,8 @@ from app_prontocardio.schema import (
     EmissaoNfseCreate,
     SolicitacaoNotaCreate,
     SolicitacaoNotaEmissaoFilter,
+    SolicitacaoNotaFilter,
+    SolicitacaoNotaUpdate,
     ValidacaoSolicitacaoNotaInput,
 )
 from app_prontocardio.services.airflow_nfse import (
@@ -209,8 +211,7 @@ def test_lista_solicitacoes_com_paginacao(
     response = requisicoes.listar_solicitacoes_nota(
         usuario_teste,
         session,
-        limit=1,
-        offset=1,
+        SolicitacaoNotaFilter(limit=1, offset=1),
     )
 
     assert response.total == TOTAL_SOLICITACOES
@@ -223,6 +224,10 @@ def test_lista_solicitacoes_com_paginacao(
     assert response.solicitacoes[0].status == (
         StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
     )
+    assert len(response.resumo_status) == 1
+    assert response.resumo_status[0].status == 'PENDENTE_VALIDACAO'
+    assert response.resumo_status[0].quantidade == TOTAL_SOLICITACOES
+    assert response.resumo_status[0].valor_total == Decimal('182.25')
 
 
 def _criar_solicitacao(
@@ -247,6 +252,193 @@ def _criar_solicitacao(
         session,
         object(),
     )
+
+
+def test_lista_solicitacoes_aplica_filtros_e_resume_por_status(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    pendente = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Consulta',
+    )
+    validada = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Exame',
+    )
+    registro = session.get(SolicitacaoNota, validada.id)
+    registro.codigo_atendimento = 987654
+    registro.nm_paciente = 'JOANA CARDOSO'
+    registro.convenio = 'CONVÊNIO PREMIUM'
+    registro.local = 'Clinica 2'
+    registro.valor_nota = Decimal('125.50')
+    workflow = session.scalar(
+        select(SolicitacaoNotaWorkflow).where(
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == validada.id
+        )
+    )
+    workflow.status = StatusWorkflowSolicitacao.VALIDADA.value
+    workflow.validacao = StatusWorkflowSolicitacao.VALIDADA.value
+    session.commit()
+
+    response = requisicoes.listar_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaFilter(
+            codigo_atendimento=987654,
+            nome_paciente='joana',
+            convenio='premium',
+            local='Clinica 2',
+            status='VALIDADA',
+        ),
+    )
+
+    assert response.total == 1
+    assert [item.id for item in response.solicitacoes] == [validada.id]
+    assert response.solicitacoes[0].emissao_id is None
+    assert response.resumo_status[0].status == 'VALIDADA'
+    assert response.resumo_status[0].quantidade == 1
+    assert response.resumo_status[0].valor_total == Decimal('125.50')
+
+    por_status = requisicoes.listar_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaFilter(status='VALIDADA'),
+    )
+    resumo = {
+        item.status: (item.quantidade, item.valor_total)
+        for item in por_status.resumo_status
+    }
+    assert por_status.total == 1
+    assert set(resumo) == {'PENDENTE_VALIDACAO', 'VALIDADA'}
+    assert resumo['PENDENTE_VALIDACAO'] == (1, Decimal('60.75'))
+    assert resumo['VALIDADA'] == (1, Decimal('125.50'))
+    assert pendente.id != validada.id
+
+
+def test_edicao_reinicia_validacao_e_inativacao_preserva_historico(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    requisicoes.validar_solicitacao_nota(
+        solicitacao.id,
+        ValidacaoSolicitacaoNotaInput(
+            decisao='RECUSADA',
+            motivo_recusa='Valor divergente.',
+        ),
+        usuario_teste,
+        session,
+    )
+
+    atualizada = requisicoes.atualizar_solicitacao_nota(
+        solicitacao.id,
+        SolicitacaoNotaUpdate(
+            local='Emergencia',
+            procedimento='Procedimento corrigido',
+            valor_nota=Decimal('99.90'),
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert atualizada.local == 'Emergencia'
+    assert atualizada.procedimento == 'Procedimento corrigido'
+    assert atualizada.valor_nota == Decimal('99.90')
+    assert atualizada.status == 'PENDENTE_VALIDACAO'
+    assert atualizada.validacao is None
+    assert atualizada.validado_por_id is None
+    evento_edicao = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'EDICAO'
+        )
+    )
+    assert evento_edicao.usuario_id == usuario_teste.id
+
+    response = requisicoes.inativar_solicitacao_nota(
+        solicitacao.id,
+        usuario_teste,
+        session,
+    )
+
+    assert response.status_code == HTTPStatus.NO_CONTENT
+    assert session.get(SolicitacaoNota, solicitacao.id).ativo is False
+    evento_inativacao = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'INATIVACAO'
+        )
+    )
+    assert evento_inativacao.usuario_id == usuario_teste.id
+    lista = requisicoes.listar_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaFilter(),
+    )
+    assert lista.total == 0
+    assert lista.solicitacoes == []
+    assert lista.resumo_status == []
+
+
+@pytest.mark.parametrize(
+    'status',
+    [
+        StatusWorkflowSolicitacao.VALIDADA,
+        StatusWorkflowSolicitacao.EMISSAO_SOLICITADA,
+        StatusWorkflowSolicitacao.ERRO_EMISSAO,
+        StatusWorkflowSolicitacao.EMITIDA,
+    ],
+)
+def test_edicao_e_inativacao_bloqueiam_solicitacoes_ja_validadas(
+    status,
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    workflow = session.scalar(
+        select(SolicitacaoNotaWorkflow).where(
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == solicitacao.id
+        )
+    )
+    workflow.status = status.value
+    workflow.validacao = StatusWorkflowSolicitacao.VALIDADA.value
+    session.commit()
+
+    with pytest.raises(HTTPException) as edicao:
+        requisicoes.atualizar_solicitacao_nota(
+            solicitacao.id,
+            SolicitacaoNotaUpdate(
+                local='Clinica 2',
+                procedimento='Alteração indevida',
+                valor_nota=Decimal('80.00'),
+            ),
+            usuario_teste,
+            session,
+        )
+    assert edicao.value.status_code == HTTPStatus.CONFLICT
+
+    with pytest.raises(HTTPException) as inativacao:
+        requisicoes.inativar_solicitacao_nota(
+            solicitacao.id,
+            usuario_teste,
+            session,
+        )
+    assert inativacao.value.status_code == HTTPStatus.CONFLICT
+    assert session.get(SolicitacaoNota, solicitacao.id).ativo is True
 
 
 def test_validacao_move_solicitacao_para_fila_de_emissao(
@@ -911,6 +1103,19 @@ def test_fila_emissao_exibe_numero_e_pdf_da_nfse_emitida(
     assert item.numero_nfse == '98765'
     assert item.protocolo == 'PROTOCOLO-98765'
     assert item.arquivo_disponivel is True
+
+    cadastradas = requisicoes.listar_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaFilter(status='EMITIDA'),
+    )
+    assert cadastradas.total == 1
+    cadastro = cadastradas.solicitacoes[0]
+    assert cadastro.id == solicitacao.id
+    assert cadastro.emissao_id == emissao.id
+    assert cadastro.numero_nfse == '98765'
+    assert cadastro.protocolo == 'PROTOCOLO-98765'
+    assert cadastro.arquivo_disponivel is True
 
     sem_resultado = requisicoes.listar_emissoes_nfse(
         usuario_teste,

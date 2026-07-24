@@ -38,8 +38,11 @@ from app_prontocardio.schema import (
     SolicitacaoNotaEmissaoFilter,
     SolicitacaoNotaEmissaoList,
     SolicitacaoNotaEmissaoPublic,
+    SolicitacaoNotaFilter,
     SolicitacaoNotaList,
     SolicitacaoNotaPublic,
+    SolicitacaoNotaResumoStatus,
+    SolicitacaoNotaUpdate,
     SolicitacaoNotaWorkflowFilter,
     SolicitacaoNotaWorkflowList,
     SolicitacaoNotaWorkflowPublic,
@@ -159,6 +162,19 @@ def _solicitacao_emissao_public(
     )
 
 
+def _ultima_emissao_subquery():
+    return (
+        select(
+            EmissaoNfse.solicitacao_nota_id.label(
+                'solicitacao_nota_id'
+            ),
+            func.max(EmissaoNfse.id).label('emissao_id'),
+        )
+        .group_by(EmissaoNfse.solicitacao_nota_id)
+        .subquery()
+    )
+
+
 def _possui_dados_fiscais_obrigatorios(
     solicitacao: SolicitacaoNota,
 ) -> bool:
@@ -188,7 +204,10 @@ def _carregar_workflows_para_emissao(
             SolicitacaoNota.id
             == SolicitacaoNotaWorkflow.solicitacao_nota_id,
         )
-        .where(SolicitacaoNota.id.in_(solicitacao_ids))
+        .where(
+            SolicitacaoNota.id.in_(solicitacao_ids),
+            SolicitacaoNota.ativo.is_(True),
+        )
         .with_for_update()
     ).all()
     solicitacoes = {
@@ -494,18 +513,158 @@ def consultar_atendimento_solicitacao_nota(
 def listar_solicitacoes_nota(
     usuario_atual: ValidaUsuarioAtual,
     session_postgres: SessionPostgres,
-    limit: int = Query(default=10, ge=1, le=100),
-    offset: int = Query(default=0, ge=0),
+    filtros_query: Annotated[SolicitacaoNotaFilter, Query()],
 ):
     del usuario_atual
-    total = session_postgres.scalar(
-        select(func.count()).select_from(SolicitacaoNota)
-    ) or 0
-    rows = session_postgres.execute(
+    filtros_base = [SolicitacaoNota.ativo.is_(True)]
+    if filtros_query.codigo_atendimento:
+        filtros_base.append(
+            SolicitacaoNota.codigo_atendimento
+            == filtros_query.codigo_atendimento
+        )
+    if nome_paciente := _texto(filtros_query.nome_paciente):
+        filtros_base.append(
+            SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%')
+        )
+    if convenio := _texto(filtros_query.convenio):
+        filtros_base.append(
+            SolicitacaoNota.convenio.ilike(f'%{convenio}%')
+        )
+    if filtros_query.local:
+        filtros_base.append(
+            SolicitacaoNota.local == filtros_query.local.value
+        )
+
+    filtros = list(filtros_base)
+    if filtros_query.status:
+        filtros.append(
+            SolicitacaoNotaWorkflow.status
+            == filtros_query.status.value
+        )
+
+    ultima_emissao = _ultima_emissao_subquery()
+    criador = aliased(Usuario)
+    validador = aliased(Usuario)
+    base_query = (
         select(
             SolicitacaoNota,
-            Usuario.nome.label('cadastrado_por'),
+            SolicitacaoNotaWorkflow,
+            criador.nome.label('cadastrado_por'),
+            validador.nome.label('validado_por'),
+            EmissaoNfse,
+            EmissaoNfseArquivo.id.label('arquivo_id'),
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id
+            == SolicitacaoNota.id,
+        )
+        .join(criador, criador.id == SolicitacaoNota.usuario_id)
+        .outerjoin(
+            validador,
+            validador.id == SolicitacaoNotaWorkflow.validado_por_id,
+        )
+        .outerjoin(
+            ultima_emissao,
+            ultima_emissao.c.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            EmissaoNfse,
+            EmissaoNfse.id == ultima_emissao.c.emissao_id,
+        )
+        .outerjoin(
+            EmissaoNfseArquivo,
+            EmissaoNfseArquivo.emissao_nfse_id == EmissaoNfse.id,
+        )
+        .where(*filtros)
+    )
+    total = session_postgres.scalar(
+        select(func.count()).select_from(base_query.subquery())
+    ) or 0
+
+    resumo_rows = session_postgres.execute(
+        select(
             SolicitacaoNotaWorkflow.status,
+            func.count(SolicitacaoNota.id).label('quantidade'),
+            func.coalesce(
+                func.sum(SolicitacaoNota.valor_nota),
+                0,
+            ).label('valor_total'),
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id
+            == SolicitacaoNota.id,
+        )
+        .where(*filtros_base)
+        .group_by(SolicitacaoNotaWorkflow.status)
+    ).all()
+
+    rows = session_postgres.execute(
+        base_query.order_by(
+            SolicitacaoNota.data_criacao.desc(),
+            SolicitacaoNota.id.desc(),
+        )
+        .limit(filtros_query.limit)
+        .offset(filtros_query.offset)
+    ).all()
+
+    solicitacoes = []
+    for (
+        solicitacao,
+        workflow,
+        cadastrado_por,
+        validado_por,
+        emissao,
+        arquivo_id,
+    ) in rows:
+        arquivo_disponivel = bool(
+            emissao
+            and emissao.status == StatusEmissaoNfse.EMITIDA.value
+            and arquivo_id is not None
+        )
+        solicitacoes.append(
+            _solicitacao_emissao_public(
+                solicitacao,
+                workflow,
+                (cadastrado_por, validado_por),
+                emissao,
+                arquivo_disponivel,
+            )
+        )
+
+    return SolicitacaoNotaList(
+        solicitacoes=solicitacoes,
+        resumo_status=[
+            SolicitacaoNotaResumoStatus(
+                status=status,
+                quantidade=quantidade,
+                valor_total=valor_total or 0,
+            )
+            for status, quantidade, valor_total in resumo_rows
+        ],
+        total=total,
+        limit=filtros_query.limit,
+        offset=filtros_query.offset,
+    )
+
+
+@router.patch(
+    '/solicitacoes-nota/{solicitacao_id}',
+    status_code=HTTPStatus.OK,
+    response_model=SolicitacaoNotaWorkflowPublic,
+)
+def atualizar_solicitacao_nota(
+    solicitacao_id: int,
+    payload: SolicitacaoNotaUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    row = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+            Usuario.nome.label('cadastrado_por'),
         )
         .join(
             SolicitacaoNotaWorkflow,
@@ -513,22 +672,133 @@ def listar_solicitacoes_nota(
             == SolicitacaoNota.id,
         )
         .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
-        .order_by(
-            SolicitacaoNota.data_criacao.desc(),
-            SolicitacaoNota.id.desc(),
+        .where(
+            SolicitacaoNota.id == solicitacao_id,
+            SolicitacaoNota.ativo.is_(True),
         )
-        .limit(limit)
-        .offset(offset)
-    ).all()
-    return SolicitacaoNotaList(
-        solicitacoes=[
-            _solicitacao_public(solicitacao, cadastrado_por, status)
-            for solicitacao, cadastrado_por, status in rows
-        ],
-        total=total,
-        limit=limit,
-        offset=offset,
+        .with_for_update()
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Solicitação de nota não encontrada.',
+        )
+
+    solicitacao, workflow, cadastrado_por = row
+    if workflow.status not in {
+        StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value,
+        StatusWorkflowSolicitacao.RECUSADA.value,
+    }:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'Somente solicitações pendentes de validação ou '
+                'recusadas podem ser editadas.'
+            ),
+        )
+
+    local_anterior = solicitacao.local
+    valor_anterior = solicitacao.valor_nota
+    solicitacao.local = payload.local.value
+    solicitacao.valor_nota = payload.valor_nota
+    solicitacao.procedimento = payload.procedimento
+    agora = _agora_local()
+    workflow.status = StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value
+    workflow.validacao = None
+    workflow.motivo_recusa = None
+    workflow.validado_por_id = None
+    workflow.validado_em = None
+    workflow.data_atualizacao = agora
+    evento = SolicitacaoNotaEvento(
+        solicitacao_nota_id=solicitacao.id,
+        usuario_id=usuario_atual.id,
+        tipo_acao='EDICAO',
+        observacao=(
+            f'Local: {local_anterior} -> {payload.local.value}; '
+            f'valor: {valor_anterior} -> {payload.valor_nota}; '
+            'procedimento atualizado; validação reiniciada.'
+        )[:500],
     )
+    try:
+        session_postgres.add(evento)
+        session_postgres.commit()
+        session_postgres.refresh(solicitacao)
+        session_postgres.refresh(workflow)
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível atualizar a solicitação de nota.',
+        ) from exc
+
+    return _workflow_public(
+        solicitacao,
+        workflow,
+        cadastrado_por,
+    )
+
+
+@router.delete(
+    '/solicitacoes-nota/{solicitacao_id}',
+    status_code=HTTPStatus.NO_CONTENT,
+)
+def inativar_solicitacao_nota(
+    solicitacao_id: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    row = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id
+            == SolicitacaoNota.id,
+        )
+        .where(
+            SolicitacaoNota.id == solicitacao_id,
+            SolicitacaoNota.ativo.is_(True),
+        )
+        .with_for_update()
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Solicitação de nota não encontrada.',
+        )
+
+    solicitacao, workflow = row
+    if workflow.status not in {
+        StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value,
+        StatusWorkflowSolicitacao.RECUSADA.value,
+    }:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'Somente solicitações pendentes de validação ou '
+                'recusadas podem ser inativadas.'
+            ),
+        )
+
+    solicitacao.ativo = False
+    evento = SolicitacaoNotaEvento(
+        solicitacao_nota_id=solicitacao.id,
+        usuario_id=usuario_atual.id,
+        tipo_acao='INATIVACAO',
+        observacao=f'Solicitação inativada no status {workflow.status}.',
+    )
+    try:
+        session_postgres.add(evento)
+        session_postgres.commit()
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível inativar a solicitação de nota.',
+        ) from exc
+    return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
 @router.get(
@@ -543,6 +813,7 @@ def listar_workflow_solicitacoes_nota(
 ):
     del usuario_atual
     filtros = [
+        SolicitacaoNota.ativo.is_(True),
         SolicitacaoNotaWorkflow.status == filtros_query.status.value,
     ]
     if nome_paciente := _texto(filtros_query.nome_paciente):
@@ -637,7 +908,10 @@ def validar_solicitacao_nota(
             == SolicitacaoNota.id,
         )
         .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
-        .where(SolicitacaoNota.id == solicitacao_id)
+        .where(
+            SolicitacaoNota.id == solicitacao_id,
+            SolicitacaoNota.ativo.is_(True),
+        )
         .with_for_update()
     ).first()
     if row is None:
@@ -709,6 +983,7 @@ def listar_emissoes_nfse(
         StatusWorkflowSolicitacao.ERRO_EMISSAO.value,
     )
     filtros = [
+        SolicitacaoNota.ativo.is_(True),
         SolicitacaoNotaWorkflow.validacao
         == DecisaoValidacaoSolicitacao.VALIDADA.value,
         SolicitacaoNotaWorkflow.status.in_(status_visiveis),
@@ -726,16 +1001,7 @@ def listar_emissoes_nfse(
     if local := _texto(filtros_query.local):
         filtros.append(SolicitacaoNota.local == local)
 
-    ultima_emissao = (
-        select(
-            EmissaoNfse.solicitacao_nota_id.label(
-                'solicitacao_nota_id'
-            ),
-            func.max(EmissaoNfse.id).label('emissao_id'),
-        )
-        .group_by(EmissaoNfse.solicitacao_nota_id)
-        .subquery()
-    )
+    ultima_emissao = _ultima_emissao_subquery()
     criador = aliased(Usuario)
     validador = aliased(Usuario)
     base_query = (

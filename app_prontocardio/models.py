@@ -745,6 +745,11 @@ class SolicitacaoNota:
     )
     email: Mapped[str | None] = mapped_column(String(150), default=None)
     nr_fone: Mapped[str | None] = mapped_column(String(50), default=None)
+    ativo: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text('true'),
+    )
     data_criacao: Mapped[datetime] = mapped_column(
         init=False,
         server_default=func.now(),

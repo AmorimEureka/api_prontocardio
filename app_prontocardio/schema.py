@@ -93,6 +93,20 @@ class SolicitacaoNotaCreate(BaseModel):
         return procedimento
 
 
+class SolicitacaoNotaUpdate(BaseModel):
+    local: LocalSolicitacaoNota
+    procedimento: str = Field(min_length=1, max_length=500)
+    valor_nota: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
+
+    @field_validator('procedimento', mode='before')
+    @classmethod
+    def normalize_procedimento(cls, value):
+        procedimento = str(value or '').strip()
+        if not procedimento:
+            raise ValueError('Informe o procedimento.')
+        return procedimento
+
+
 class AtendimentoSolicitacaoNotaPublic(BaseModel):
     codigo_atendimento: int
     codigo_paciente: int
@@ -120,14 +134,8 @@ class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
     usuario_id: int
     cadastrado_por: str | None = None
     status: StatusWorkflowSolicitacao | None = None
+    ativo: bool = True
     data_criacao: datetime
-
-
-class SolicitacaoNotaList(BaseModel):
-    solicitacoes: list[SolicitacaoNotaPublic]
-    total: int
-    limit: int
-    offset: int
 
 
 class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
@@ -156,6 +164,16 @@ class SolicitacaoNotaWorkflowFilter(BaseModel):
     cpf: str | None = Field(default=None, max_length=20)
     tipo_atendimento: str | None = Field(default=None, max_length=50)
     local: str | None = Field(default=None, max_length=20)
+    limit: int = Field(default=10, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+
+class SolicitacaoNotaFilter(BaseModel):
+    codigo_atendimento: int | None = Field(default=None, gt=0)
+    nome_paciente: str | None = Field(default=None, max_length=200)
+    convenio: str | None = Field(default=None, max_length=100)
+    local: LocalSolicitacaoNota | None = None
+    status: StatusWorkflowSolicitacao | None = None
     limit: int = Field(default=10, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
 
@@ -229,6 +247,20 @@ class SolicitacaoNotaEmissaoPublic(SolicitacaoNotaWorkflowPublic):
     emissao_criada_em: datetime | None = None
     emissao_atualizada_em: datetime | None = None
     arquivo_disponivel: bool = False
+
+
+class SolicitacaoNotaResumoStatus(BaseModel):
+    status: StatusWorkflowSolicitacao
+    quantidade: int = Field(ge=0)
+    valor_total: Decimal = Field(default=Decimal('0'), ge=0)
+
+
+class SolicitacaoNotaList(BaseModel):
+    solicitacoes: list[SolicitacaoNotaEmissaoPublic]
+    resumo_status: list[SolicitacaoNotaResumoStatus]
+    total: int
+    limit: int
+    offset: int
 
 
 class SolicitacaoNotaEmissaoList(BaseModel):
