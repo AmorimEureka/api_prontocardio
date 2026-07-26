@@ -1,5 +1,6 @@
 import hashlib
 from datetime import datetime
+from decimal import Decimal
 from http import HTTPStatus
 from typing import Annotated
 from urllib.parse import quote
@@ -42,6 +43,7 @@ from app_prontocardio.schema import (
     EmpresasEmissorasList,
     LoteEmissaoNfsePublic,
     ProcedimentoAtendimentoPublic,
+    SolicitacaoAtendimentoHistoricoPublic,
     SolicitacaoNotaCreate,
     SolicitacaoNotaEmissaoFilter,
     SolicitacaoNotaEmissaoList,
@@ -55,6 +57,7 @@ from app_prontocardio.schema import (
     SolicitacaoNotaWorkflowFilter,
     SolicitacaoNotaWorkflowList,
     SolicitacaoNotaWorkflowPublic,
+    SolicitacoesAtendimentoHistoricoList,
     ValidacaoSolicitacaoNotaInput,
 )
 from app_prontocardio.security import valida_token_usuario_atual
@@ -231,6 +234,100 @@ def _ultima_emissao_subquery():
         )
         .group_by(EmissaoNfse.solicitacao_nota_id)
         .subquery()
+    )
+
+
+def _somar_valores_procedimentos(
+    procedimentos: list[ProcedimentoAtendimentoPublic],
+) -> Decimal:
+    return sum(
+        (
+            procedimento.valor_total or Decimal('0')
+            for procedimento in procedimentos
+        ),
+        Decimal('0'),
+    )
+
+
+def _consultar_solicitacoes_atendimentos(
+    codigos_atendimento: set[int],
+    session_postgres: Session,
+) -> dict[int, list[SolicitacaoAtendimentoHistoricoPublic]]:
+    solicitacoes_por_atendimento = {
+        codigo: [] for codigo in codigos_atendimento
+    }
+    if not codigos_atendimento:
+        return solicitacoes_por_atendimento
+
+    ultima_emissao = _ultima_emissao_subquery()
+    rows = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+            EmissaoNfse,
+            EmissaoNfseArquivo.id.label('arquivo_id'),
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            ultima_emissao,
+            ultima_emissao.c.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            EmissaoNfse,
+            EmissaoNfse.id == ultima_emissao.c.emissao_id,
+        )
+        .outerjoin(
+            EmissaoNfseArquivo,
+            EmissaoNfseArquivo.emissao_nfse_id == EmissaoNfse.id,
+        )
+        .where(SolicitacaoNota.codigo_atendimento.in_(codigos_atendimento))
+        .order_by(
+            SolicitacaoNota.codigo_atendimento,
+            SolicitacaoNota.data_criacao.desc(),
+            SolicitacaoNota.id.desc(),
+        )
+    ).all()
+    for solicitacao, workflow, emissao, arquivo_id in rows:
+        solicitacoes_por_atendimento.setdefault(
+            solicitacao.codigo_atendimento,
+            [],
+        ).append(
+            SolicitacaoAtendimentoHistoricoPublic(
+                id=solicitacao.id,
+                local=solicitacao.local,
+                procedimento=solicitacao.procedimento,
+                valor_nota=solicitacao.valor_nota,
+                status=workflow.status,
+                ativo=solicitacao.ativo,
+                data_criacao=solicitacao.data_criacao,
+                validado_em=workflow.validado_em,
+                emissao_id=emissao.id if emissao else None,
+                status_emissao=emissao.status if emissao else None,
+                numero_nfse=emissao.numero_nfse if emissao else None,
+                arquivo_disponivel=bool(
+                    emissao
+                    and emissao.status == StatusEmissaoNfse.EMITIDA.value
+                    and arquivo_id
+                ),
+            )
+        )
+    return solicitacoes_por_atendimento
+
+
+def _consultar_solicitacoes_atendimento(
+    codigo_atendimento: int,
+    session_postgres: Session,
+) -> SolicitacoesAtendimentoHistoricoList:
+    solicitacoes = _consultar_solicitacoes_atendimentos(
+        {codigo_atendimento},
+        session_postgres,
+    ).get(codigo_atendimento, [])
+    return SolicitacoesAtendimentoHistoricoList(
+        solicitacoes=solicitacoes,
+        total=len(solicitacoes),
     )
 
 
@@ -612,6 +709,7 @@ def _consultar_atendimento(
             session_oracle,
         )
     )
+    procedimentos_atendimento = procedimentos.get(codigo_atendimento, [])
     return AtendimentoSolicitacaoNotaPublic(
         codigo_atendimento=codigo_atendimento,
         codigo_paciente=int(atendimento.cd_paciente),
@@ -629,11 +727,11 @@ def _consultar_atendimento(
         tipo_atendimento=(
             _texto(atendimento.tp_atendimento) or 'Não informado'
         ),
-        procedimentos_atendimento=procedimentos.get(
-            codigo_atendimento,
-            [],
-        ),
+        procedimentos_atendimento=procedimentos_atendimento,
         procedimentos_atendimento_disponiveis=procedimentos_disponiveis,
+        valor_total_procedimentos=_somar_valores_procedimentos(
+            procedimentos_atendimento
+        ),
     )
 
 
@@ -649,6 +747,23 @@ def consultar_atendimento_solicitacao_nota(
 ):
     del usuario_atual
     return _consultar_atendimento(codigo_atendimento, session_oracle)
+
+
+@router.get(
+    '/atendimentos/{codigo_atendimento}/solicitacoes',
+    status_code=HTTPStatus.OK,
+    response_model=SolicitacoesAtendimentoHistoricoList,
+)
+def consultar_solicitacoes_atendimento(
+    codigo_atendimento: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    del usuario_atual
+    return _consultar_solicitacoes_atendimento(
+        codigo_atendimento,
+        session_postgres,
+    )
 
 
 @router.get(
@@ -1335,6 +1450,10 @@ def listar_workflow_solicitacoes_nota(
                 session_oracle,
             )
         )
+    solicitacoes_por_atendimento = _consultar_solicitacoes_atendimentos(
+        {solicitacao.codigo_atendimento for solicitacao, *_restante in rows},
+        session_postgres,
+    )
     return SolicitacaoNotaWorkflowList(
         solicitacoes=[
             _workflow_public(
@@ -1358,6 +1477,29 @@ def listar_workflow_solicitacoes_nota(
                     'procedimentos_atendimento_disponiveis': (
                         procedimentos_disponiveis
                     ),
+                    'valor_total_procedimentos': (
+                        _somar_valores_procedimentos(
+                            procedimentos_por_atendimento.get(
+                                solicitacao.codigo_atendimento,
+                                [],
+                            )
+                        )
+                    ),
+                    'solicitacoes_anteriores': [
+                        anterior
+                        for anterior in solicitacoes_por_atendimento.get(
+                            solicitacao.codigo_atendimento,
+                            [],
+                        )
+                        if (
+                            anterior.data_criacao < solicitacao.data_criacao
+                            or (
+                                anterior.data_criacao
+                                == solicitacao.data_criacao
+                                and anterior.id < solicitacao.id
+                            )
+                        )
+                    ],
                 }
             )
             for (
