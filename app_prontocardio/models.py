@@ -24,6 +24,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, registry, relationship
 
+from app_prontocardio.permissions import TELAS_PADRAO_JSON, telas_padrao
 from app_prontocardio.settings import Settings
 
 table_registry = registry()
@@ -83,6 +84,11 @@ class Usuario:
     )
     ativo: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=text('true')
+    )
+    telas_permitidas: Mapped[list[str]] = mapped_column(
+        JSON,
+        default_factory=telas_padrao,
+        server_default=text(f"'{TELAS_PADRAO_JSON}'"),
     )
     data_criacao: Mapped[datetime] = mapped_column(
         init=False, server_default=func.now()

@@ -13,6 +13,7 @@ from app_prontocardio.schema import (
     Message,
     UserList,
     UserPasswordUpdate,
+    UserPermissionsUpdate,
     UserPublic,
     UserSchema,
     UserStatusUpdate,
@@ -129,6 +130,26 @@ def redefinir_senha_usuario(
     usuario.senha = gera_hash_senha(password_input.senha)
     session.commit()
     return {'message': 'Senha temporária definida com sucesso.'}
+
+
+@router.patch(
+    '/{user_id}/permissoes',
+    status_code=HTTPStatus.OK,
+    response_model=UserPublic,
+)
+def alterar_permissoes_usuario(
+    user_id: int,
+    permissions_input: UserPermissionsUpdate,
+    usuario_atual: ValidaUsuarioTi,
+    session: SessionPostgres,
+):
+    usuario = session.get(Usuario, user_id)
+    if not usuario:
+        raise HTTPException(HTTPStatus.NOT_FOUND, 'Usuário não encontrado.')
+    usuario.telas_permitidas = permissions_input.telas_permitidas
+    session.commit()
+    session.refresh(usuario)
+    return usuario
 
 
 @router.put('/{user_id}', status_code=HTTPStatus.OK, response_model=UserPublic)
