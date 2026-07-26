@@ -78,6 +78,7 @@ def dados_atendimento():
                 'prestador': 'DR. TESTE',
             }
         ],
+        valor_total_procedimentos=Decimal('385.50'),
     )
 
 
@@ -139,6 +140,7 @@ def test_consulta_atendimento_combina_conta_e_paciente():
     )
 
     assert response == dados_atendimento()
+    assert response.valor_total_procedimentos == Decimal('385.50')
 
 
 def test_consulta_atendimento_inexistente_retorna_404():
@@ -643,6 +645,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
     assert procedimentos[0].grupo == 'EXAMES CARDIOLÓGICOS'
     assert procedimentos[0].quantidade == Decimal('1')
     assert procedimentos[0].valor_total == Decimal('385.50')
+    assert fila.solicitacoes[0].valor_total_procedimentos == Decimal('595.50')
     assert procedimentos[0].realizado_em == datetime(
         2026,
         7,
@@ -733,6 +736,83 @@ def test_validacao_move_solicitacao_para_fila_de_emissao(
         )
     )
     assert evento.usuario_id == usuario_teste.id
+
+
+def test_historico_do_atendimento_exibe_status_atual_da_solicitacao(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        '40304361 - ECOCARDIOGRAMA TRANSTORÁCICO',
+    )
+    requisicoes.validar_solicitacao_nota(
+        solicitacao.id,
+        ValidacaoSolicitacaoNotaInput(decisao='VALIDADA'),
+        usuario_teste,
+        session,
+    )
+
+    historico = requisicoes._consultar_solicitacoes_atendimento(
+        CODIGO_ATENDIMENTO,
+        session,
+    )
+
+    assert historico.total == 1
+    assert historico.solicitacoes[0].id == solicitacao.id
+    assert historico.solicitacoes[0].status == 'VALIDADA'
+    assert historico.solicitacoes[0].validado_em is not None
+    assert historico.solicitacoes[0].emissao_id is None
+    assert historico.solicitacoes[0].arquivo_disponivel is False
+
+
+def test_follow_up_inclui_outras_solicitacoes_do_mesmo_atendimento(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    anterior = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Solicitação anterior',
+    )
+    requisicoes.validar_solicitacao_nota(
+        anterior.id,
+        ValidacaoSolicitacaoNotaInput(decisao='VALIDADA'),
+        usuario_teste,
+        session,
+    )
+    atual = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Solicitação atual',
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_procedimentos_atendimentos',
+        lambda codigos, _session: (
+            {codigo: [] for codigo in codigos},
+            True,
+        ),
+    )
+
+    fila = requisicoes.listar_workflow_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaWorkflowFilter(),
+        object(),
+    )
+
+    assert fila.total == 1
+    assert fila.solicitacoes[0].id == atual.id
+    anteriores = fila.solicitacoes[0].solicitacoes_anteriores
+    assert [item.id for item in anteriores] == [anterior.id]
+    assert anteriores[0].status == 'VALIDADA'
 
 
 def test_solicitacao_validada_pode_ser_revertida_para_recusa(

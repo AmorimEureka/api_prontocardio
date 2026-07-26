@@ -156,7 +156,7 @@ class SolicitacaoNotaEmpresaEmissoraInput(BaseModel):
 class SolicitacaoNotaCreate(BaseModel):
     codigo_atendimento: int = Field(gt=0)
     local: LocalSolicitacaoNota
-    procedimento: str = Field(min_length=1, max_length=500)
+    procedimento: str = Field(min_length=1, max_length=10000)
     valor_nota: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
 
     @field_validator('procedimento', mode='before')
@@ -170,7 +170,7 @@ class SolicitacaoNotaCreate(BaseModel):
 
 class SolicitacaoNotaUpdate(BaseModel):
     local: LocalSolicitacaoNota
-    procedimento: str = Field(min_length=1, max_length=500)
+    procedimento: str = Field(min_length=1, max_length=10000)
     valor_nota: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
 
     @field_validator('procedimento', mode='before')
@@ -192,6 +192,26 @@ class ProcedimentoAtendimentoPublic(BaseModel):
     prestador: str | None = None
 
 
+class SolicitacaoAtendimentoHistoricoPublic(BaseModel):
+    id: int
+    local: LocalSolicitacaoNota
+    procedimento: str
+    valor_nota: Decimal | None = None
+    status: StatusWorkflowSolicitacao
+    ativo: bool
+    data_criacao: datetime
+    validado_em: datetime | None = None
+    emissao_id: int | None = None
+    status_emissao: StatusEmissaoNfse | None = None
+    numero_nfse: str | None = None
+    arquivo_disponivel: bool = False
+
+
+class SolicitacoesAtendimentoHistoricoList(BaseModel):
+    solicitacoes: list[SolicitacaoAtendimentoHistoricoPublic]
+    total: int = Field(ge=0)
+
+
 class AtendimentoSolicitacaoNotaPublic(BaseModel):
     codigo_atendimento: int
     codigo_paciente: int
@@ -211,6 +231,7 @@ class AtendimentoSolicitacaoNotaPublic(BaseModel):
         default_factory=list
     )
     procedimentos_atendimento_disponiveis: bool = True
+    valor_total_procedimentos: Decimal = Decimal('0')
 
 
 class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
@@ -242,6 +263,9 @@ class SolicitacaoNotaWorkflowPublic(SolicitacaoNotaPublic):
     inativado_por: str | None = None
     inativado_em: datetime | None = None
     workflow_atualizado_em: datetime
+    solicitacoes_anteriores: list[SolicitacaoAtendimentoHistoricoPublic] = (
+        Field(default_factory=list)
+    )
 
 
 class SolicitacaoNotaWorkflowList(BaseModel):

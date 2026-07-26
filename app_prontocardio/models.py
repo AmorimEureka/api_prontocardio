@@ -17,6 +17,7 @@ from sqlalchemy import (
     LargeBinary,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
     func,
     text,
@@ -794,7 +795,7 @@ class SolicitacaoNota:
     nm_paciente: Mapped[str] = mapped_column(String(200))
     convenio: Mapped[str] = mapped_column(String(100))
     local: Mapped[str] = mapped_column(String(20))
-    procedimento: Mapped[str] = mapped_column(String(500))
+    procedimento: Mapped[str] = mapped_column(Text)
     tipo_atendimento: Mapped[str] = mapped_column(String(50))
     usuario_id: Mapped[int] = mapped_column(
         ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
