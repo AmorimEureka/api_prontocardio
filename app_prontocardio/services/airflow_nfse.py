@@ -35,6 +35,7 @@ def airflow_nfse_configurado(settings: Settings | None = None) -> bool:
 def disparar_dag_emissao_nfse(
     lote_id: int,
     solicitacao_ids: list[int],
+    cnpj_por_solicitacao: dict[int, str] | None = None,
     settings: Settings | None = None,
 ) -> AirflowDagRun:
     config = settings or Settings()
@@ -67,6 +68,12 @@ def disparar_dag_emissao_nfse(
                     'origem': 'API_PRONTOCARDIO',
                     'lote_id': lote_id,
                     'solicitacao_ids': solicitacao_ids,
+                    'cnpj_por_solicitacao': {
+                        str(solicitacao_id): cnpj
+                        for solicitacao_id, cnpj in (
+                            cnpj_por_solicitacao or {}
+                        ).items()
+                    },
                 },
             },
             headers=headers,
@@ -106,9 +113,7 @@ def disparar_dag_emissao_nfse(
             'O Airflow retornou uma resposta inválida para o disparo.'
         ) from exc
 
-    returned_run_id = str(
-        payload.get('dag_run_id') or dag_run_id
-    ).strip()
+    returned_run_id = str(payload.get('dag_run_id') or dag_run_id).strip()
     return AirflowDagRun(
         dag_run_id=returned_run_id,
         state=str(payload.get('state') or '').strip() or None,

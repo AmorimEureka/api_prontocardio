@@ -51,6 +51,9 @@ from app_prontocardio.schema import (
     RemessasFaturamentoList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.remessas import (
+    sincronizar_totais_remessas_financeiras,
+)
 
 router = APIRouter(
     prefix='/app_glosas/financeiro',
@@ -185,7 +188,9 @@ def _consultar_remessas_hpc(  # noqa: PLR0913
             ModelContaAtendimento.cnpj_convenio.label('cnpj_convenio'),
             ModelContaAtendimento.nm_convenio.label('convenio'),
             ModelContaAtendimento.cd_reg.label('cd_reg'),
-            ModelContaAtendimento.vl_total_conta.label('valor_conta'),
+            ModelContaAtendimento.vl_total_registro.label(
+                'valor_registro'
+            ),
         )
         .where(ModelContaAtendimento.cd_remessa.is_not(None))
         .where(
@@ -237,9 +242,9 @@ def _consultar_remessas_hpc(  # noqa: PLR0913
             contas_distintas.c.cd_convenio,
             contas_distintas.c.cnpj_convenio,
             contas_distintas.c.convenio,
-            func.sum(func.coalesce(contas_distintas.c.valor_conta, 0)).label(
-                'valor_total'
-            ),
+            func.sum(
+                func.coalesce(contas_distintas.c.valor_registro, 0)
+            ).label('valor_total'),
         )
         .group_by(
             contas_distintas.c.cd_remessa,
@@ -295,7 +300,9 @@ def _consultar_cards_remessas_hpc(  # noqa: PLR0913
             cnpj_convenio.label('cnpj_convenio'),
             nome_convenio.label('convenio'),
             ModelContaAtendimento.cd_reg.label('cd_reg'),
-            ModelContaAtendimento.vl_total_conta.label('valor_conta'),
+            ModelContaAtendimento.vl_total_registro.label(
+                'valor_registro'
+            ),
             ModelContaAtendimento.dt_competencia.label('data_competencia'),
         )
         .select_from(ModelContaAtendimento)
@@ -362,9 +369,9 @@ def _consultar_cards_remessas_hpc(  # noqa: PLR0913
             func.max(contas_distintas.c.data_competencia).label(
                 'data_competencia'
             ),
-            func.sum(func.coalesce(contas_distintas.c.valor_conta, 0)).label(
-                'valor_total'
-            ),
+            func.sum(
+                func.coalesce(contas_distintas.c.valor_registro, 0)
+            ).label('valor_total'),
         )
         .group_by(
             contas_distintas.c.cd_remessa,
@@ -1148,10 +1155,15 @@ def _obter_ou_criar_remessa_financeira(
     remessa_financeira.cnpj_convenio = remessa['cnpj_convenio']
     if remessa.get('data_competencia') is not None:
         remessa_financeira.data_competencia = remessa['data_competencia']
-    if valor_total > _money(remessa_financeira.valor_total):
+    if valor_total != _money(remessa_financeira.valor_total):
         remessa_financeira.valor_total = valor_total
+        valor_total_recebido = _total_recebido_remessa(
+            session,
+            cd_remessa,
+        )
         remessa_financeira.recebimento_integral = (
-            _total_recebido_remessa(session, cd_remessa) == valor_total
+            valor_total_recebido > 0
+            and valor_total_recebido >= valor_total
         )
     return remessa_financeira
 
@@ -2042,6 +2054,10 @@ def consultar_remessas_faturamento(  # noqa: PLR0913
     offset: int = Query(default=0, ge=0),
 ):
     try:
+        sincronizar_totais_remessas_financeiras(
+            session_postgres,
+            session_oracle,
+        )
         remessas, total = _consultar_cards_remessas_hpc(
             session_oracle,
             _codigos_remessas_encerradas(session_postgres),
@@ -3219,6 +3235,25 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
         .offset(offset)
         .limit(limit)
     ).all()
+    codigos_remessa = {row[0].cd_remessa for row in rows}
+    totais_remessas_hpc = {}
+    try:
+        totais_remessas_hpc = sincronizar_totais_remessas_financeiras(
+            session,
+            session_oracle,
+            codigos_remessa,
+        )
+    except SQLAlchemyError:
+        # O snapshot persistido continua disponível se o Oracle oscilar.
+        pass
+    remessas_financeiras = {
+        remessa.cd_remessa: remessa
+        for remessa in session.scalars(
+            select(RemessaFinanceira).where(
+                RemessaFinanceira.cd_remessa.in_(codigos_remessa)
+            )
+        )
+    }
     ids_vinculos = {row[0].id for row in rows}
     registros_por_vinculo: dict[int, list[RegistroGlosa]] = {
         vinculo_id: [] for vinculo_id in ids_vinculos
@@ -3245,6 +3280,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
 
     cards = []
     for vinculo, conciliacao, entrega, pendente, tratado in rows:
+        remessa_financeira = remessas_financeiras.get(vinculo.cd_remessa)
         cards.append(
             {
                 'conciliacao_remessa_id': vinculo.id,
@@ -3252,7 +3288,16 @@ def consultar_follow_up_glosas(  # noqa: PLR0913
                 'convenio': vinculo.convenio,
                 'data_entrega': entrega or conciliacao.data_criacao.date(),
                 'numero_nfse': conciliacao.numero_nfse,
-                'valor_remessa': _money(vinculo.valor_total),
+                'valor_remessa': _money(
+                    totais_remessas_hpc.get(
+                        vinculo.cd_remessa,
+                        (
+                            remessa_financeira.valor_total
+                            if remessa_financeira is not None
+                            else vinculo.valor_total
+                        ),
+                    )
+                ),
                 'valor_glosado': _money(vinculo.valor_glosado),
                 'valor_glosa_pendente': max(
                     _money(pendente),
@@ -3619,6 +3664,7 @@ def _filtros_pesquisa_conciliacoes(
 def consultar_conciliacoes_faturamento(  # noqa: PLR0913, PLR0915
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
     q: str | None = Query(default=None, max_length=100),
     numero_nfse: Annotated[str | None, Query(max_length=100)] = None,
     remessa_filtro: Annotated[
@@ -3741,6 +3787,16 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913, PLR0915
             'limit': limit,
             'offset': offset,
         }
+    totais_remessas_hpc = {}
+    try:
+        totais_remessas_hpc = sincronizar_totais_remessas_financeiras(
+            session,
+            session_oracle,
+            set(codigos_remessa),
+        )
+    except SQLAlchemyError:
+        # Mantém a última posição persistida quando o Oracle está indisponível.
+        pass
 
     rows = session.execute(
         select(
@@ -3967,14 +4023,19 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913, PLR0915
                     remessa.data_competencia if remessa is not None else None
                 ),
                 'valor_remessa': (
-                    _money(remessa.valor_total)
-                    if remessa is not None
-                    else sum(
+                    totais_remessas_hpc.get(
+                        cd_remessa,
                         (
-                            _money(vinculo.valor_total)
-                            for vinculo in vinculos_remessa
+                            _money(remessa.valor_total)
+                            if remessa is not None
+                            else sum(
+                                (
+                                    _money(vinculo.valor_total)
+                                    for vinculo in vinculos_remessa
+                                ),
+                                Decimal('0.00'),
+                            )
                         ),
-                        Decimal('0.00'),
                     )
                 ),
                 'valor_alocado_nfse': sum(
@@ -4246,6 +4307,7 @@ def inativar_conciliacao_faturamento(
 def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
     q: str | None = Query(default=None, max_length=100),
     numero_nfse: str | None = None,
     cd_remessa: str | None = None,
@@ -4411,6 +4473,16 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
             'limit': limit,
             'offset': offset,
         }
+    totais_remessas_hpc = {}
+    try:
+        totais_remessas_hpc = sincronizar_totais_remessas_financeiras(
+            session,
+            session_oracle,
+            set(codigos_remessa),
+        )
+    except SQLAlchemyError:
+        # Mantém a última posição persistida quando o Oracle está indisponível.
+        pass
 
     note_rows = session.execute(
         select(
@@ -4675,14 +4747,19 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
                     remessa.data_competencia if remessa is not None else None
                 ),
                 'valor_remessa': (
-                    _money(remessa.valor_total)
-                    if remessa is not None
-                    else sum(
+                    totais_remessas_hpc.get(
+                        cd_remessa,
                         (
-                            _money(vinculo.valor_total)
-                            for vinculo, _, _, _ in vinculos
+                            _money(remessa.valor_total)
+                            if remessa is not None
+                            else sum(
+                                (
+                                    _money(vinculo.valor_total)
+                                    for vinculo, _, _, _ in vinculos
+                                ),
+                                Decimal('0.00'),
+                            )
                         ),
-                        Decimal('0.00'),
                     )
                 ),
                 'quantidade_nfses_sem_recebimento': sum(

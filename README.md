@@ -185,6 +185,7 @@ saldo_nfse = valor_liquido_nfse
 A posicao exibida no card da remessa e calculada por:
 
 ```text
+valor_total_remessa = SUM(vl_total_registro por cd_reg distinto)
 valor_conciliado = SUM(valor_alocado_nfse)
 saldo_base = MAX(valor_total_remessa
                  - SUM(valor_alocado_nfse)
@@ -195,6 +196,13 @@ glosa_pendente = MAX(SUM(valor_glosado)
                      - valor_acatado, 0)
 valor_nao_conciliado = MAX(saldo_base, glosa_pendente)
 ```
+
+O total financeiro da remessa usa `vl_total_registro`. Os itens analiticos
+de procedimentos, exames, materiais e medicamentos continuam usando
+`vl_total_conta`. Na inicializacao, os totais ja persistidos em
+`remessas_financeiras` sao sincronizados com a view e o estado de recebimento
+integral e recalculado sem alterar o historico de conciliacoes, glosas ou
+recebimentos.
 
 - O valor alocado deve ser maior que zero e menor ou igual ao saldo atual da
   NFS-e.

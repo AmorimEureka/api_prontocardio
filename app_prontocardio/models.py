@@ -205,8 +205,7 @@ class RegistroGlosa:
     )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
-            f'{settings.POSTGRES_SCHEMA}.'
-            'conciliacoes_faturamento_remessas.id',
+            f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento_remessas.id',
             ondelete='SET NULL',
         ),
         default=None,
@@ -694,6 +693,82 @@ class Tiss:
 
 
 @table_registry.mapped_as_dataclass
+class EmpresaEmissora:
+    __tablename__ = 'empresas_emissoras'
+    __table_args__ = (
+        CheckConstraint(
+            'length(cnpj) = 14',
+            name='ck_empresas_emissoras_cnpj',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    cnpj: Mapped[str] = mapped_column(String(14), unique=True)
+    razao_social: Mapped[str] = mapped_column(String(200))
+    usuario_criacao_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        nullable=True,
+    )
+    usuario_atualizacao_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        nullable=True,
+    )
+    ativo: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=text('true'),
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class EmpresaEmissoraEvento:
+    __tablename__ = 'empresas_emissoras_eventos'
+    __table_args__ = (
+        Index(
+            'ix_empresas_emissoras_eventos_empresa',
+            'empresa_emissora_id',
+            'data_criacao',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    empresa_emissora_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.empresas_emissoras.id',
+            ondelete='CASCADE',
+        )
+    )
+    usuario_id: Mapped[int | None] = mapped_column(
+        ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id'),
+        nullable=True,
+    )
+    tipo_acao: Mapped[str] = mapped_column(String(30))
+    dados_anteriores: Mapped[dict | None] = mapped_column(
+        JSON,
+        default=None,
+    )
+    dados_novos: Mapped[dict | None] = mapped_column(
+        JSON,
+        default=None,
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
 class SolicitacaoNota:
     __tablename__ = 'solicitacao_nota'
     __table_args__ = (
@@ -726,6 +801,21 @@ class SolicitacaoNota:
     )
     valor_nota: Mapped[Decimal | None] = mapped_column(
         Numeric(14, 2),
+        default=None,
+    )
+    empresa_emissora_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.empresas_emissoras.id',
+            ondelete='RESTRICT',
+        ),
+        default=None,
+    )
+    cnpj_emissor: Mapped[str | None] = mapped_column(
+        String(14),
+        default=None,
+    )
+    razao_social_emissor: Mapped[str | None] = mapped_column(
+        String(200),
         default=None,
     )
     nr_cpf: Mapped[str | None] = mapped_column(String(20), default=None)
@@ -761,7 +851,7 @@ class SolicitacaoNotaWorkflow:
     __tablename__ = 'solicitacao_nota_workflow'
     __table_args__ = (
         CheckConstraint(
-            "status IN ("
+            'status IN ('
             "'PENDENTE_VALIDACAO', 'RECUSADA', 'VALIDADA', "
             "'EMISSAO_SOLICITADA', 'EMITIDA', 'ERRO_EMISSAO'"
             ')',
@@ -927,6 +1017,21 @@ class EmissaoNfse:
         ForeignKey(f'{settings.POSTGRES_SCHEMA}.usuarios_api.id')
     )
     status: Mapped[str] = mapped_column(String(20))
+    empresa_emissora_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.empresas_emissoras.id',
+            ondelete='RESTRICT',
+        ),
+        default=None,
+    )
+    cnpj_emissor: Mapped[str | None] = mapped_column(
+        String(14),
+        default=None,
+    )
+    razao_social_emissor: Mapped[str | None] = mapped_column(
+        String(200),
+        default=None,
+    )
     numero_nfse: Mapped[str | None] = mapped_column(
         String(100),
         default=None,
@@ -1091,6 +1196,10 @@ class ModelContaAtendimento:
     qt_lancamento: Mapped[Decimal | None] = mapped_column(Numeric, init=False)
     vl_unitario: Mapped[Decimal | None] = mapped_column(Numeric, init=False)
     vl_total_conta: Mapped[Decimal | None] = mapped_column(Numeric, init=False)
+    vl_total_registro: Mapped[Decimal | None] = mapped_column(
+        Numeric,
+        init=False,
+    )
     vl_honorario_unitario: Mapped[Decimal | None] = mapped_column(
         Numeric,
         init=False,
