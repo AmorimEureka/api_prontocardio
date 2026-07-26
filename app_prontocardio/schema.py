@@ -19,6 +19,7 @@ from app_prontocardio.models import (
     StatusWorkflowSolicitacao,
     TipoAtendimento,
 )
+from app_prontocardio.permissions import normalizar_telas, telas_padrao
 
 
 class UserSchema(BaseModel):
@@ -26,6 +27,12 @@ class UserSchema(BaseModel):
     email: EmailStr
     senha: str = Field(min_length=8, max_length=128)
     perfil: str = Field(default='usuario', pattern='^(usuario|ti)$')
+    telas_permitidas: list[str] = Field(default_factory=telas_padrao)
+
+    @field_validator('telas_permitidas')
+    @classmethod
+    def validate_telas_permitidas(cls, value):
+        return normalizar_telas(value)
 
 
 class UserPublic(BaseModel):
@@ -34,6 +41,7 @@ class UserPublic(BaseModel):
     email: EmailStr
     perfil: str
     ativo: bool
+    telas_permitidas: list[str]
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -47,6 +55,15 @@ class UserStatusUpdate(BaseModel):
 
 class UserPasswordUpdate(BaseModel):
     senha: str = Field(min_length=8, max_length=128)
+
+
+class UserPermissionsUpdate(BaseModel):
+    telas_permitidas: list[str]
+
+    @field_validator('telas_permitidas')
+    @classmethod
+    def validate_telas_permitidas(cls, value):
+        return normalizar_telas(value)
 
 
 class PasswordResetRequest(BaseModel):
