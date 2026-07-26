@@ -260,17 +260,22 @@ def _consultar_solicitacoes_atendimentos(
         return solicitacoes_por_atendimento
 
     ultima_emissao = _ultima_emissao_subquery()
+    ultima_inativacao = _ultima_inativacao_subquery()
+    inativacao = aliased(SolicitacaoNotaEvento)
     rows = session_postgres.execute(
         select(
             SolicitacaoNota,
             SolicitacaoNotaWorkflow,
             EmissaoNfse,
             EmissaoNfseArquivo.id.label('arquivo_id'),
+            Usuario.nome.label('cadastrado_por'),
+            inativacao.observacao.label('motivo_inativacao'),
         )
         .join(
             SolicitacaoNotaWorkflow,
             SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
+        .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
         .outerjoin(
             ultima_emissao,
             ultima_emissao.c.solicitacao_nota_id == SolicitacaoNota.id,
@@ -283,6 +288,14 @@ def _consultar_solicitacoes_atendimentos(
             EmissaoNfseArquivo,
             EmissaoNfseArquivo.emissao_nfse_id == EmissaoNfse.id,
         )
+        .outerjoin(
+            ultima_inativacao,
+            ultima_inativacao.c.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            inativacao,
+            inativacao.id == ultima_inativacao.c.evento_id,
+        )
         .where(SolicitacaoNota.codigo_atendimento.in_(codigos_atendimento))
         .order_by(
             SolicitacaoNota.codigo_atendimento,
@@ -290,7 +303,14 @@ def _consultar_solicitacoes_atendimentos(
             SolicitacaoNota.id.desc(),
         )
     ).all()
-    for solicitacao, workflow, emissao, arquivo_id in rows:
+    for (
+        solicitacao,
+        workflow,
+        emissao,
+        arquivo_id,
+        cadastrado_por,
+        motivo_inativacao,
+    ) in rows:
         solicitacoes_por_atendimento.setdefault(
             solicitacao.codigo_atendimento,
             [],
@@ -300,6 +320,8 @@ def _consultar_solicitacoes_atendimentos(
                 local=solicitacao.local,
                 procedimento=solicitacao.procedimento,
                 valor_nota=solicitacao.valor_nota,
+                cadastrado_por=cadastrado_por,
+                motivo=workflow.motivo_recusa or motivo_inativacao,
                 status=workflow.status,
                 ativo=solicitacao.ativo,
                 data_criacao=solicitacao.data_criacao,
