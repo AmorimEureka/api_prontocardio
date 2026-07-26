@@ -197,6 +197,8 @@ class SolicitacaoAtendimentoHistoricoPublic(BaseModel):
     local: LocalSolicitacaoNota
     procedimento: str
     valor_nota: Decimal | None = None
+    cadastrado_por: str | None = None
+    motivo: str | None = None
     status: StatusWorkflowSolicitacao
     ativo: bool
     data_criacao: datetime

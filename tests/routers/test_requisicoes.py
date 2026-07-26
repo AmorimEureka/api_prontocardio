@@ -763,6 +763,7 @@ def test_historico_do_atendimento_exibe_status_atual_da_solicitacao(
 
     assert historico.total == 1
     assert historico.solicitacoes[0].id == solicitacao.id
+    assert historico.solicitacoes[0].cadastrado_por == usuario_teste.nome
     assert historico.solicitacoes[0].status == 'VALIDADA'
     assert historico.solicitacoes[0].validado_em is not None
     assert historico.solicitacoes[0].emissao_id is None
@@ -812,7 +813,53 @@ def test_follow_up_inclui_outras_solicitacoes_do_mesmo_atendimento(
     assert fila.solicitacoes[0].id == atual.id
     anteriores = fila.solicitacoes[0].solicitacoes_anteriores
     assert [item.id for item in anteriores] == [anterior.id]
+    assert anteriores[0].cadastrado_por == usuario_teste.nome
     assert anteriores[0].status == 'VALIDADA'
+
+
+def test_historico_exibe_motivo_de_recusa_e_inativacao(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    recusada = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Procedimento recusado',
+    )
+    requisicoes.validar_solicitacao_nota(
+        recusada.id,
+        ValidacaoSolicitacaoNotaInput(
+            decisao='RECUSADA',
+            motivo_recusa='CPF divergente.',
+        ),
+        usuario_teste,
+        session,
+    )
+    inativa = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+        'Procedimento inativado',
+    )
+    requisicoes.inativar_solicitacao_nota(
+        inativa.id,
+        usuario_teste,
+        session,
+    )
+
+    historico = requisicoes._consultar_solicitacoes_atendimento(
+        CODIGO_ATENDIMENTO,
+        session,
+    )
+    por_id = {item.id: item for item in historico.solicitacoes}
+
+    assert por_id[recusada.id].motivo == 'CPF divergente.'
+    assert por_id[inativa.id].ativo is False
+    assert por_id[inativa.id].motivo == (
+        'Solicitação inativada no status PENDENTE_VALIDACAO.'
+    )
 
 
 def test_solicitacao_validada_pode_ser_revertida_para_recusa(
