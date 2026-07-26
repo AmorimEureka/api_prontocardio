@@ -605,6 +605,45 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(  # noqa: PLR09
     assert item_restaurado['registro_glosa'].status_tratativa == 'pendente'
 
 
+def test_follow_up_usa_total_registro_no_card_e_total_conta_nos_itens(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session)
+    configurar_oracle_fake(monkeypatch)
+    financeiro.conciliar_faturamento(
+        payload=ConciliacaoFaturamentoCreate(**payload_conciliacao()),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    monkeypatch.setattr(
+        financeiro,
+        'sincronizar_totais_remessas_financeiras',
+        lambda *_args, **_kwargs: {
+            CD_REMESSA_TESTE: Decimal('135.00')
+        },
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+
+    card = follow_up['cards'][0]
+    assert card['valor_remessa'] == Decimal('135.00')
+    assert {
+        item['vl_total_conta']
+        for paciente in card['pacientes']
+        for item in paciente['itens']
+    } == {Decimal('60.00')}
+
+
 def test_follow_up_agrupa_recurso_e_acato_no_mesmo_item(
     session,
     usuario_teste,
@@ -1425,6 +1464,8 @@ def test_pesquisa_numerica_de_remessa_e_exata():
 
     assert 'cd_remessa =' in sql
     assert 'LIKE' not in sql
+    assert 'vl_total_registro' in sql
+    assert 'vl_total_conta' not in sql
 
 
 def test_pesquisa_textual_compila_cast_valido_para_oracle():

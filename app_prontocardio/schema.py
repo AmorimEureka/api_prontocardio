@@ -78,6 +78,81 @@ class Message(BaseModel):
     message: str
 
 
+TAMANHO_CNPJ = 14
+LIMITE_RESTO_DIGITO_CNPJ = 2
+
+
+def _normalizar_cnpj(value) -> str:
+    cnpj = ''.join(
+        character for character in str(value or '') if character.isdigit()
+    )
+    if len(cnpj) != TAMANHO_CNPJ or len(set(cnpj)) == 1:
+        raise ValueError('Informe um CNPJ válido.')
+    numeros = [int(character) for character in cnpj]
+    for tamanho in (12, 13):
+        pesos = list(range(tamanho - 7, 1, -1)) + list(range(9, 1, -1))
+        soma = sum(
+            numero * peso
+            for numero, peso in zip(numeros[:tamanho], pesos, strict=True)
+        )
+        digito = (
+            0 if soma % 11 < LIMITE_RESTO_DIGITO_CNPJ else 11 - (soma % 11)
+        )
+        if numeros[tamanho] != digito:
+            raise ValueError('Informe um CNPJ válido.')
+    return cnpj
+
+
+class EmpresaEmissoraCreate(BaseModel):
+    cnpj: str
+    razao_social: str = Field(min_length=1, max_length=200)
+
+    @field_validator('cnpj', mode='before')
+    @classmethod
+    def normalize_cnpj(cls, value):
+        return _normalizar_cnpj(value)
+
+    @field_validator('razao_social', mode='before')
+    @classmethod
+    def normalize_razao_social(cls, value):
+        razao_social = str(value or '').strip()
+        if not razao_social:
+            raise ValueError('Informe a razão social.')
+        return razao_social
+
+
+class EmpresaEmissoraUpdate(EmpresaEmissoraCreate):
+    pass
+
+
+class EmpresaEmissoraStatusUpdate(BaseModel):
+    ativo: bool
+
+
+class EmpresaEmissoraPublic(BaseModel):
+    id: int
+    cnpj: str
+    razao_social: str
+    ativo: bool
+    usuario_criacao_id: int | None
+    criado_por: str | None = None
+    usuario_atualizacao_id: int | None
+    atualizado_por: str | None = None
+    data_criacao: datetime
+    data_atualizacao: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class EmpresasEmissorasList(BaseModel):
+    empresas: list[EmpresaEmissoraPublic]
+    total: int
+
+
+class SolicitacaoNotaEmpresaEmissoraInput(BaseModel):
+    empresa_emissora_id: int = Field(gt=0)
+
+
 class SolicitacaoNotaCreate(BaseModel):
     codigo_atendimento: int = Field(gt=0)
     local: LocalSolicitacaoNota
@@ -112,6 +187,7 @@ class ProcedimentoAtendimentoPublic(BaseModel):
     descricao: str
     grupo: str | None = None
     quantidade: Decimal | None = None
+    valor_total: Decimal | None = None
     realizado_em: datetime | None = None
     prestador: str | None = None
 
@@ -144,6 +220,9 @@ class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
     local: LocalSolicitacaoNota
     procedimento: str
     valor_nota: Decimal | None = Field(default=None, ge=0)
+    empresa_emissora_id: int | None = None
+    cnpj_emissor: str | None = None
+    razao_social_emissor: str | None = None
     usuario_id: int
     cadastrado_por: str | None = None
     status: StatusWorkflowSolicitacao | None = None
@@ -200,8 +279,16 @@ class SolicitacaoNotaEmissaoFilter(BaseModel):
     cpf: str | None = Field(default=None, max_length=20)
     tipo_atendimento: str | None = Field(default=None, max_length=50)
     local: str | None = Field(default=None, max_length=20)
+    cnpj_emissor: str | None = Field(default=None, max_length=20)
     limit: int = Field(default=10, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
+
+    @field_validator('cnpj_emissor', mode='before')
+    @classmethod
+    def normalize_optional_cnpj(cls, value):
+        if value is None or not str(value).strip():
+            return None
+        return _normalizar_cnpj(value)
 
 
 class ValidacaoSolicitacaoNotaInput(BaseModel):
@@ -245,6 +332,9 @@ class EmissaoNfsePublic(BaseModel):
     lote_id: int
     usuario_id: int
     status: str
+    empresa_emissora_id: int | None = None
+    cnpj_emissor: str | None = None
+    razao_social_emissor: str | None = None
     numero_nfse: str | None = None
     protocolo: str | None = None
     erro: str | None = None
@@ -587,6 +677,7 @@ class Atendimento(BaseModel):
     qt_lancamento: Decimal | None = None
     vl_unitario: Decimal | None = None
     vl_total_conta: Decimal | None = None
+    vl_total_registro: Decimal | None = None
     vl_honorario_unitario: Decimal | None = None
     vl_acrescimo: Decimal | None = None
     vl_desconto: Decimal | None = None
@@ -765,10 +856,7 @@ class NfseConciliacaoRemessaInput(BaseModel):
                 'ou lancamento do extrato.'
             )
         today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
-        if (
-            self.data_recebimento is not None
-            and self.data_recebimento > today
-        ):
+        if self.data_recebimento is not None and self.data_recebimento > today:
             raise ValueError(
                 'A data do recebimento nao pode ser maior que a data atual.'
             )
@@ -1030,10 +1118,7 @@ class ConciliacaoFaturamentoCreate(BaseModel):
                 'ou lancamento do extrato.'
             )
         today = datetime.now(ZoneInfo('America/Sao_Paulo')).date()
-        if (
-            self.data_recebimento is not None
-            and self.data_recebimento > today
-        ):
+        if self.data_recebimento is not None and self.data_recebimento > today:
             raise ValueError(
                 'A data do recebimento nao pode ser maior que a data atual.'
             )

@@ -13,6 +13,8 @@ from app_prontocardio.app import app
 from app_prontocardio.models import (
     EmissaoNfse,
     EmissaoNfseArquivo,
+    EmpresaEmissora,
+    EmpresaEmissoraEvento,
     LoteEmissaoNfse,
     SolicitacaoNota,
     SolicitacaoNotaEvento,
@@ -23,8 +25,12 @@ from app_prontocardio.routers import requisicoes
 from app_prontocardio.schema import (
     AtendimentoSolicitacaoNotaPublic,
     EmissaoNfseCreate,
+    EmpresaEmissoraCreate,
+    EmpresaEmissoraStatusUpdate,
+    EmpresaEmissoraUpdate,
     SolicitacaoNotaCreate,
     SolicitacaoNotaEmissaoFilter,
+    SolicitacaoNotaEmpresaEmissoraInput,
     SolicitacaoNotaFilter,
     SolicitacaoNotaUpdate,
     SolicitacaoNotaWorkflowFilter,
@@ -41,6 +47,8 @@ CODIGO_CONVENIO = 20
 TOTAL_SOLICITACOES = 3
 TOTAL_SOLICITACOES_RECUSAS = 2
 QUANTIDADE_LOTE = 2
+EMPRESA_CNPJ = '05613278000158'
+EMPRESA_RAZAO_SOCIAL = 'PRONTOCARDIO PRONTOATENDIMENTO CARDIOLOGICO LTDA'
 
 
 def dados_atendimento():
@@ -65,6 +73,7 @@ def dados_atendimento():
                 'descricao': 'ECOCARDIOGRAMA TRANSTORÁCICO',
                 'grupo': 'EXAMES CARDIOLÓGICOS',
                 'quantidade': Decimal('1'),
+                'valor_total': Decimal('385.50'),
                 'realizado_em': datetime(2026, 7, 23, 10, 30),
                 'prestador': 'DR. TESTE',
             }
@@ -94,6 +103,7 @@ def test_consulta_atendimento_combina_conta_e_paciente():
                     descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
                     ds_gru_fat='EXAMES CARDIOLÓGICOS',
                     qt_lancamento=Decimal('1'),
+                    vl_total_conta=Decimal('385.50'),
                     dt_lancamento=datetime(2026, 7, 23, 10, 30),
                     nm_prestador='DR. TESTE',
                 )
@@ -274,7 +284,7 @@ def _criar_solicitacao(
         '_consultar_atendimento',
         lambda _codigo, _session: dados_atendimento(),
     )
-    return requisicoes.cadastrar_solicitacao_nota(
+    solicitacao = requisicoes.cadastrar_solicitacao_nota(
         SolicitacaoNotaCreate(
             codigo_atendimento=CODIGO_ATENDIMENTO,
             local='Clinica 1',
@@ -285,6 +295,97 @@ def _criar_solicitacao(
         session,
         object(),
     )
+    registro = session.get(SolicitacaoNota, solicitacao.id)
+    registro.cnpj_emissor = EMPRESA_CNPJ
+    registro.razao_social_emissor = EMPRESA_RAZAO_SOCIAL
+    session.commit()
+    return solicitacao
+
+
+def test_empresas_emissoras_rastreiam_criacao_edicao_e_inativacao(
+    session,
+    usuario_teste,
+):
+    criada = requisicoes.cadastrar_empresa_emissora(
+        EmpresaEmissoraCreate(
+            cnpj=EMPRESA_CNPJ,
+            razao_social=EMPRESA_RAZAO_SOCIAL,
+        ),
+        usuario_teste,
+        session,
+    )
+    atualizada = requisicoes.atualizar_empresa_emissora(
+        criada.id,
+        EmpresaEmissoraUpdate(
+            cnpj=EMPRESA_CNPJ,
+            razao_social=f'{EMPRESA_RAZAO_SOCIAL} - MATRIZ',
+        ),
+        usuario_teste,
+        session,
+    )
+    inativada = requisicoes.atualizar_status_empresa_emissora(
+        criada.id,
+        EmpresaEmissoraStatusUpdate(ativo=False),
+        usuario_teste,
+        session,
+    )
+    listagem = requisicoes.listar_empresas_emissoras(
+        usuario_teste,
+        session,
+        incluir_inativas=True,
+    )
+
+    assert atualizada.atualizado_por == usuario_teste.nome
+    assert inativada.ativo is False
+    assert listagem.total == 1
+    assert listagem.empresas[0].usuario_atualizacao_id == usuario_teste.id
+    eventos = session.scalars(
+        select(EmpresaEmissoraEvento).order_by(EmpresaEmissoraEvento.id)
+    ).all()
+    assert [evento.tipo_acao for evento in eventos] == [
+        'CRIACAO',
+        'ATUALIZACAO',
+        'INATIVACAO',
+    ]
+    assert {evento.usuario_id for evento in eventos} == {usuario_teste.id}
+
+
+def test_selecao_empresa_emissora_grava_snapshot_na_solicitacao(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    empresa = EmpresaEmissora(
+        cnpj='08711085000128',
+        razao_social='PRONTOCARDIO SERVICOS MEDICOS HOSPITALARES LTDA',
+        usuario_criacao_id=usuario_teste.id,
+        usuario_atualizacao_id=usuario_teste.id,
+    )
+    session.add(empresa)
+    session.commit()
+    session.refresh(empresa)
+
+    response = requisicoes.selecionar_empresa_emissora_solicitacao(
+        solicitacao.id,
+        SolicitacaoNotaEmpresaEmissoraInput(empresa_emissora_id=empresa.id),
+        usuario_teste,
+        session,
+    )
+
+    assert response.empresa_emissora_id == empresa.id
+    assert response.cnpj_emissor == empresa.cnpj
+    assert response.razao_social_emissor == empresa.razao_social
+    evento = session.scalar(
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'EMPRESA_EMISSORA_SELECIONADA'
+        )
+    )
+    assert evento.usuario_id == usuario_teste.id
 
 
 def test_lista_solicitacoes_aplica_filtros_e_resume_por_status(
@@ -465,16 +566,13 @@ def test_fila_de_recusas_reune_recusadas_ativas_e_inativadas(
     )
 
     solicitacoes_por_id = {
-        solicitacao.id: solicitacao
-        for solicitacao in fila.solicitacoes
+        solicitacao.id: solicitacao for solicitacao in fila.solicitacoes
     }
     assert fila.total == TOTAL_SOLICITACOES_RECUSAS
     assert solicitacoes_por_id[recusada.id].ativo is True
     assert solicitacoes_por_id[recusada.id].status == 'RECUSADA'
     assert solicitacoes_por_id[inativada.id].ativo is False
-    assert solicitacoes_por_id[inativada.id].status == (
-        'PENDENTE_VALIDACAO'
-    )
+    assert solicitacoes_por_id[inativada.id].status == ('PENDENTE_VALIDACAO')
     assert solicitacoes_por_id[inativada.id].inativado_por_id == (
         usuario_teste.id
     )
@@ -505,6 +603,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
                     descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
                     ds_gru_fat='EXAMES CARDIOLÓGICOS',
                     qt_lancamento=Decimal('1'),
+                    vl_total_conta=Decimal('385.50'),
                     dt_lancamento=datetime(2026, 7, 23, 10, 30),
                     nm_prestador='DR. TESTE',
                 ),
@@ -514,6 +613,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
                     descricao='CONSULTA EM CARDIOLOGIA',
                     ds_gru_fat='PROCEDIMENTOS',
                     qt_lancamento=Decimal('1'),
+                    vl_total_conta=Decimal('210.00'),
                     dt_lancamento=datetime(2026, 7, 23, 9, 45),
                     nm_prestador=None,
                 ),
@@ -533,9 +633,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
 
     assert fila.total == 1
     assert fila.solicitacoes[0].id == solicitacao.id
-    assert fila.solicitacoes[
-        0
-    ].procedimentos_atendimento_disponiveis is True
+    assert fila.solicitacoes[0].procedimentos_atendimento_disponiveis is True
     procedimentos = fila.solicitacoes[0].procedimentos_atendimento
     assert [item.codigo for item in procedimentos] == [
         '40304361',
@@ -544,6 +642,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
     assert procedimentos[0].descricao == 'ECOCARDIOGRAMA TRANSTORÁCICO'
     assert procedimentos[0].grupo == 'EXAMES CARDIOLÓGICOS'
     assert procedimentos[0].quantidade == Decimal('1')
+    assert procedimentos[0].valor_total == Decimal('385.50')
     assert procedimentos[0].realizado_em == datetime(
         2026,
         7,
@@ -629,8 +728,9 @@ def test_validacao_move_solicitacao_para_fila_de_emissao(
     assert response.validado_por_id == usuario_teste.id
     assert response.validado_por == usuario_teste.nome
     evento = session.scalar(
-        select(SolicitacaoNotaEvento)
-        .where(SolicitacaoNotaEvento.tipo_acao == 'VALIDADA')
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'VALIDADA'
+        )
     )
     assert evento.usuario_id == usuario_teste.id
 
@@ -699,8 +799,9 @@ def test_recusa_exige_motivo_e_fica_na_fila_de_recusadas(
     assert response.status == StatusWorkflowSolicitacao.RECUSADA
     assert response.motivo_recusa == 'CPF divergente.'
     evento = session.scalar(
-        select(SolicitacaoNotaEvento)
-        .where(SolicitacaoNotaEvento.tipo_acao == 'RECUSADA')
+        select(SolicitacaoNotaEvento).where(
+            SolicitacaoNotaEvento.tipo_acao == 'RECUSADA'
+        )
     )
     assert evento.usuario_id == usuario_teste.id
 
@@ -738,6 +839,7 @@ def test_emissao_em_lote_dispara_airflow_e_marca_itens(
     usuario_teste,
     monkeypatch,
 ):
+    disparo = {}
     solicitacoes = [
         _criar_solicitacao(
             session,
@@ -759,20 +861,27 @@ def test_emissao_em_lote_dispara_airflow_e_marca_itens(
         'airflow_nfse_configurado',
         lambda: True,
     )
+
+    def disparar(lote_id, ids, cnpjs):
+        disparo.update({
+            'lote_id': lote_id,
+            'ids': ids,
+            'cnpjs': cnpjs,
+        })
+        return AirflowDagRun(
+            dag_run_id=f'dag-lote-{lote_id}',
+            state='queued',
+        )
+
     monkeypatch.setattr(
         requisicoes,
         'disparar_dag_emissao_nfse',
-        lambda lote_id, _ids: AirflowDagRun(
-            dag_run_id=f'dag-lote-{lote_id}',
-            state='queued',
-        ),
+        disparar,
     )
 
     response = requisicoes.solicitar_emissao_nfse(
         EmissaoNfseCreate(
-            solicitacao_ids=[
-                solicitacao.id for solicitacao in solicitacoes
-            ]
+            solicitacao_ids=[solicitacao.id for solicitacao in solicitacoes]
         ),
         usuario_teste,
         session,
@@ -781,15 +890,21 @@ def test_emissao_em_lote_dispara_airflow_e_marca_itens(
     assert response.tipo == 'LOTE'
     assert response.quantidade == QUANTIDADE_LOTE
     assert response.dag_run_id == f'dag-lote-{response.lote_id}'
-    assert session.scalar(
-        select(func.count()).select_from(EmissaoNfse)
-    ) == QUANTIDADE_LOTE
+    assert disparo == {
+        'lote_id': response.lote_id,
+        'ids': [solicitacao.id for solicitacao in solicitacoes],
+        'cnpjs': {
+            solicitacao.id: EMPRESA_CNPJ for solicitacao in solicitacoes
+        },
+    }
+    assert (
+        session.scalar(select(func.count()).select_from(EmissaoNfse))
+        == QUANTIDADE_LOTE
+    )
     assert session.get(LoteEmissaoNfse, response.lote_id).status == (
         'PROCESSANDO'
     )
-    statuses = session.scalars(
-        select(SolicitacaoNotaWorkflow.status)
-    ).all()
+    statuses = session.scalars(select(SolicitacaoNotaWorkflow.status)).all()
     assert set(statuses) == {'EMISSAO_SOLICITADA'}
     eventos_emissao = session.scalars(
         select(SolicitacaoNotaEvento).where(
@@ -797,9 +912,9 @@ def test_emissao_em_lote_dispara_airflow_e_marca_itens(
         )
     ).all()
     assert len(eventos_emissao) == QUANTIDADE_LOTE
-    assert {
-        evento.usuario_id for evento in eventos_emissao
-    } == {usuario_teste.id}
+    assert {evento.usuario_id for evento in eventos_emissao} == {
+        usuario_teste.id
+    }
 
 
 def test_falha_no_airflow_devolve_itens_para_emissao(
@@ -824,7 +939,7 @@ def test_falha_no_airflow_devolve_itens_para_emissao(
         lambda: True,
     )
 
-    def falhar_disparo(_lote_id, _ids):
+    def falhar_disparo(_lote_id, _ids, _cnpjs):
         raise AirflowNfseTriggerError('Airflow indisponível.')
 
     monkeypatch.setattr(
@@ -894,7 +1009,7 @@ def test_emissao_individual_persiste_dados_do_disparo(
     monkeypatch.setattr(
         requisicoes,
         'disparar_dag_emissao_nfse',
-        lambda lote_id, _ids: AirflowDagRun(
+        lambda lote_id, _ids, _cnpjs: AirflowDagRun(
             dag_run_id=f'run-{lote_id}',
             state='queued',
         ),
@@ -951,9 +1066,7 @@ def test_emissao_exige_dados_fiscais_obrigatorios(
         )
 
     assert exc_info.value.status_code == HTTPStatus.CONFLICT
-    assert session.scalar(
-        select(func.count()).select_from(EmissaoNfse)
-    ) == 0
+    assert session.scalar(select(func.count()).select_from(EmissaoNfse)) == 0
 
 
 def test_emissao_exige_validacao_e_status_validado(
@@ -1015,7 +1128,7 @@ def test_emissao_ativa_nao_cria_outro_lote(
     )
     disparos = 0
 
-    def disparar(lote_id, _ids):
+    def disparar(lote_id, _ids, _cnpjs):
         nonlocal disparos
         disparos += 1
         return AirflowDagRun(dag_run_id=f'run-{lote_id}')
@@ -1042,9 +1155,9 @@ def test_emissao_ativa_nao_cria_outro_lote(
         )
 
     assert exc_info.value.status_code == HTTPStatus.CONFLICT
-    assert session.scalar(
-        select(func.count()).select_from(LoteEmissaoNfse)
-    ) == 1
+    assert (
+        session.scalar(select(func.count()).select_from(LoteEmissaoNfse)) == 1
+    )
     assert disparos == 1
 
 
@@ -1059,7 +1172,7 @@ def test_timeout_airflow_retorna_503_e_restaura_workflow(
         monkeypatch,
     )
 
-    def timeout(_lote_id, _ids):
+    def timeout(_lote_id, _ids, _cnpjs):
         raise AirflowNfseIndisponivelError('Tempo limite excedido.')
 
     monkeypatch.setattr(
@@ -1093,7 +1206,7 @@ def test_consulta_andamento_do_lote(
     monkeypatch.setattr(
         requisicoes,
         'disparar_dag_emissao_nfse',
-        lambda lote_id, _ids: AirflowDagRun(
+        lambda lote_id, _ids, _cnpjs: AirflowDagRun(
             dag_run_id=f'run-{lote_id}'
         ),
     )
@@ -1158,7 +1271,7 @@ def _solicitar_emissao_teste(
     monkeypatch.setattr(
         requisicoes,
         'disparar_dag_emissao_nfse',
-        lambda lote_id, _ids: AirflowDagRun(
+        lambda lote_id, _ids, _cnpjs: AirflowDagRun(
             dag_run_id=f'run-{lote_id}'
         ),
     )
@@ -1188,9 +1301,7 @@ def _criar_emissao_emitida(
         solicitacao,
     )
     emissao = session.scalar(
-        select(EmissaoNfse).where(
-            EmissaoNfse.lote_id == lote_public.lote_id
-        )
+        select(EmissaoNfse).where(EmissaoNfse.lote_id == lote_public.lote_id)
     )
     workflow = session.scalar(
         select(SolicitacaoNotaWorkflow).where(
@@ -1256,9 +1367,7 @@ def test_fila_emissao_mantem_item_solicitado_e_usa_tentativa_mais_recente(
         solicitacao,
     )
     emissao_atual = session.scalar(
-        select(EmissaoNfse).where(
-            EmissaoNfse.lote_id == lote_atual.lote_id
-        )
+        select(EmissaoNfse).where(EmissaoNfse.lote_id == lote_atual.lote_id)
     )
 
     response = requisicoes.listar_emissoes_nfse(
@@ -1389,12 +1498,12 @@ def test_pdf_emitido_pode_ser_visualizado_ou_baixado_com_auditoria(
     assert response.media_type == 'application/pdf'
     assert response.body == arquivo.conteudo
     assert response.headers['content-disposition'].startswith(disposicao)
-    assert "filename*=UTF-8''98765%20-%20MARIA%20DA%20SILVA.pdf" in (
-        response.headers['content-disposition']
+    assert (
+        "filename*=UTF-8''98765%20-%20MARIA%20DA%20SILVA.pdf"
+        in (response.headers['content-disposition'])
     )
     evento = session.scalar(
-        select(SolicitacaoNotaEvento)
-        .where(
+        select(SolicitacaoNotaEvento).where(
             SolicitacaoNotaEvento.solicitacao_nota_id == solicitacao.id,
             SolicitacaoNotaEvento.tipo_acao == tipo_acao,
         )

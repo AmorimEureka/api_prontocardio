@@ -18,6 +18,8 @@ from app_prontocardio.models import (
     DecisaoValidacaoSolicitacao,
     EmissaoNfse,
     EmissaoNfseArquivo,
+    EmpresaEmissora,
+    EmpresaEmissoraEvento,
     LoteEmissaoNfse,
     ModelContaAtendimento,
     ModelHpcPaciente,
@@ -33,12 +35,18 @@ from app_prontocardio.schema import (
     AtendimentoSolicitacaoNotaPublic,
     EmissaoNfseCreate,
     EmissaoNfsePublic,
+    EmpresaEmissoraCreate,
+    EmpresaEmissoraPublic,
+    EmpresaEmissoraStatusUpdate,
+    EmpresaEmissoraUpdate,
+    EmpresasEmissorasList,
     LoteEmissaoNfsePublic,
     ProcedimentoAtendimentoPublic,
     SolicitacaoNotaCreate,
     SolicitacaoNotaEmissaoFilter,
     SolicitacaoNotaEmissaoList,
     SolicitacaoNotaEmissaoPublic,
+    SolicitacaoNotaEmpresaEmissoraInput,
     SolicitacaoNotaFilter,
     SolicitacaoNotaList,
     SolicitacaoNotaPublic,
@@ -74,6 +82,45 @@ def _texto(value) -> str | None:
 
 def _agora_local() -> datetime:
     return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
+
+
+def _dados_empresa(empresa: EmpresaEmissora) -> dict:
+    return {
+        'cnpj': empresa.cnpj,
+        'razao_social': empresa.razao_social,
+        'ativo': empresa.ativo,
+    }
+
+
+def _empresa_public(
+    empresa: EmpresaEmissora,
+    criado_por: str | None = None,
+    atualizado_por: str | None = None,
+) -> EmpresaEmissoraPublic:
+    return EmpresaEmissoraPublic.model_validate(empresa).model_copy(
+        update={
+            'criado_por': criado_por,
+            'atualizado_por': atualizado_por,
+        }
+    )
+
+
+def _registrar_evento_empresa(
+    session: Session,
+    empresa: EmpresaEmissora,
+    usuario_id: int | None,
+    tipo_acao: str,
+    dados_anteriores: dict | None = None,
+) -> None:
+    session.add(
+        EmpresaEmissoraEvento(
+            empresa_emissora_id=empresa.id,
+            usuario_id=usuario_id,
+            tipo_acao=tipo_acao,
+            dados_anteriores=dados_anteriores,
+            dados_novos=_dados_empresa(empresa),
+        )
+    )
 
 
 def _solicitacao_public(
@@ -136,8 +183,7 @@ def _lote_emissao_public(
         erro_disparo=lote.erro_disparo,
         data_criacao=lote.data_criacao,
         emissoes=[
-            EmissaoNfsePublic.model_validate(emissao)
-            for emissao in emissoes
+            EmissaoNfsePublic.model_validate(emissao) for emissao in emissoes
         ],
         message=message,
     )
@@ -151,13 +197,20 @@ def _solicitacao_emissao_public(
     arquivo_disponivel: bool,
 ) -> SolicitacaoNotaEmissaoPublic:
     cadastrado_por, validado_por = usuarios
+    dados_workflow = _workflow_public(
+        solicitacao,
+        workflow,
+        cadastrado_por,
+        validado_por,
+    ).model_dump()
+    if emissao is not None:
+        dados_workflow.update({
+            'empresa_emissora_id': emissao.empresa_emissora_id,
+            'cnpj_emissor': emissao.cnpj_emissor,
+            'razao_social_emissor': emissao.razao_social_emissor,
+        })
     return SolicitacaoNotaEmissaoPublic(
-        **_workflow_public(
-            solicitacao,
-            workflow,
-            cadastrado_por,
-            validado_por,
-        ).model_dump(),
+        **dados_workflow,
         emissao_id=emissao.id if emissao else None,
         lote_id=emissao.lote_id if emissao else None,
         status_emissao=emissao.status if emissao else None,
@@ -165,9 +218,7 @@ def _solicitacao_emissao_public(
         protocolo=emissao.protocolo if emissao else None,
         erro_emissao=emissao.erro if emissao else None,
         emissao_criada_em=emissao.data_criacao if emissao else None,
-        emissao_atualizada_em=(
-            emissao.data_atualizacao if emissao else None
-        ),
+        emissao_atualizada_em=(emissao.data_atualizacao if emissao else None),
         arquivo_disponivel=arquivo_disponivel,
     )
 
@@ -175,9 +226,7 @@ def _solicitacao_emissao_public(
 def _ultima_emissao_subquery():
     return (
         select(
-            EmissaoNfse.solicitacao_nota_id.label(
-                'solicitacao_nota_id'
-            ),
+            EmissaoNfse.solicitacao_nota_id.label('solicitacao_nota_id'),
             func.max(EmissaoNfse.id).label('emissao_id'),
         )
         .group_by(EmissaoNfse.solicitacao_nota_id)
@@ -217,13 +266,12 @@ def _consultar_procedimentos_atendimentos(
                 ModelContaAtendimento.descricao,
                 ModelContaAtendimento.ds_gru_fat,
                 ModelContaAtendimento.qt_lancamento,
+                ModelContaAtendimento.vl_total_conta,
                 ModelContaAtendimento.dt_lancamento,
                 ModelContaAtendimento.nm_prestador,
             )
             .where(
-                ModelContaAtendimento.cd_atendimento.in_(
-                    codigos_atendimento
-                )
+                ModelContaAtendimento.cd_atendimento.in_(codigos_atendimento)
             )
             .order_by(
                 ModelContaAtendimento.cd_atendimento,
@@ -251,6 +299,7 @@ def _consultar_procedimentos_atendimentos(
                 descricao=descricao or f'Procedimento {codigo}',
                 grupo=_texto(row.ds_gru_fat),
                 quantidade=row.qt_lancamento,
+                valor_total=row.vl_total_conta,
                 realizado_em=row.dt_lancamento,
                 prestador=_texto(row.nm_prestador),
             )
@@ -270,6 +319,8 @@ def _possui_dados_fiscais_obrigatorios(
             solicitacao.procedimento,
             solicitacao.local,
             solicitacao.tipo_atendimento,
+            solicitacao.cnpj_emissor,
+            solicitacao.razao_social_emissor,
         )
     )
 
@@ -277,7 +328,7 @@ def _possui_dados_fiscais_obrigatorios(
 def _carregar_workflows_para_emissao(
     solicitacao_ids: list[int],
     session_postgres: Session,
-) -> dict[int, SolicitacaoNotaWorkflow]:
+) -> dict[int, tuple[SolicitacaoNota, SolicitacaoNotaWorkflow]]:
     rows = session_postgres.execute(
         select(
             SolicitacaoNota,
@@ -285,8 +336,7 @@ def _carregar_workflows_para_emissao(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNota.id
-            == SolicitacaoNotaWorkflow.solicitacao_nota_id,
+            SolicitacaoNota.id == SolicitacaoNotaWorkflow.solicitacao_nota_id,
         )
         .where(
             SolicitacaoNota.id.in_(solicitacao_ids),
@@ -297,9 +347,7 @@ def _carregar_workflows_para_emissao(
     solicitacoes = {
         solicitacao.id: solicitacao for solicitacao, _workflow in rows
     }
-    workflows = {
-        solicitacao.id: workflow for solicitacao, workflow in rows
-    }
+    workflows = {solicitacao.id: workflow for solicitacao, workflow in rows}
     estados_ativos = (
         StatusEmissaoNfse.PENDENTE.value,
         StatusEmissaoNfse.PROCESSANDO.value,
@@ -340,12 +388,18 @@ def _carregar_workflows_para_emissao(
                 f'Verifique os registros: {indisponiveis}.'
             ),
         )
-    return workflows
+    return {
+        solicitacao_id: (solicitacoes[solicitacao_id], workflow)
+        for solicitacao_id, workflow in workflows.items()
+    }
 
 
 def _preparar_lote_emissao(
     solicitacao_ids: list[int],
-    workflows: dict[int, SolicitacaoNotaWorkflow],
+    solicitacoes_workflows: dict[
+        int,
+        tuple[SolicitacaoNota, SolicitacaoNotaWorkflow],
+    ],
     usuario_atual: Usuario,
     session_postgres: Session,
 ) -> tuple[LoteEmissaoNfse, list[EmissaoNfse]]:
@@ -365,14 +419,17 @@ def _preparar_lote_emissao(
         session_postgres.flush()
         emissoes = []
         for solicitacao_id in solicitacao_ids:
+            solicitacao, workflow = solicitacoes_workflows[solicitacao_id]
             emissao = EmissaoNfse(
                 solicitacao_nota_id=solicitacao_id,
                 lote_id=lote.id,
                 usuario_id=usuario_atual.id,
                 status=StatusEmissaoNfse.PENDENTE.value,
+                empresa_emissora_id=solicitacao.empresa_emissora_id,
+                cnpj_emissor=solicitacao.cnpj_emissor,
+                razao_social_emissor=solicitacao.razao_social_emissor,
             )
             emissoes.append(emissao)
-            workflow = workflows[solicitacao_id]
             workflow.status = (
                 StatusWorkflowSolicitacao.EMISSAO_SOLICITADA.value
             )
@@ -419,12 +476,9 @@ def _restaurar_apos_falha_airflow(
         workflow.solicitacao_nota_id: workflow
         for workflow in session_postgres.scalars(
             select(SolicitacaoNotaWorkflow).where(
-                SolicitacaoNotaWorkflow.solicitacao_nota_id.in_(
-                    [
-                        emissao.solicitacao_nota_id
-                        for emissao in emissoes
-                    ]
-                )
+                SolicitacaoNotaWorkflow.solicitacao_nota_id.in_([
+                    emissao.solicitacao_nota_id for emissao in emissoes
+                ])
             )
         ).all()
     }
@@ -474,9 +528,9 @@ def _registrar_disparo_airflow(
                 solicitacao_nota_id=emissao.solicitacao_nota_id,
                 usuario_id=usuario_atual.id,
                 tipo_acao='AIRFLOW_DISPARADO',
-                observacao=(
-                    f'Lote #{lote.id}; dag_run_id={dag_run_id}.'
-                )[:500],
+                observacao=(f'Lote #{lote.id}; dag_run_id={dag_run_id}.')[
+                    :500
+                ],
             )
         )
     try:
@@ -505,10 +559,7 @@ def _consultar_atendimento(
                 ModelContaAtendimento.nm_convenio,
                 ModelContaAtendimento.tp_atendimento,
             )
-            .where(
-                ModelContaAtendimento.cd_atendimento
-                == codigo_atendimento
-            )
+            .where(ModelContaAtendimento.cd_atendimento == codigo_atendimento)
             .order_by(
                 ModelContaAtendimento.dt_ordenacao.desc().nulls_last(),
                 ModelContaAtendimento.cd_reg.desc(),
@@ -601,6 +652,295 @@ def consultar_atendimento_solicitacao_nota(
 
 
 @router.get(
+    '/empresas-emissoras',
+    status_code=HTTPStatus.OK,
+    response_model=EmpresasEmissorasList,
+)
+def listar_empresas_emissoras(
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    incluir_inativas: bool = False,
+):
+    del usuario_atual
+    criador = aliased(Usuario)
+    atualizador = aliased(Usuario)
+    query = (
+        select(
+            EmpresaEmissora,
+            criador.nome.label('criado_por'),
+            atualizador.nome.label('atualizado_por'),
+        )
+        .outerjoin(
+            criador,
+            criador.id == EmpresaEmissora.usuario_criacao_id,
+        )
+        .outerjoin(
+            atualizador,
+            atualizador.id == EmpresaEmissora.usuario_atualizacao_id,
+        )
+    )
+    if not incluir_inativas:
+        query = query.where(EmpresaEmissora.ativo.is_(True))
+    rows = session_postgres.execute(
+        query.order_by(
+            EmpresaEmissora.ativo.desc(),
+            EmpresaEmissora.razao_social,
+        )
+    ).all()
+    return EmpresasEmissorasList(
+        empresas=[
+            _empresa_public(empresa, criado_por, atualizado_por)
+            for empresa, criado_por, atualizado_por in rows
+        ],
+        total=len(rows),
+    )
+
+
+@router.post(
+    '/empresas-emissoras',
+    status_code=HTTPStatus.CREATED,
+    response_model=EmpresaEmissoraPublic,
+)
+def cadastrar_empresa_emissora(
+    payload: EmpresaEmissoraCreate,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    empresa = EmpresaEmissora(
+        cnpj=payload.cnpj,
+        razao_social=payload.razao_social,
+        usuario_criacao_id=usuario_atual.id,
+        usuario_atualizacao_id=usuario_atual.id,
+    )
+    agora = _agora_local()
+    empresa.data_criacao = agora
+    empresa.data_atualizacao = agora
+    try:
+        session_postgres.add(empresa)
+        session_postgres.flush()
+        _registrar_evento_empresa(
+            session_postgres,
+            empresa,
+            usuario_atual.id,
+            'CRIACAO',
+        )
+        session_postgres.commit()
+        session_postgres.refresh(empresa)
+    except IntegrityError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='Já existe uma empresa cadastrada com este CNPJ.',
+        ) from exc
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível cadastrar a empresa emissora.',
+        ) from exc
+    return _empresa_public(
+        empresa,
+        usuario_atual.nome,
+        usuario_atual.nome,
+    )
+
+
+@router.put(
+    '/empresas-emissoras/{empresa_id}',
+    status_code=HTTPStatus.OK,
+    response_model=EmpresaEmissoraPublic,
+)
+def atualizar_empresa_emissora(
+    empresa_id: int,
+    payload: EmpresaEmissoraUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    empresa = session_postgres.scalar(
+        select(EmpresaEmissora)
+        .where(EmpresaEmissora.id == empresa_id)
+        .with_for_update()
+    )
+    if empresa is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Empresa emissora não encontrada.',
+        )
+    dados_anteriores = _dados_empresa(empresa)
+    empresa.cnpj = payload.cnpj
+    empresa.razao_social = payload.razao_social
+    empresa.usuario_atualizacao_id = usuario_atual.id
+    empresa.data_atualizacao = _agora_local()
+    try:
+        _registrar_evento_empresa(
+            session_postgres,
+            empresa,
+            usuario_atual.id,
+            'ATUALIZACAO',
+            dados_anteriores,
+        )
+        session_postgres.commit()
+        session_postgres.refresh(empresa)
+    except IntegrityError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='Já existe uma empresa cadastrada com este CNPJ.',
+        ) from exc
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível atualizar a empresa emissora.',
+        ) from exc
+    criado_por = session_postgres.scalar(
+        select(Usuario.nome).where(Usuario.id == empresa.usuario_criacao_id)
+    )
+    return _empresa_public(
+        empresa,
+        criado_por,
+        usuario_atual.nome,
+    )
+
+
+@router.patch(
+    '/empresas-emissoras/{empresa_id}/status',
+    status_code=HTTPStatus.OK,
+    response_model=EmpresaEmissoraPublic,
+)
+def atualizar_status_empresa_emissora(
+    empresa_id: int,
+    payload: EmpresaEmissoraStatusUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    empresa = session_postgres.scalar(
+        select(EmpresaEmissora)
+        .where(EmpresaEmissora.id == empresa_id)
+        .with_for_update()
+    )
+    if empresa is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Empresa emissora não encontrada.',
+        )
+    dados_anteriores = _dados_empresa(empresa)
+    empresa.ativo = payload.ativo
+    empresa.usuario_atualizacao_id = usuario_atual.id
+    empresa.data_atualizacao = _agora_local()
+    try:
+        _registrar_evento_empresa(
+            session_postgres,
+            empresa,
+            usuario_atual.id,
+            'REATIVACAO' if payload.ativo else 'INATIVACAO',
+            dados_anteriores,
+        )
+        session_postgres.commit()
+        session_postgres.refresh(empresa)
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível alterar o estado da empresa emissora.',
+        ) from exc
+    criado_por = session_postgres.scalar(
+        select(Usuario.nome).where(Usuario.id == empresa.usuario_criacao_id)
+    )
+    return _empresa_public(
+        empresa,
+        criado_por,
+        usuario_atual.nome,
+    )
+
+
+@router.put(
+    '/solicitacoes-nota/{solicitacao_id}/empresa-emissora',
+    status_code=HTTPStatus.OK,
+    response_model=SolicitacaoNotaWorkflowPublic,
+)
+def selecionar_empresa_emissora_solicitacao(
+    solicitacao_id: int,
+    payload: SolicitacaoNotaEmpresaEmissoraInput,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+):
+    row = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+            Usuario.nome.label('cadastrado_por'),
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
+        .where(
+            SolicitacaoNota.id == solicitacao_id,
+            SolicitacaoNota.ativo.is_(True),
+        )
+        .with_for_update()
+    ).first()
+    if row is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Solicitação de nota não encontrada.',
+        )
+    solicitacao, workflow, cadastrado_por = row
+    if workflow.status != StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'A empresa emissora só pode ser selecionada antes '
+                'da validação.'
+            ),
+        )
+    empresa = session_postgres.scalar(
+        select(EmpresaEmissora).where(
+            EmpresaEmissora.id == payload.empresa_emissora_id,
+            EmpresaEmissora.ativo.is_(True),
+        )
+    )
+    if empresa is None:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='Selecione uma empresa emissora ativa.',
+        )
+
+    cnpj_anterior = solicitacao.cnpj_emissor
+    solicitacao.empresa_emissora_id = empresa.id
+    solicitacao.cnpj_emissor = empresa.cnpj
+    solicitacao.razao_social_emissor = empresa.razao_social
+    workflow.data_atualizacao = _agora_local()
+    session_postgres.add(
+        SolicitacaoNotaEvento(
+            solicitacao_nota_id=solicitacao.id,
+            usuario_id=usuario_atual.id,
+            tipo_acao='EMPRESA_EMISSORA_SELECIONADA',
+            observacao=(
+                f'CNPJ emissor alterado de {cnpj_anterior or "não informado"} '
+                f'para {empresa.cnpj} ({empresa.razao_social}).'
+            )[:500],
+        )
+    )
+    try:
+        session_postgres.commit()
+        session_postgres.refresh(workflow)
+    except SQLAlchemyError as exc:
+        session_postgres.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail='Não foi possível selecionar a empresa emissora.',
+        ) from exc
+    return _workflow_public(
+        solicitacao,
+        workflow,
+        cadastrado_por=cadastrado_por,
+    )
+
+
+@router.get(
     '/solicitacoes-nota',
     status_code=HTTPStatus.OK,
     response_model=SolicitacaoNotaList,
@@ -622,19 +962,14 @@ def listar_solicitacoes_nota(
             SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%')
         )
     if convenio := _texto(filtros_query.convenio):
-        filtros_base.append(
-            SolicitacaoNota.convenio.ilike(f'%{convenio}%')
-        )
+        filtros_base.append(SolicitacaoNota.convenio.ilike(f'%{convenio}%'))
     if filtros_query.local:
-        filtros_base.append(
-            SolicitacaoNota.local == filtros_query.local.value
-        )
+        filtros_base.append(SolicitacaoNota.local == filtros_query.local.value)
 
     filtros = list(filtros_base)
     if filtros_query.status:
         filtros.append(
-            SolicitacaoNotaWorkflow.status
-            == filtros_query.status.value
+            SolicitacaoNotaWorkflow.status == filtros_query.status.value
         )
 
     ultima_emissao = _ultima_emissao_subquery()
@@ -651,8 +986,7 @@ def listar_solicitacoes_nota(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .join(criador, criador.id == SolicitacaoNota.usuario_id)
         .outerjoin(
@@ -673,9 +1007,12 @@ def listar_solicitacoes_nota(
         )
         .where(*filtros)
     )
-    total = session_postgres.scalar(
-        select(func.count()).select_from(base_query.subquery())
-    ) or 0
+    total = (
+        session_postgres.scalar(
+            select(func.count()).select_from(base_query.subquery())
+        )
+        or 0
+    )
 
     resumo_rows = session_postgres.execute(
         select(
@@ -688,15 +1025,15 @@ def listar_solicitacoes_nota(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .where(*filtros_base)
         .group_by(SolicitacaoNotaWorkflow.status)
     ).all()
 
     rows = session_postgres.execute(
-        base_query.order_by(
+        base_query
+        .order_by(
             SolicitacaoNota.data_criacao.desc(),
             SolicitacaoNota.id.desc(),
         )
@@ -763,8 +1100,7 @@ def atualizar_solicitacao_nota(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
         .where(
@@ -849,8 +1185,7 @@ def inativar_solicitacao_nota(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .where(
             SolicitacaoNota.id == solicitacao_id,
@@ -924,15 +1259,11 @@ def listar_workflow_solicitacoes_nota(
             filtro_status,
         ]
     if nome_paciente := _texto(filtros_query.nome_paciente):
-        filtros.append(
-            SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%')
-        )
+        filtros.append(SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%'))
     if cpf := _texto(filtros_query.cpf):
         filtros.append(SolicitacaoNota.nr_cpf.ilike(f'%{cpf}%'))
     if tipo_atendimento := _texto(filtros_query.tipo_atendimento):
-        filtros.append(
-            SolicitacaoNota.tipo_atendimento == tipo_atendimento
-        )
+        filtros.append(SolicitacaoNota.tipo_atendimento == tipo_atendimento)
     if local := _texto(filtros_query.local):
         filtros.append(SolicitacaoNota.local == local)
 
@@ -953,8 +1284,7 @@ def listar_workflow_solicitacoes_nota(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .join(
             criador,
@@ -966,8 +1296,7 @@ def listar_workflow_solicitacoes_nota(
         )
         .outerjoin(
             ultima_inativacao,
-            ultima_inativacao.c.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            ultima_inativacao.c.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .outerjoin(
             inativacao,
@@ -979,11 +1308,15 @@ def listar_workflow_solicitacoes_nota(
         )
         .where(*filtros)
     )
-    total = session_postgres.scalar(
-        select(func.count()).select_from(base_query.subquery())
-    ) or 0
+    total = (
+        session_postgres.scalar(
+            select(func.count()).select_from(base_query.subquery())
+        )
+        or 0
+    )
     rows = session_postgres.execute(
-        base_query.order_by(
+        base_query
+        .order_by(
             SolicitacaoNotaWorkflow.data_atualizacao.desc(),
             SolicitacaoNota.id.desc(),
         )
@@ -992,10 +1325,7 @@ def listar_workflow_solicitacoes_nota(
     ).all()
     procedimentos_por_atendimento = {}
     procedimentos_disponiveis = True
-    if (
-        filtros_query.status
-        == StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
-    ):
+    if filtros_query.status == StatusWorkflowSolicitacao.PENDENTE_VALIDACAO:
         procedimentos_por_atendimento, procedimentos_disponiveis = (
             _consultar_procedimentos_atendimentos(
                 {
@@ -1065,8 +1395,7 @@ def validar_solicitacao_nota(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .join(Usuario, Usuario.id == SolicitacaoNota.usuario_id)
         .where(
@@ -1086,20 +1415,17 @@ def validar_solicitacao_nota(
         and payload.decisao == DecisaoValidacaoSolicitacao.RECUSADA
     )
     if (
-        workflow.status
-        != StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value
+        workflow.status != StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value
         and not reversao_para_recusa
     ):
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
             detail=(
-                'A solicitação não está disponível para validação '
-                'ou reversão.'
+                'A solicitação não está disponível para validação ou reversão.'
             ),
         )
-    if (
-        payload.decisao == DecisaoValidacaoSolicitacao.VALIDADA
-        and (solicitacao.valor_nota is None or solicitacao.valor_nota <= 0)
+    if payload.decisao == DecisaoValidacaoSolicitacao.VALIDADA and (
+        solicitacao.valor_nota is None or solicitacao.valor_nota <= 0
     ):
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -1165,17 +1491,15 @@ def listar_emissoes_nfse(
         SolicitacaoNotaWorkflow.status.in_(status_visiveis),
     ]
     if nome_paciente := _texto(filtros_query.nome_paciente):
-        filtros.append(
-            SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%')
-        )
+        filtros.append(SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%'))
     if cpf := _texto(filtros_query.cpf):
         filtros.append(SolicitacaoNota.nr_cpf.ilike(f'%{cpf}%'))
     if tipo_atendimento := _texto(filtros_query.tipo_atendimento):
-        filtros.append(
-            SolicitacaoNota.tipo_atendimento == tipo_atendimento
-        )
+        filtros.append(SolicitacaoNota.tipo_atendimento == tipo_atendimento)
     if local := _texto(filtros_query.local):
         filtros.append(SolicitacaoNota.local == local)
+    if cnpj_emissor := _texto(filtros_query.cnpj_emissor):
+        filtros.append(SolicitacaoNota.cnpj_emissor == cnpj_emissor)
 
     ultima_emissao = _ultima_emissao_subquery()
     criador = aliased(Usuario)
@@ -1191,8 +1515,7 @@ def listar_emissoes_nfse(
         )
         .join(
             SolicitacaoNotaWorkflow,
-            SolicitacaoNotaWorkflow.solicitacao_nota_id
-            == SolicitacaoNota.id,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id == SolicitacaoNota.id,
         )
         .join(criador, criador.id == SolicitacaoNota.usuario_id)
         .outerjoin(
@@ -1213,11 +1536,15 @@ def listar_emissoes_nfse(
         )
         .where(*filtros)
     )
-    total = session_postgres.scalar(
-        select(func.count()).select_from(base_query.subquery())
-    ) or 0
+    total = (
+        session_postgres.scalar(
+            select(func.count()).select_from(base_query.subquery())
+        )
+        or 0
+    )
     rows = session_postgres.execute(
-        base_query.order_by(
+        base_query
+        .order_by(
             SolicitacaoNotaWorkflow.data_atualizacao.desc(),
             SolicitacaoNota.id.desc(),
         )
@@ -1289,6 +1616,11 @@ def solicitar_emissao_nfse(
         dag_run = disparar_dag_emissao_nfse(
             lote.id,
             payload.solicitacao_ids,
+            {
+                emissao.solicitacao_nota_id: emissao.cnpj_emissor
+                for emissao in emissoes
+                if emissao.cnpj_emissor
+            },
         )
     except AirflowNfseTriggerError as exc:
         _restaurar_apos_falha_airflow(
@@ -1375,7 +1707,8 @@ def consultar_pdf_emissao_nfse(
         )
 
     nome_arquivo = (
-        arquivo.nome_arquivo.replace('\\', '/')
+        arquivo.nome_arquivo
+        .replace('\\', '/')
         .rsplit('/', maxsplit=1)[-1]
         .replace('\r', '')
         .replace('\n', '')
@@ -1492,9 +1825,7 @@ def cadastrar_solicitacao_nota(
         session_postgres.add(
             SolicitacaoNotaWorkflow(
                 solicitacao_nota_id=solicitacao.id,
-                status=(
-                    StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value
-                ),
+                status=(StatusWorkflowSolicitacao.PENDENTE_VALIDACAO.value),
             )
         )
         session_postgres.add(

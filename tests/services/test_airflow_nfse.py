@@ -14,9 +14,7 @@ def _settings(**overrides):
     values = {
         'AIRFLOW_NFSE_BASE_URL': 'https://airflow.example.com',
         'AIRFLOW_NFSE_DAG_ID': 'emitir_nfse',
-        'AIRFLOW_NFSE_DAG_RUNS_PATH': (
-            '/api/v1/dags/{dag_id}/dagRuns'
-        ),
+        'AIRFLOW_NFSE_DAG_RUNS_PATH': ('/api/v1/dags/{dag_id}/dagRuns'),
         'AIRFLOW_NFSE_TOKEN': 'token-teste',
         'AIRFLOW_NFSE_USERNAME': None,
         'AIRFLOW_NFSE_PASSWORD': None,
@@ -52,6 +50,10 @@ def test_disparo_airflow_envia_lote_e_solicitacoes(monkeypatch):
     response = disparar_dag_emissao_nfse(
         lote_id=42,
         solicitacao_ids=[10, 20],
+        cnpj_por_solicitacao={
+            10: '05613278000158',
+            20: '08711085000128',
+        },
         settings=_settings(),
     )
 
@@ -65,6 +67,10 @@ def test_disparo_airflow_envia_lote_e_solicitacoes(monkeypatch):
             'origem': 'API_PRONTOCARDIO',
             'lote_id': 42,
             'solicitacao_ids': [10, 20],
+            'cnpj_por_solicitacao': {
+                '10': '05613278000158',
+                '20': '08711085000128',
+            },
         },
     }
     assert response.dag_run_id == 'run-retornado'
@@ -153,9 +159,7 @@ def test_disparo_airflow_prioriza_bearer_sobre_basic(monkeypatch):
         ),
     )
 
-    assert chamada['headers']['Authorization'] == (
-        'Bearer token-prioritario'
-    )
+    assert chamada['headers']['Authorization'] == ('Bearer token-prioritario')
     assert chamada['auth'] is None
 
 
