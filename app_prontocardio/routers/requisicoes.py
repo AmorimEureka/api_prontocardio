@@ -1,4 +1,5 @@
 import hashlib
+import re
 from datetime import datetime
 from decimal import Decimal
 from http import HTTPStatus
@@ -81,6 +82,21 @@ SessionOracle = Annotated[Session, Depends(get_session_oracle)]
 def _texto(value) -> str | None:
     texto = str(value or '').strip()
     return texto or None
+
+
+def _telefone_com_ddd(ddd, telefone) -> str | None:
+    numero = re.sub(r'\D', '', _texto(telefone) or '')
+    if not numero:
+        return None
+    if len(numero) not in {8, 9}:
+        return numero
+
+    codigo_area = re.sub(r'\D', '', _texto(ddd) or '')
+    if len(codigo_area) == 3 and codigo_area.startswith('0'):
+        codigo_area = codigo_area[1:]
+    if len(codigo_area) == 2:
+        return f'{codigo_area}{numero}'
+    return numero
 
 
 def _agora_local() -> datetime:
@@ -482,14 +498,17 @@ def _carregar_workflows_para_emissao(
             .with_for_update()
         ).all()
     )
+    status_disponiveis = {
+        StatusWorkflowSolicitacao.VALIDADA.value,
+        StatusWorkflowSolicitacao.ERRO_EMISSAO.value,
+    }
     indisponiveis = [
         solicitacao_id
         for solicitacao_id in solicitacao_ids
         if (
             solicitacao_id not in solicitacoes
             or solicitacao_id in emissoes_existentes
-            or workflows[solicitacao_id].status
-            != StatusWorkflowSolicitacao.VALIDADA.value
+            or workflows[solicitacao_id].status not in status_disponiveis
             or workflows[solicitacao_id].validacao
             != StatusWorkflowSolicitacao.VALIDADA.value
             or solicitacoes[solicitacao_id].valor_nota is None
@@ -503,7 +522,8 @@ def _carregar_workflows_para_emissao(
         raise HTTPException(
             status_code=HTTPStatus.CONFLICT,
             detail=(
-                'Somente solicitações validadas podem ser emitidas. '
+                'Somente solicitações validadas ou com erro de emissão '
+                'podem ser emitidas. '
                 f'Verifique os registros: {indisponiveis}.'
             ),
         )
@@ -745,7 +765,7 @@ def _consultar_atendimento(
         nm_bairro=_texto(paciente.bairro),
         ds_complemento=_texto(paciente.complemento),
         email=_texto(paciente.email),
-        nr_fone=_texto(paciente.contato),
+        nr_fone=_telefone_com_ddd(paciente.ddd, paciente.contato),
         tipo_atendimento=(
             _texto(atendimento.tp_atendimento) or 'Não informado'
         ),
