@@ -22,6 +22,7 @@ class LinhaConciliacaoPlanilha:
     cd_remessa: int
     valor_alocado: Decimal
     valor_glosado: Decimal
+    valor_impostos: Decimal
     data_previsao_recebimento: date | None
 
     @property
@@ -142,6 +143,7 @@ def _localizar_cabecalho(planilha) -> tuple[int, dict[str, int]]:
     obrigatorios = {
         'COLUNA1',
         'GLOSA',
+        'IMPOSTOS',
         'VLR LIQ NF',
         'NF',
         'PREV. RECBTO.',
@@ -206,6 +208,9 @@ def ler_linhas_conciliacao_planilha(
                 cd_remessa=cd_remessa,
                 valor_alocado=valor_alocado,
                 valor_glosado=_dinheiro(valores[indices['GLOSA']]),
+                valor_impostos=_dinheiro(
+                    valores[indices['IMPOSTOS']]
+                ),
                 data_previsao_recebimento=_data(
                     valores[indices['PREV. RECBTO.']],
                     numero_linha,

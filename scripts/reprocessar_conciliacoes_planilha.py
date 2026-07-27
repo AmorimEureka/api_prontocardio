@@ -168,6 +168,9 @@ def main() -> None:
                                 'cd_remessa': ajuste.linha.cd_remessa,
                                 'valor_recebido': (ajuste.linha.valor_alocado),
                                 'valor_glosado': ajuste.linha.valor_glosado,
+                                'valor_impostos': (
+                                    ajuste.linha.valor_impostos
+                                ),
                             }
                         ]
                     ),
@@ -190,6 +193,9 @@ def main() -> None:
                                     novo.referencia.nfse_row_hash
                                 ),
                                 'valor_alocado': novo.linha.valor_alocado,
+                                'valor_impostos': (
+                                    novo.linha.valor_impostos
+                                ),
                                 'sn_glosado': novo.linha.valor_glosado > 0,
                                 'valor_glosado': novo.linha.valor_glosado,
                                 'data_previsao_recebimento': data_previsao,
