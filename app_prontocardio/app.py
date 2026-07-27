@@ -15,12 +15,17 @@ from app_prontocardio.database import (
     run_postgres_migrations,
 )
 from app_prontocardio.routers import (
+    agendamentos,
     app_glosas,
     autenticacao,
+    biq,
+    farmacia,
     financeiro,
+    institucional,
     livre,
     requisicoes,
     usuarios,
+    whatsapp,
 )
 from app_prontocardio.services.remessas import (
     sincronizar_totais_remessas_financeiras,
@@ -84,3 +89,8 @@ app.include_router(usuarios.router)
 app.include_router(app_glosas.router)
 app.include_router(financeiro.router)
 app.include_router(requisicoes.router)
+app.include_router(agendamentos.router)
+app.include_router(biq.router)
+app.include_router(farmacia.router)
+app.include_router(whatsapp.router)
+app.include_router(institucional.router)

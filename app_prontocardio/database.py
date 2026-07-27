@@ -7,10 +7,17 @@ from app_prontocardio.settings import Settings
 
 settings = Settings()
 
+oracle_thick_mode = (
+    {'lib_dir': settings.ORACLE_CLIENT_LIB_DIR}
+    if settings.ORACLE_CLIENT_LIB_DIR
+    else settings.ORACLE_THICK_MODE
+)
+
 oracle_engine = create_engine(
     settings.ORACLE_DATABASE_URL,
-    thick_mode=True,
+    thick_mode=oracle_thick_mode,
     pool_pre_ping=True,
+    pool_recycle=300,
 )
 
 postgres_engine = (

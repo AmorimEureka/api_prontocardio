@@ -115,6 +115,27 @@ class TokenRedefinicaoSenha:
 
 
 @table_registry.mapped_as_dataclass
+class AuditoriaAgendamento:
+    __tablename__ = 'auditoria_agendamentos'
+    __table_args__ = {'schema': settings.POSTGRES_SCHEMA}
+
+    id: Mapped[int] = mapped_column(primary_key=True, init=False)
+    operador_id: Mapped[int | None] = mapped_column(nullable=True)
+    operador_nome: Mapped[str] = mapped_column(String(200))
+    origem: Mapped[str] = mapped_column(String(30))
+    cd_paciente: Mapped[int]
+    cd_item_agendamento: Mapped[int]
+    cd_it_agenda_central: Mapped[int]
+    cd_agenda_central: Mapped[int]
+    cd_tip_mar: Mapped[int | None] = mapped_column(nullable=True)
+    protocolo_mv: Mapped[int | None] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(String(30))
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False, server_default=func.now()
+    )
+
+
+@table_registry.mapped_as_dataclass
 class RegistroGlosa:
     __tablename__ = 'registros_glosa'
     __table_args__ = (
