@@ -5,7 +5,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app_prontocardio.app import app, settings as app_settings
+from app_prontocardio.app import app
+from app_prontocardio.app import settings as app_settings
 from app_prontocardio.database import get_session_postgres
 from app_prontocardio.models import Usuario, table_registry
 from app_prontocardio.security import gera_hash_senha
