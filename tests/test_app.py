@@ -2,6 +2,21 @@ import asyncio
 import importlib
 
 
+def test_aplicacao_registra_rotas_criticas():
+    app_module = importlib.import_module('app_prontocardio.app')
+    rotas = {
+        (rota.path, metodo)
+        for rota in app_module.app.routes
+        for metodo in getattr(rota, 'methods', set())
+    }
+
+    assert {
+        ('/autenticacao/token', 'POST'),
+        ('/usuarios/me', 'GET'),
+        ('/app_glosas/', 'GET'),
+    } <= rotas
+
+
 def test_lifespan_nao_aguarda_sincronizacao_de_remessas(monkeypatch):
     app_module = importlib.import_module('app_prontocardio.app')
     chamadas = []
