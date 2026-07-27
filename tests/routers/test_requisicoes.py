@@ -19,6 +19,7 @@ from app_prontocardio.models import (
     SolicitacaoNota,
     SolicitacaoNotaEvento,
     SolicitacaoNotaWorkflow,
+    StatusEmissaoNfse,
     StatusWorkflowSolicitacao,
 )
 from app_prontocardio.routers import requisicoes
@@ -131,7 +132,8 @@ def test_consulta_atendimento_combina_conta_e_paciente():
                 bairro='CENTRO',
                 complemento='APTO 10',
                 email='maria@example.com',
-                contato='85999999999',
+                ddd='85',
+                contato='999999999',
             )
 
     response = requisicoes._consultar_atendimento(
@@ -141,6 +143,21 @@ def test_consulta_atendimento_combina_conta_e_paciente():
 
     assert response == dados_atendimento()
     assert response.valor_total_procedimentos == Decimal('385.50')
+
+
+@pytest.mark.parametrize(
+    ('ddd', 'telefone', 'esperado'),
+    [
+        ('85', '981386322', '85981386322'),
+        ('085', '981386322', '85981386322'),
+        ('85', '(85) 9813-86322', '85981386322'),
+        ('85', '3333-3333', '8533333333'),
+        (None, '981386322', '981386322'),
+        ('85', None, None),
+    ],
+)
+def test_telefone_com_ddd(ddd, telefone, esperado):
+    assert requisicoes._telefone_com_ddd(ddd, telefone) == esperado
 
 
 def test_consulta_atendimento_inexistente_retorna_404():
@@ -1160,6 +1177,57 @@ def test_emissao_individual_persiste_dados_do_disparo(
         )
     )
     assert response.dag_run_id in evento.observacao
+
+
+def test_erro_de_emissao_pode_criar_nova_tentativa(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _preparar_emissao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        'disparar_dag_emissao_nfse',
+        lambda lote_id, _ids, _cnpjs: AirflowDagRun(
+            dag_run_id=f'run-{lote_id}',
+            state='queued',
+        ),
+    )
+    primeira = requisicoes.solicitar_emissao_nfse(
+        EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+        usuario_teste,
+        session,
+    )
+    emissao_anterior = session.scalar(
+        select(EmissaoNfse).where(
+            EmissaoNfse.lote_id == primeira.lote_id
+        )
+    )
+    lote_anterior = session.get(LoteEmissaoNfse, primeira.lote_id)
+    workflow = session.scalar(select(SolicitacaoNotaWorkflow))
+    emissao_anterior.status = 'ERRO'
+    emissao_anterior.erro = 'Telefone inválido.'
+    lote_anterior.status = 'ERRO'
+    workflow.status = StatusWorkflowSolicitacao.ERRO_EMISSAO.value
+    session.commit()
+
+    nova = requisicoes.solicitar_emissao_nfse(
+        EmissaoNfseCreate(solicitacao_ids=[solicitacao.id]),
+        usuario_teste,
+        session,
+    )
+
+    assert nova.lote_id != primeira.lote_id
+    assert nova.status == StatusEmissaoNfse.PROCESSANDO
+    assert nova.dag_run_id == f'run-{nova.lote_id}'
+    assert session.scalar(
+        select(func.count()).select_from(EmissaoNfse)
+    ) == 2
+    assert session.get(EmissaoNfse, emissao_anterior.id).status == 'ERRO'
 
 
 @pytest.mark.parametrize(
