@@ -224,6 +224,29 @@ recebimentos.
 - Quando uma conciliacao de recurso sofre nova glosa, a nova parcela volta ao
   follow-up e somente podera receber outra NFS-e depois de novo recurso.
 
+### Reprocessamento controlado de planilhas
+
+O reprocessador preserva todas as linhas que compartilham a mesma NFS-e e o
+mesmo processo, criando um vinculo por remessa. A execucao e idempotente,
+limita as alocacoes ao saldo compartilhado da nota e reutiliza os servicos da
+tela de Conciliacao Manual para validar tambem o saldo de cada remessa.
+
+Por seguranca, o comando apenas audita por padrao:
+
+```bash
+poetry run python -m scripts.reprocessar_conciliacoes_planilha \
+  "DEMO CONVENIOS CONSOLIDADO.xlsx"
+```
+
+A gravacao exige confirmacao explicita do ambiente de desenvolvimento e
+mantem a autoria no historico:
+
+```bash
+poetry run python -m scripts.reprocessar_conciliacoes_planilha \
+  "DEMO CONVENIOS CONSOLIDADO.xlsx" \
+  --aplicar --confirmar-desenvolvimento --usuario-id 4
+```
+
 ### Recebimento bancario por NFS-e
 
 - A data de previsao e obrigatoria em cada NFS-e adicionada.
