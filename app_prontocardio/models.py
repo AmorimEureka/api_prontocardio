@@ -375,7 +375,9 @@ class NfseXml:
     valor_cofins: Mapped[str | None] = mapped_column(String, init=False)
     valor_csll: Mapped[str | None] = mapped_column(String, init=False)
     valor_ir: Mapped[str | None] = mapped_column(String, init=False)
+    valor_inss: Mapped[str | None] = mapped_column(String, init=False)
     outras_retencoes: Mapped[str | None] = mapped_column(String, init=False)
+    valor_iss_retido: Mapped[str | None] = mapped_column(String, init=False)
     valor_liquido_nfse: Mapped[str | None] = mapped_column(String, init=False)
     cancelamento_codigo: Mapped[str | None] = mapped_column(String, init=False)
 
@@ -576,6 +578,11 @@ class ConciliacaoFaturamentoRemessa:
         default=None,
     )
     valor_alocado_nfse: Mapped[Decimal] = mapped_column(
+        Numeric(14, 2),
+        default=Decimal('0.00'),
+        server_default=text('0'),
+    )
+    valor_impostos: Mapped[Decimal] = mapped_column(
         Numeric(14, 2),
         default=Decimal('0.00'),
         server_default=text('0'),
