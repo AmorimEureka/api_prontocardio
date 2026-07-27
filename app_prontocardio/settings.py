@@ -9,6 +9,8 @@ class Settings(BaseSettings):
     )
 
     ORACLE_DATABASE_URL: str
+    ORACLE_THICK_MODE: bool = True
+    ORACLE_CLIENT_LIB_DIR: str | None = None
     DATABASE_URL: str | None = None
     POSTGRES_SCHEMA: str
     RUN_MIGRATIONS_ON_STARTUP: bool = True
@@ -26,6 +28,11 @@ class Settings(BaseSettings):
     SMTP_FROM: str | None = None
     SMTP_USE_TLS: bool = True
     SMTP_USE_SSL: bool | None = None
+    WHATSAPP_WEBHOOK_VERIFY_TOKEN: str = 'meuprontocardio_whatsapp_2026'
+    WHATSAPP_GRAPH_API_VERSION: str = 'v25.0'
+    WHATSAPP_PHONE_NUMBER_ID: str | None = None
+    WHATSAPP_ACCESS_TOKEN: str | None = None
+    WHATSAPP_AUTO_REPLY_TEXT: str | None = None
 
     @property
     def smtp_username(self) -> str | None:

@@ -9,10 +9,15 @@ from app_prontocardio.database import (
     run_postgres_migrations,
 )
 from app_prontocardio.routers import (
+    agendamentos,
+    biq,
+    farmacia,
+    institucional,
     app_glosas,
     autenticacao,
     livre,
     usuarios,
+    whatsapp,
 )
 from app_prontocardio.settings import Settings
 
@@ -42,3 +47,8 @@ app.include_router(autenticacao.router)
 app.include_router(livre.router)
 app.include_router(usuarios.router)
 app.include_router(app_glosas.router)
+app.include_router(agendamentos.router)
+app.include_router(biq.router)
+app.include_router(farmacia.router)
+app.include_router(whatsapp.router)
+app.include_router(institucional.router)
