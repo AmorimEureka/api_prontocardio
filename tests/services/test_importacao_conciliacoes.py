@@ -60,6 +60,7 @@ def linha_planilha(
         cd_remessa=cd_remessa,
         valor_alocado=Decimal(valor_alocado),
         valor_glosado=Decimal(valor_glosado),
+        valor_impostos=Decimal('0.00'),
         data_previsao_recebimento=date(2026, 6, 16),
     )
 
@@ -173,6 +174,7 @@ def test_le_planilha_preservando_uma_linha_por_remessa(tmp_path):
         'Convênio',
         'Coluna1',
         'GLOSA',
+        'IMPOSTOS',
         'VLR LIQ NF ',
         'NF ',
         'PREV. RECBTO.',
@@ -182,6 +184,7 @@ def test_le_planilha_preservando_uma_linha_por_remessa(tmp_path):
         'IPM',
         17413,
         937.91,
+        2703.82,
         61672.955,
         27951,
         date(2026, 6, 16),
@@ -191,6 +194,7 @@ def test_le_planilha_preservando_uma_linha_por_remessa(tmp_path):
         'IPM',
         17500,
         1.35,
+        955.42,
         21790.754,
         27951,
         date(2026, 6, 16),
@@ -203,4 +207,8 @@ def test_le_planilha_preservando_uma_linha_por_remessa(tmp_path):
     assert [(item.cd_remessa, item.valor_alocado) for item in linhas] == [
         (17413, Decimal('61672.96')),
         (17500, Decimal('21790.75')),
+    ]
+    assert [item.valor_impostos for item in linhas] == [
+        Decimal('2703.82'),
+        Decimal('955.42'),
     ]

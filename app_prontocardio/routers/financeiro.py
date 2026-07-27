@@ -112,7 +112,9 @@ def _nota_publica(nota: NfseXml, convenio: dict | None = None) -> dict:
                 nota.valor_cofins,
                 nota.valor_csll,
                 nota.valor_ir,
+                nota.valor_inss,
                 nota.outras_retencoes,
+                nota.valor_iss_retido,
             )
         ),
         Decimal('0.00'),
@@ -454,6 +456,20 @@ def _valor_alocado_vinculo(
     )
 
 
+def _valor_impostos_vinculo(
+    vinculo: ConciliacaoFaturamentoRemessa,
+) -> Decimal:
+    return _money(vinculo.valor_impostos)
+
+
+def _valor_conciliado_vinculo(
+    vinculo: ConciliacaoFaturamentoRemessa,
+) -> Decimal:
+    return _valor_alocado_vinculo(vinculo) + _valor_impostos_vinculo(
+        vinculo
+    )
+
+
 def _usuario_operacao_publico(usuario: Usuario | None) -> dict | None:
     if usuario is None:
         return None
@@ -489,6 +505,7 @@ def _snapshot_conciliacao(
                 'valor_alocado_nfse': str(
                     _valor_alocado_vinculo(vinculo)
                 ),
+                'valor_impostos': str(_valor_impostos_vinculo(vinculo)),
                 'valor_glosado': str(_money(vinculo.valor_glosado)),
                 'tipo_conciliacao': vinculo.tp_conciliacao,
             }
@@ -1807,6 +1824,7 @@ def _resumos_remessas(
             int(vinculo.cd_remessa),
             {
                 'valor_conciliado': Decimal('0.00'),
+                'valor_impostos': Decimal('0.00'),
                 'valor_glosado': Decimal('0.00'),
                 'valor_recurso_consumido': Decimal('0.00'),
                 'processo_recebimento': None,
@@ -1815,8 +1833,10 @@ def _resumos_remessas(
             },
         )
         valor_alocado = _valor_alocado_vinculo(vinculo)
+        valor_impostos = _valor_impostos_vinculo(vinculo)
         valor_glosado = _money(vinculo.valor_glosado)
-        resumo['valor_conciliado'] += valor_alocado
+        resumo['valor_conciliado'] += valor_alocado + valor_impostos
+        resumo['valor_impostos'] += valor_impostos
         resumo['valor_glosado'] += valor_glosado
         if vinculo.tp_conciliacao == 'recurso':
             resumo['valor_recurso_consumido'] += (
@@ -1838,6 +1858,7 @@ def _resumos_remessas(
                 'data_emissao': data_emissao,
                 'valor_nfse': _money(conciliacao.valor_nfse),
                 'valor_alocado': valor_alocado,
+                'valor_impostos': valor_impostos,
                 'valor_glosado': valor_glosado,
                 'tipo_conciliacao': vinculo.tp_conciliacao,
                 'data_previsao_recebimento': (
@@ -1891,6 +1912,7 @@ def _posicao_remessa(
         'cnpj_convenio': remessa['cnpj_convenio'],
         'valor_remessa': valor_remessa,
         'valor_conciliado': valor_conciliado,
+        'valor_impostos': _money(resumo.get('valor_impostos')),
         'valor_acatado': _money(valor_acatado),
         'valor_nao_conciliado': _money(valor_nao_conciliado),
         'valor_recurso_disponivel': _money(recurso_disponivel),
@@ -1954,6 +1976,33 @@ def _valores_utilizados_nfse(
     return utilizados
 
 
+def _valores_impostos_utilizados_nfse(
+    session: Session,
+) -> dict[tuple[str, str], Decimal]:
+    rows = session.execute(
+        select(
+            ConciliacaoFaturamento,
+            ConciliacaoFaturamentoRemessa,
+        ).join(
+            ConciliacaoFaturamentoRemessa,
+            ConciliacaoFaturamentoRemessa.conciliacao_id
+            == ConciliacaoFaturamento.id,
+        )
+        .where(ConciliacaoFaturamento.ativo.is_(True))
+    ).all()
+    utilizados: dict[tuple[str, str], Decimal] = {}
+    for conciliacao, vinculo in rows:
+        chave = (
+            str(conciliacao.numero_nfse),
+            _normalize_cnpj(conciliacao.cnpj_convenio),
+        )
+        utilizados[chave] = utilizados.get(
+            chave,
+            Decimal('0.00'),
+        ) + _valor_impostos_vinculo(vinculo)
+    return utilizados
+
+
 def _consultar_nfses_com_saldo_para_remessa(  # noqa: PLR0913
     session: Session,
     remessa: dict,
@@ -2000,6 +2049,7 @@ def _consultar_nfses_com_saldo_para_remessa(  # noqa: PLR0913
         )
     ).all()
     utilizados = _valores_utilizados_nfse(session)
+    impostos_utilizados = _valores_impostos_utilizados_nfse(session)
     numeros_ja_usados = resumo.get('numeros_nfse', set())
     resultado = []
     for nota in notas:
@@ -2011,8 +2061,24 @@ def _consultar_nfses_com_saldo_para_remessa(  # noqa: PLR0913
             (numero_nfse, cnpj),
             Decimal('0.00'),
         )
+        nota_publica = _nota_publica(
+            nota,
+            {
+                'convenio': remessa['convenio'],
+                'cnpj_convenio': cnpj,
+            },
+        )
+        impostos = _money(nota_publica['impostos'])
+        imposto_utilizado = impostos_utilizados.get(
+            (numero_nfse, cnpj),
+            Decimal('0.00'),
+        )
         saldo_nfse = max(
             valor_nfse - valor_utilizado,
+            Decimal('0.00'),
+        )
+        saldo_impostos = max(
+            impostos - imposto_utilizado,
             Decimal('0.00'),
         )
         if saldo_nfse <= 0:
@@ -2027,6 +2093,9 @@ def _consultar_nfses_com_saldo_para_remessa(  # noqa: PLR0913
                 'valor_nfse': valor_nfse,
                 'valor_utilizado': _money(valor_utilizado),
                 'saldo_nfse': _money(saldo_nfse),
+                'impostos': impostos,
+                'impostos_utilizados': _money(imposto_utilizado),
+                'saldo_impostos': _money(saldo_impostos),
                 'valor_sugerido': _money(
                     min(saldo_nfse, valor_disponivel)
                 ),
@@ -2269,18 +2338,25 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
         (_money(item.valor_glosado) for item in payload.notas),
         Decimal('0.00'),
     )
-    valor_comprometido = total_alocado + total_glosado
+    total_impostos = sum(
+        (_money(item.valor_impostos) for item in payload.notas),
+        Decimal('0.00'),
+    )
+    valor_comprometido = total_alocado + total_impostos + total_glosado
     if valor_comprometido > valor_disponivel:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail=(
-                'A soma dos valores alocados e glosados nao pode exceder '
+                'A soma dos valores alocados, retencoes e glosados nao pode '
                 f'o saldo disponivel da remessa '
                 f'({_valor_reais_mensagem(valor_disponivel)}).'
             ),
         )
 
     utilizados_nfse = _valores_utilizados_nfse(session_postgres)
+    impostos_utilizados_nfse = _valores_impostos_utilizados_nfse(
+        session_postgres
+    )
     notas_validadas = []
     numeros_nfse = set()
     lancamentos = []
@@ -2335,6 +2411,24 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
                     f'O valor alocado da NFS-e {numero_nfse} nao pode '
                     f'exceder seu saldo de '
                     f'{_valor_reais_mensagem(saldo_nfse)}.'
+                ),
+            )
+        total_impostos_nfse = _money(_nota_publica(nota)['impostos'])
+        impostos_utilizados = impostos_utilizados_nfse.get(
+            (numero_nfse, cnpj_remessa),
+            Decimal('0.00'),
+        )
+        saldo_impostos = max(
+            total_impostos_nfse - impostos_utilizados,
+            Decimal('0.00'),
+        )
+        if _money(item.valor_impostos) > saldo_impostos:
+            raise HTTPException(
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+                detail=(
+                    f'O valor de retencoes da NFS-e {numero_nfse} nao pode '
+                    f'exceder seu saldo de '
+                    f'{_valor_reais_mensagem(saldo_impostos)}.'
                 ),
             )
         lancamento = _validar_dados_bancarios(
@@ -2409,12 +2503,17 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
                 cd_remessa=cd_remessa,
                 convenio=remessa['convenio'],
                 cnpj_convenio=cnpj_remessa,
-                valor_total=_money(item.valor_alocado) + valor_glosado,
+                valor_total=(
+                    _money(item.valor_alocado)
+                    + _money(item.valor_impostos)
+                    + valor_glosado
+                ),
                 sn_glosado='true' if item.sn_glosado else 'not',
                 valor_glosado=valor_glosado,
                 tp_conciliacao=tipo_conciliacao,
                 processo_remessa_id=processo.id,
                 valor_alocado_nfse=_money(item.valor_alocado),
+                valor_impostos=_money(item.valor_impostos),
             )
             session_postgres.add(vinculo)
             session_postgres.flush()
@@ -2506,6 +2605,7 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
         'processo_recebimento': processo.processo_recebimento,
         'quantidade_notas': len(notas_validadas),
         'valor_alocado': _money(total_alocado),
+        'valor_impostos': _money(total_impostos),
         'valor_glosado': _money(total_glosado),
         'valor_nao_conciliado': posicao_atualizada[
             'valor_nao_conciliado'
@@ -3400,6 +3500,40 @@ def _atualizar_valores_conciliacao(  # noqa: PLR0912, PLR0915
             ),
         )
 
+    valor_atual_impostos = sum(
+        (_valor_impostos_vinculo(item) for item in vinculos),
+        Decimal('0.00'),
+    )
+    valor_novo_impostos = sum(
+        (
+            _money(ajustes[item.cd_remessa].valor_impostos)
+            if item.cd_remessa in ajustes
+            else _valor_impostos_vinculo(item)
+            for item in vinculos
+        ),
+        Decimal('0.00'),
+    )
+    valor_utilizado_impostos = _valores_impostos_utilizados_nfse(
+        session
+    ).get(chave_nfse, Decimal('0.00'))
+    saldo_editavel_impostos = max(
+        _money(conciliacao.impostos)
+        - max(
+            valor_utilizado_impostos - valor_atual_impostos,
+            Decimal('0.00'),
+        ),
+        Decimal('0.00'),
+    )
+    if valor_novo_impostos > saldo_editavel_impostos:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A soma das retencoes informadas excede o saldo de retencoes '
+                f'da NFS-e '
+                f'({_valor_reais_mensagem(saldo_editavel_impostos)}).'
+            ),
+        )
+
     codigos = set(ajustes)
     resumos = _resumos_remessas(session, codigos)
     valores_acatados = _valores_acatados_por_remessa(session, codigos)
@@ -3423,9 +3557,11 @@ def _atualizar_valores_conciliacao(  # noqa: PLR0912, PLR0915
     for cd_remessa, ajuste in ajustes.items():
         vinculo = vinculos_por_remessa[cd_remessa]
         valor_recebido = _money(ajuste.valor_recebido)
+        valor_impostos = _money(ajuste.valor_impostos)
         valor_glosado = _money(ajuste.valor_glosado)
-        valor_atual = _valor_alocado_vinculo(vinculo) + _money(
-            vinculo.valor_glosado
+        valor_atual = (
+            _valor_conciliado_vinculo(vinculo)
+            + _money(vinculo.valor_glosado)
         )
         remessa = session.get(RemessaFinanceira, cd_remessa)
         if remessa is None:
@@ -3450,11 +3586,12 @@ def _atualizar_valores_conciliacao(  # noqa: PLR0912, PLR0915
         limite = valor_atual + _money(
             posicao['valor_disponivel_conciliacao']
         )
-        if valor_recebido + valor_glosado > limite:
+        if valor_recebido + valor_impostos + valor_glosado > limite:
             raise HTTPException(
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
                 detail=(
-                    f'A soma do valor recebido e da glosa da remessa '
+                    f'A soma do valor recebido, das retencoes e da glosa da '
+                    f'remessa '
                     f'{cd_remessa} excede o saldo disponivel '
                     f'({_valor_reais_mensagem(limite)}).'
                 ),
@@ -3487,11 +3624,15 @@ def _atualizar_valores_conciliacao(  # noqa: PLR0912, PLR0915
     for cd_remessa, ajuste in ajustes.items():
         vinculo = vinculos_por_remessa[cd_remessa]
         valor_recebido = _money(ajuste.valor_recebido)
+        valor_impostos = _money(ajuste.valor_impostos)
         valor_glosado = _money(ajuste.valor_glosado)
         valor_glosado_anterior = _money(vinculo.valor_glosado)
         vinculo.valor_alocado_nfse = valor_recebido
+        vinculo.valor_impostos = valor_impostos
         vinculo.valor_glosado = valor_glosado
-        vinculo.valor_total = valor_recebido + valor_glosado
+        vinculo.valor_total = (
+            valor_recebido + valor_impostos + valor_glosado
+        )
         vinculo.sn_glosado = 'true' if valor_glosado > 0 else 'not'
         registros = registros_por_vinculo[vinculo.id]
         glosa_alterada = valor_glosado != valor_glosado_anterior
@@ -3928,6 +4069,7 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913, PLR0915
                     'valor_nfse': _money(conciliacao.valor_nfse),
                     'valor_vinculado_remessa': _money(vinculo.valor_total),
                     'valor_alocado_nfse': _valor_alocado_vinculo(vinculo),
+                    'valor_impostos': _valor_impostos_vinculo(vinculo),
                     'valor_glosado': _money(vinculo.valor_glosado),
                     'data_previsao_recebimento': (
                         conciliacao.data_previsao_recebimento
@@ -4043,6 +4185,16 @@ def consultar_conciliacoes_faturamento(  # noqa: PLR0913, PLR0915
                         _valor_alocado_vinculo(vinculo)
                         for vinculo in vinculos_remessa
                         if conciliacoes_por_id[vinculo.conciliacao_id].ativo
+                    ),
+                    Decimal('0.00'),
+                ),
+                'valor_impostos': sum(
+                    (
+                        _valor_impostos_vinculo(vinculo)
+                        for vinculo in vinculos_remessa
+                        if conciliacoes_por_id[
+                            vinculo.conciliacao_id
+                        ].ativo
                     ),
                     Decimal('0.00'),
                 ),
@@ -4692,6 +4844,7 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
                     'valor_vinculado_remessa': _money(
                         vinculo.valor_total
                     ),
+                    'valor_impostos': _valor_impostos_vinculo(vinculo),
                     'valor_glosado': _money(vinculo.valor_glosado),
                     'valor_recebido': valor_recebido_nfse,
                     'valor_pendente': saldo_pendente_nfse,
@@ -4725,6 +4878,44 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
             ),
             default=0,
         )
+        valor_remessa = totais_remessas_hpc.get(
+            cd_remessa,
+            (
+                _money(remessa.valor_total)
+                if remessa is not None
+                else sum(
+                    (
+                        _money(vinculo.valor_total)
+                        for vinculo, _, _, _ in vinculos
+                    ),
+                    Decimal('0.00'),
+                )
+            ),
+        )
+        valor_total_glosas = _money(
+            sum(
+                (nota['valor_glosado'] for nota in notas),
+                Decimal('0.00'),
+            )
+        )
+        valor_total_impostos = _money(
+            sum(
+                (
+                    _valor_impostos_vinculo(vinculo)
+                    for vinculo, _, _, _ in vinculos
+                ),
+                Decimal('0.00'),
+            )
+        )
+        valor_liquido = _money(
+            sum(
+                (
+                    _valor_alocado_vinculo(vinculo)
+                    for vinculo, _, _, _ in vinculos
+                ),
+                Decimal('0.00'),
+            )
+        )
         conciliacoes.append(
             {
                 'cd_remessa': cd_remessa,
@@ -4746,31 +4937,13 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
                 'data_competencia': (
                     remessa.data_competencia if remessa is not None else None
                 ),
-                'valor_remessa': (
-                    totais_remessas_hpc.get(
-                        cd_remessa,
-                        (
-                            _money(remessa.valor_total)
-                            if remessa is not None
-                            else sum(
-                                (
-                                    _money(vinculo.valor_total)
-                                    for vinculo, _, _, _ in vinculos
-                                ),
-                                Decimal('0.00'),
-                            )
-                        ),
-                    )
-                ),
+                'valor_remessa': valor_remessa,
                 'quantidade_nfses_sem_recebimento': sum(
                     nota['valor_pendente'] > 0 for nota in notas
                 ),
-                'valor_total_glosas': _money(
-                    sum(
-                        (nota['valor_glosado'] for nota in notas),
-                        Decimal('0.00'),
-                    )
-                ),
+                'valor_total_glosas': valor_total_glosas,
+                'valor_total_impostos': valor_total_impostos,
+                'valor_liquido': valor_liquido,
                 'valor_recebido': _money(valor_recebido),
                 'valor_pendente': _money(valor_pendente_total),
                 'situacao': (
@@ -5191,9 +5364,15 @@ def conciliar_faturamento(  # noqa: PLR0915
         remessas_por_id,
         recursos_abertos,
     )
+    total_impostos = sum(
+        (_money(item.valor_impostos) for item in payload.remessas),
+        Decimal('0.00'),
+    )
 
     valor_nfse = _money(nota.valor_liquido_nfse)
-    if (total_remessas - total_glosas).quantize(CENTAVOS) != valor_nfse:
+    if (
+        total_remessas - total_glosas - total_impostos
+    ).quantize(CENTAVOS) != valor_nfse:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail=MENSAGEM_VALORES_DIVERGENTES,
@@ -5248,6 +5427,12 @@ def conciliar_faturamento(  # noqa: PLR0915
                     _money(item.valor_glosado),
                 )
             )
+            valor_impostos = _money(item.valor_impostos)
+            valor_alocado = (
+                _money(remessa['valor_total'])
+                - valor_glosado
+                - valor_impostos
+            )
             remessa_conciliada = ConciliacaoFaturamentoRemessa(
                 conciliacao_id=conciliacao.id,
                 cd_remessa=item.cd_remessa,
@@ -5265,6 +5450,8 @@ def conciliar_faturamento(  # noqa: PLR0915
                 ),
                 valor_glosado=valor_glosado,
                 tp_conciliacao=tp_conciliacao,
+                valor_alocado_nfse=valor_alocado,
+                valor_impostos=valor_impostos,
             )
             session_postgres.add(remessa_conciliada)
             session_postgres.flush()
@@ -5280,7 +5467,7 @@ def conciliar_faturamento(  # noqa: PLR0915
                 session_postgres,
                 remessa,
             )
-            valor_recebido = _money(remessa['valor_total']) - valor_glosado
+            valor_recebido = valor_alocado
             if payload.data_recebimento is not None and valor_recebido > 0:
                 if payload.conta_bancaria_id is None:
                     raise HTTPException(
