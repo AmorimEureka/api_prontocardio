@@ -796,6 +796,7 @@ class HistoricoNfseRemessaPublic(BaseModel):
     data_emissao: datetime | None = None
     valor_nfse: Decimal
     valor_alocado: Decimal
+    valor_impostos: Decimal
     valor_glosado: Decimal
     tipo_conciliacao: str
     data_previsao_recebimento: date
@@ -811,6 +812,7 @@ class RemessaFaturamentoCardPublic(BaseModel):
     cnpj_convenio: str
     valor_remessa: Decimal
     valor_conciliado: Decimal
+    valor_impostos: Decimal
     valor_acatado: Decimal
     valor_nao_conciliado: Decimal
     valor_recurso_disponivel: Decimal
@@ -837,6 +839,9 @@ class NfseSaldoRemessaPublic(BaseModel):
     valor_nfse: Decimal
     valor_utilizado: Decimal
     saldo_nfse: Decimal
+    impostos: Decimal
+    impostos_utilizados: Decimal
+    saldo_impostos: Decimal
     valor_sugerido: Decimal
 
 
@@ -849,6 +854,7 @@ class NfsesSaldoRemessaList(BaseModel):
 class NfseConciliacaoRemessaInput(BaseModel):
     nfse_row_hash: str = Field(min_length=1, max_length=256)
     valor_alocado: Decimal = Field(gt=0)
+    valor_impostos: Decimal = Field(default=Decimal('0.00'), ge=0)
     sn_glosado: bool = False
     valor_glosado: Decimal = Field(default=Decimal('0.00'), ge=0)
     data_previsao_recebimento: date
@@ -934,6 +940,7 @@ class ConciliacaoRemessaPublic(BaseModel):
     processo_recebimento: str
     quantidade_notas: int
     valor_alocado: Decimal
+    valor_impostos: Decimal
     valor_glosado: Decimal
     valor_nao_conciliado: Decimal
     remessa: RemessaFaturamentoCardPublic
@@ -944,6 +951,7 @@ class ValorConciliacaoRemessaUpdate(BaseModel):
     cd_remessa: int = Field(gt=0)
     valor_glosado: Decimal = Field(ge=0)
     valor_recebido: Decimal = Field(gt=0)
+    valor_impostos: Decimal = Field(default=Decimal('0.00'), ge=0)
 
 
 class ConciliacaoFaturamentoUpdate(BaseModel):
@@ -1015,6 +1023,7 @@ class NotaFiscalConciliacaoHistoricoPublic(BaseModel):
     valor_nfse: Decimal
     valor_vinculado_remessa: Decimal
     valor_alocado_nfse: Decimal
+    valor_impostos: Decimal
     valor_glosado: Decimal
     data_previsao_recebimento: date
     data_recebimento: date | None = None
@@ -1038,6 +1047,7 @@ class ConciliacaoGerenciamentoPublic(BaseModel):
     data_competencia: date | None = None
     valor_remessa: Decimal
     valor_alocado_nfse: Decimal
+    valor_impostos: Decimal
     valor_glosado: Decimal
     ativo: bool
     situacao_recebimento: str
@@ -1099,6 +1109,7 @@ class RemessaConciliacaoInput(BaseModel):
     cd_remessa: int = Field(gt=0)
     sn_glosado: bool = False
     valor_glosado: Decimal = Field(default=Decimal('0.00'), ge=0)
+    valor_impostos: Decimal = Field(default=Decimal('0.00'), ge=0)
 
     @model_validator(mode='after')
     def validate_valor_glosado(self):
@@ -1288,6 +1299,7 @@ class NfseSemRecebimentoPublic(BaseModel):
     data_criacao: datetime
     valor_nfse: Decimal
     valor_vinculado_remessa: Decimal
+    valor_impostos: Decimal
     valor_glosado: Decimal
     valor_recebido: Decimal
     valor_pendente: Decimal
@@ -1306,6 +1318,8 @@ class RemessaSemRecebimentoPublic(BaseModel):
     valor_remessa: Decimal
     quantidade_nfses_sem_recebimento: int
     valor_total_glosas: Decimal
+    valor_total_impostos: Decimal
+    valor_liquido: Decimal
     valor_recebido: Decimal
     valor_pendente: Decimal
     situacao: str

@@ -65,6 +65,8 @@ def criar_nfse(
             valor_csll='3.00',
             valor_ir='4.00',
             outras_retencoes='5.00',
+            valor_inss='6.00',
+            valor_iss_retido='7.00',
             valor_liquido_nfse=valor,
             cancelamento_codigo=None,
         )
@@ -382,7 +384,7 @@ def test_lista_apenas_nfse_nao_conciliada(
         'data_emissao': datetime(2026, 7, 10, 10, 0),
         'convenio': 'Convenio Teste',
         'cnpj_convenio': '98765432000110',
-        'impostos': Decimal('15.00'),
+        'impostos': Decimal('28.00'),
         'valor_nfse': Decimal('100.00'),
     }
 
@@ -854,6 +856,8 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
     assert remessa['quantidade_nfses_sem_recebimento'] == 1
     assert remessa['valor_remessa'] == Decimal('120.00')
     assert remessa['valor_total_glosas'] == Decimal('20.00')
+    assert remessa['valor_total_impostos'] == Decimal('0.00')
+    assert remessa['valor_liquido'] == Decimal('100.00')
     assert remessa['valor_recebido'] == Decimal('0.00')
     assert remessa['valor_pendente'] == Decimal('100.00')
     assert remessa['notas'] == [
@@ -863,9 +867,10 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
             'tp_conciliacao': 'faturamento',
             'data_previsao_recebimento': date(2026, 8, 10),
             'data_criacao': remessa['notas'][0]['data_criacao'],
-            'valor_nfse': Decimal('100.00'),
-            'valor_vinculado_remessa': Decimal('120.00'),
-            'valor_glosado': Decimal('20.00'),
+                'valor_nfse': Decimal('100.00'),
+                'valor_vinculado_remessa': Decimal('120.00'),
+                'valor_impostos': Decimal('0.00'),
+                'valor_glosado': Decimal('20.00'),
             'valor_recebido': Decimal('0.00'),
             'valor_pendente': Decimal('100.00'),
             'situacao': 'sem_recebimento',
@@ -1786,6 +1791,7 @@ def test_lista_remessa_com_saldo_e_historico_centrados_no_faturamento(
         'cnpj_convenio': '98765432000110',
         'valor_remessa': Decimal('120.00'),
         'valor_conciliado': Decimal('0.00'),
+        'valor_impostos': Decimal('0.00'),
         'valor_acatado': Decimal('0.00'),
         'valor_nao_conciliado': Decimal('120.00'),
         'valor_recurso_disponivel': Decimal('0.00'),
@@ -1892,6 +1898,7 @@ def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
             {
                 'nfse_row_hash': 'nfse-1',
                 'valor_alocado': '60.00',
+                'valor_impostos': '6.00',
                 'data_previsao_recebimento': '2026-08-10',
             }
         ],
@@ -1904,6 +1911,9 @@ def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
         session_postgres=session,
         session_oracle=object(),
     )
+    impostos_apos_primeira = financeiro._valores_impostos_utilizados_nfse(
+        session
+    )
     segunda = financeiro.conciliar_remessa_com_nfses(
         cd_remessa=988,
         payload=ConciliacaoRemessaCreate(
@@ -1912,6 +1922,7 @@ def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
                 {
                     'nfse_row_hash': 'nfse-1',
                     'valor_alocado': '40.00',
+                    'valor_impostos': '4.00',
                     'data_previsao_recebimento': '2026-08-11',
                 }
             ],
@@ -1922,9 +1933,14 @@ def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
     )
 
     assert primeira['valor_alocado'] == Decimal('60.00')
+    assert primeira['valor_impostos'] == Decimal('6.00')
     assert segunda['valor_alocado'] == Decimal('40.00')
+    assert segunda['valor_impostos'] == Decimal('4.00')
     assert primeira['remessa']['cd_remessa'] == CD_REMESSA_TESTE
-    assert primeira['remessa']['valor_nao_conciliado'] == Decimal('60.00')
+    assert primeira['remessa']['valor_nao_conciliado'] == Decimal('54.00')
+    assert impostos_apos_primeira == {
+        ('12345', '98765432000110'): Decimal('6.00')
+    }
     ConciliacaoRemessaPublic.model_validate(primeira)
     assert (
         session.query(ConciliacaoFaturamento).count()
@@ -1939,6 +1955,11 @@ def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
             select(ConciliacaoFaturamentoRemessa.valor_alocado_nfse)
         )
     ) == [Decimal('40.00'), Decimal('60.00')]
+    assert sorted(
+        session.scalars(
+            select(ConciliacaoFaturamentoRemessa.valor_impostos)
+        )
+    ) == [Decimal('4.00'), Decimal('6.00')]
 
 
 def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
@@ -2028,6 +2049,7 @@ def test_edita_e_inativa_conciliacao_sem_recebimento_com_auditoria(
                     'cd_remessa': CD_REMESSA_TESTE,
                     'valor_recebido': '90.00',
                     'valor_glosado': '10.00',
+                    'valor_impostos': '10.00',
                 }
             ],
         ),
@@ -2045,8 +2067,9 @@ def test_edita_e_inativa_conciliacao_sem_recebimento_com_auditoria(
     assert processo.usuario_atualizacao_id == usuario_teste.id
     vinculo = session.scalar(select(ConciliacaoFaturamentoRemessa))
     assert vinculo.valor_alocado_nfse == Decimal('90.00')
+    assert vinculo.valor_impostos == Decimal('10.00')
     assert vinculo.valor_glosado == Decimal('10.00')
-    assert vinculo.valor_total == Decimal('100.00')
+    assert vinculo.valor_total == Decimal('110.00')
     assert vinculo.sn_glosado == 'true'
     assert session.query(RegistroGlosa).count() == ITENS_ANALITICOS_TESTE
     assert {
@@ -2121,6 +2144,54 @@ def test_edicao_de_valores_respeita_saldo_da_nfse(
 
     assert error.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
     assert 'saldo disponivel da NFS-e' in error.value.detail
+
+
+def test_edicao_de_impostos_respeita_saldo_fiscal_da_nfse(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-IMPOSTOS',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '90.00',
+                    'valor_impostos': '10.00',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    conciliacao = session.scalar(select(ConciliacaoFaturamento))
+
+    with pytest.raises(HTTPException) as error:
+        financeiro.editar_conciliacao_faturamento(
+            conciliacao_id=conciliacao.id,
+            payload=ConciliacaoFaturamentoUpdate(
+                remessas=[
+                    {
+                        'cd_remessa': CD_REMESSA_TESTE,
+                        'valor_recebido': '89.00',
+                        'valor_impostos': '29.00',
+                        'valor_glosado': '0.00',
+                    }
+                ]
+            ),
+            usuario_atual=usuario_teste,
+            session=session,
+            session_oracle=object(),
+        )
+
+    assert error.value.status_code == HTTPStatus.UNPROCESSABLE_ENTITY
+    assert 'saldo de retencoes da NFS-e' in error.value.detail
 
 
 def test_edicao_do_valor_recebido_preserva_glosa_ja_tratada(
