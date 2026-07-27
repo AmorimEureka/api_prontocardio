@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     SMTP_FROM: str | None = None
     SMTP_USE_TLS: bool = True
     SMTP_USE_SSL: bool | None = None
+    AIRFLOW_NFSE_BASE_URL: str | None = None
+    AIRFLOW_NFSE_DAG_ID: str = 'emissao_nfse'
+    AIRFLOW_NFSE_DAG_RUNS_PATH: str = (
+        '/api/v1/dags/{dag_id}/dagRuns'
+    )
+    AIRFLOW_NFSE_TOKEN: str | None = None
+    AIRFLOW_NFSE_USERNAME: str | None = None
+    AIRFLOW_NFSE_PASSWORD: str | None = None
+    AIRFLOW_NFSE_TIMEOUT_SECONDS: float = 15.0
+    AIRFLOW_NFSE_VERIFY_SSL: bool = True
 
     @property
     def smtp_username(self) -> str | None:
@@ -53,7 +63,7 @@ class Settings(BaseSettings):
                 return url
 
         return (
-            f"{self.FRONTEND_BASE_URL.rstrip('/')}"
+            f'{self.FRONTEND_BASE_URL.rstrip("/")}'
             '/autenticacao/redefinir-senha'
         )
 
