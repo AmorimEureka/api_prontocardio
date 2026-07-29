@@ -10,6 +10,7 @@ TELAS_SISTEMA = (
     'consultar_conciliacoes',
     'follow_up_solicitacoes',
     'emissao_nfse',
+    'acompanhamento_particular',
     'solicitar_nota',
     'solicitacoes_cadastradas',
     'solicitacoes_recusas',
