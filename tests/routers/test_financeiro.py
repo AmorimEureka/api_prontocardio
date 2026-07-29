@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from http import HTTPStatus
@@ -867,10 +868,11 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
             'tp_conciliacao': 'faturamento',
             'data_previsao_recebimento': date(2026, 8, 10),
             'data_criacao': remessa['notas'][0]['data_criacao'],
-                'valor_nfse': Decimal('100.00'),
-                'valor_vinculado_remessa': Decimal('120.00'),
-                'valor_impostos': Decimal('0.00'),
-                'valor_glosado': Decimal('20.00'),
+            'valor_nfse': Decimal('100.00'),
+            'valor_vinculado_remessa': Decimal('120.00'),
+            'valor_alocado_nfse': Decimal('100.00'),
+            'valor_impostos': Decimal('0.00'),
+            'valor_glosado': Decimal('20.00'),
             'valor_recebido': Decimal('0.00'),
             'valor_pendente': Decimal('100.00'),
             'situacao': 'sem_recebimento',
@@ -879,6 +881,72 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
             'recebimentos': [],
         }
     ]
+    ConciliacoesSemRecebimentoList.model_validate(response)
+
+
+def test_fila_financeira_separa_liquido_impostos_glosa_e_recebimento(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_itens_remessas_hpc',
+        itens_remessas_hpc,
+    )
+    financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-VALORES-FINANCEIROS',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '80.00',
+                    'valor_impostos': '10.00',
+                    'valor_glosado': '30.00',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    conciliacao = session.scalar(select(ConciliacaoFaturamento))
+    financeiro.registrar_recebimento_remessa(
+        payload=RecebimentoRemessaCreate(
+            conciliacao_id=conciliacao.id,
+            cd_remessa=CD_REMESSA_TESTE,
+            numero_nfse='12345',
+            data_recebimento='2026-07-10',
+            valor_recebido='45.00',
+            conta_bancaria_id=CONTA_BANCARIA_TESTE,
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=OracleComContaFake(),
+    )
+
+    response = financeiro.consultar_conciliacoes_sem_recebimento(
+        usuario_atual=usuario_teste,
+        session=session,
+        q=str(CD_REMESSA_TESTE),
+        limit=25,
+        offset=0,
+    )
+
+    remessa = response['conciliacoes'][0]
+    nota = remessa['notas'][0]
+    assert remessa['valor_liquido'] == Decimal('80.00')
+    assert remessa['valor_total_impostos'] == Decimal('10.00')
+    assert remessa['valor_total_glosas'] == Decimal('30.00')
+    assert remessa['valor_recebido'] == Decimal('45.00')
+    assert remessa['valor_pendente'] == Decimal('35.00')
+    assert nota['valor_alocado_nfse'] == Decimal('80.00')
+    assert nota['valor_recebido'] == Decimal('45.00')
+    assert nota['valor_pendente'] == Decimal('35.00')
     ConciliacoesSemRecebimentoList.model_validate(response)
 
 
@@ -1375,21 +1443,32 @@ def test_rejeita_glosa_maior_que_remessa(
     assert 'nao pode ser maior' in exc_info.value.detail
 
 
-def test_marcacao_de_glosa_exige_valor_glosado_positivo():
-    with pytest.raises(ValidationError) as exc_info:
-        ConciliacaoFaturamentoCreate(
-            **payload_conciliacao(
-                remessas=[
-                    {
-                        'cd_remessa': CD_REMESSA_TESTE,
-                        'sn_glosado': True,
-                        'valor_glosado': '0.00',
-                    }
-                ]
-            )
+def test_marcacao_de_glosa_e_inferida_pelo_valor_glosado():
+    com_glosa = ConciliacaoFaturamentoCreate(
+        **payload_conciliacao(
+            remessas=[
+                {
+                    'cd_remessa': CD_REMESSA_TESTE,
+                    'sn_glosado': False,
+                    'valor_glosado': '20.00',
+                }
+            ]
         )
+    )
+    sem_glosa = ConciliacaoFaturamentoCreate(
+        **payload_conciliacao(
+            remessas=[
+                {
+                    'cd_remessa': CD_REMESSA_TESTE,
+                    'sn_glosado': True,
+                    'valor_glosado': '0.00',
+                }
+            ]
+        )
+    )
 
-    assert 'Informe um valor de glosa maior que zero' in str(exc_info.value)
+    assert com_glosa.remessas[0].sn_glosado is True
+    assert sem_glosa.remessas[0].sn_glosado is False
 
 
 def test_data_recebimento_exige_conta_bancaria():
@@ -1771,6 +1850,13 @@ def test_lista_remessa_com_saldo_e_historico_centrados_no_faturamento(
     monkeypatch,
 ):
     configurar_cards_oracle_fake(monkeypatch)
+    monkeypatch.setattr(
+        financeiro,
+        'sincronizar_totais_remessas_financeiras',
+        lambda *_args, **_kwargs: pytest.fail(
+            'A listagem não deve sincronizar todas as remessas.'
+        ),
+    )
 
     response = financeiro.consultar_remessas_faturamento(
         usuario_atual=usuario_teste,
@@ -1885,6 +1971,81 @@ def test_saldo_da_remessa_trata_glosa_como_parte_da_pendencia():
     assert com_recurso['valor_disponivel_conciliacao'] == Decimal('20.00')
 
 
+def test_posicao_da_remessa_concilia_liquido_e_impostos_e_preserva_glosa():
+    posicao = financeiro._posicao_remessa(
+        {
+            'cd_remessa': CD_REMESSA_TESTE,
+            'data_competencia': date(2026, 7, 1),
+            'convenio': 'Convenio Teste',
+            'cnpj_convenio': '98765432000110',
+            'valor_total': Decimal('120.00'),
+        },
+        {
+            'valor_conciliado': Decimal('90.00'),
+            'valor_impostos': Decimal('10.00'),
+            'valor_glosado': Decimal('30.00'),
+            'valor_recurso_consumido': Decimal('0.00'),
+            'historico': [],
+        },
+        valor_acatado=Decimal('0.00'),
+        recurso_disponivel=Decimal('0.00'),
+    )
+
+    assert posicao['valor_conciliado'] == Decimal('90.00')
+    assert posicao['valor_impostos'] == Decimal('10.00')
+    assert posicao['valor_nao_conciliado'] == Decimal('30.00')
+
+
+def test_busca_nfse_exibe_valores_bruto_liquido_e_saldos_separados(
+    session,
+):
+    criar_nfse(session, valor='100.00')
+    session.connection().connection.create_function(
+        'regexp_replace',
+        4,
+        lambda value, pattern, replacement, _flags: re.sub(
+            pattern,
+            replacement,
+            value or '',
+        ),
+    )
+
+    notas = financeiro._consultar_nfses_com_saldo_para_remessa(
+        session,
+        {
+            'cd_remessa': CD_REMESSA_TESTE,
+            'convenio': 'Convenio Teste',
+            'cnpj_convenio': '98765432000110',
+            'valor_total': Decimal('120.00'),
+        },
+        {},
+        Decimal('120.00'),
+        None,
+        50,
+    )
+
+    assert len(notas) == 1
+    assert notas[0]['valor_bruto_nfse'] == Decimal('128.00')
+    assert notas[0]['valor_nfse'] == Decimal('100.00')
+    assert notas[0]['saldo_nfse'] == Decimal('100.00')
+    assert notas[0]['impostos'] == Decimal('28.00')
+    assert notas[0]['saldo_impostos'] == Decimal('28.00')
+
+
+def test_valor_liquido_legado_exclui_glosa_e_impostos():
+    vinculo = SimpleNamespace(
+        valor_alocado_nfse=Decimal('0.00'),
+        valor_total=Decimal('120.00'),
+        valor_glosado=Decimal('20.00'),
+        valor_impostos=Decimal('5.00'),
+    )
+
+    assert financeiro._valor_alocado_vinculo(vinculo) == Decimal('95.00')
+    assert financeiro._valor_conciliado_vinculo(vinculo) == Decimal(
+        '100.00'
+    )
+
+
 def test_uma_nfse_pode_distribuir_saldo_entre_remessas_distintas(
     session,
     usuario_teste,
@@ -1983,7 +2144,6 @@ def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
                 {
                     'nfse_row_hash': 'nfse-1',
                     'valor_alocado': '80.00',
-                    'sn_glosado': True,
                     'valor_glosado': '40.00',
                     'data_previsao_recebimento': '2026-08-10',
                 }
@@ -2007,6 +2167,52 @@ def test_glosa_mantem_remessa_aberta_e_exige_recurso_para_nova_nfse(
     assert conciliacao['valor_nao_conciliado'] == Decimal('40.00')
     assert 'glosa ainda sem recurso' in response['message']
     assert session.query(RegistroGlosa).count() == ITENS_ANALITICOS_TESTE
+    assert (
+        session.scalar(
+            select(ConciliacaoFaturamentoRemessa.sn_glosado)
+        )
+        == 'true'
+    )
+
+
+def test_conciliacao_normaliza_centavo_excedente_na_glosa(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session, valor='100.00')
+    configurar_cards_oracle_fake(monkeypatch)
+    monkeypatch.setattr(
+        financeiro,
+        '_consultar_itens_remessas_hpc',
+        itens_remessas_hpc,
+    )
+
+    response = financeiro.conciliar_remessa_com_nfses(
+        cd_remessa=CD_REMESSA_TESTE,
+        payload=ConciliacaoRemessaCreate(
+            processo_recebimento='PROC-ARREDONDAMENTO',
+            notas=[
+                {
+                    'nfse_row_hash': 'nfse-1',
+                    'valor_alocado': '80.00',
+                    'valor_impostos': '10.00',
+                    'valor_glosado': '30.01',
+                    'data_previsao_recebimento': '2026-08-10',
+                }
+            ],
+        ),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+
+    vinculo = session.scalar(select(ConciliacaoFaturamentoRemessa))
+    assert response['valor_alocado'] == Decimal('80.00')
+    assert response['valor_impostos'] == Decimal('10.00')
+    assert response['valor_glosado'] == Decimal('30.00')
+    assert vinculo.valor_glosado == Decimal('30.00')
+    assert vinculo.valor_total == Decimal('120.00')
 
 
 def test_edita_e_inativa_conciliacao_sem_recebimento_com_auditoria(
