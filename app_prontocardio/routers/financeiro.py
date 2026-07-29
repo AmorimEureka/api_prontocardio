@@ -451,7 +451,11 @@ def _valor_alocado_vinculo(
     if valor_alocado > 0:
         return valor_alocado
     return max(
-        _money(vinculo.valor_total) - _money(vinculo.valor_glosado),
+        (
+            _money(vinculo.valor_total)
+            - _money(vinculo.valor_glosado)
+            - _money(vinculo.valor_impostos)
+        ),
         Decimal('0.00'),
     )
 
@@ -2090,6 +2094,7 @@ def _consultar_nfses_com_saldo_para_remessa(  # noqa: PLR0913
                 'data_emissao': nota.data_hora,
                 'convenio': remessa['convenio'],
                 'cnpj_convenio': cnpj,
+                'valor_bruto_nfse': _money(valor_nfse + impostos),
                 'valor_nfse': valor_nfse,
                 'valor_utilizado': _money(valor_utilizado),
                 'saldo_nfse': _money(saldo_nfse),
@@ -2123,10 +2128,6 @@ def consultar_remessas_faturamento(  # noqa: PLR0913
     offset: int = Query(default=0, ge=0),
 ):
     try:
-        sincronizar_totais_remessas_financeiras(
-            session_postgres,
-            session_oracle,
-        )
         remessas, total = _consultar_cards_remessas_hpc(
             session_oracle,
             _codigos_remessas_encerradas(session_postgres),
@@ -2263,6 +2264,32 @@ def consultar_nfses_para_remessa(  # noqa: PLR0913
     }
 
 
+def _normalizar_centavo_excedente_na_glosa(
+    notas: list[NfseConciliacaoRemessaInput],
+    valor_disponivel: Decimal,
+) -> bool:
+    valor_comprometido = sum(
+        (
+            _money(item.valor_alocado)
+            + _money(item.valor_impostos)
+            + _money(item.valor_glosado)
+            for item in notas
+        ),
+        Decimal('0.00'),
+    )
+    if _money(valor_comprometido - valor_disponivel) != CENTAVOS:
+        return False
+
+    for item in reversed(notas):
+        valor_glosado = _money(item.valor_glosado)
+        if valor_glosado < CENTAVOS:
+            continue
+        item.valor_glosado = valor_glosado - CENTAVOS
+        item.sn_glosado = item.valor_glosado > 0
+        return True
+    return False
+
+
 @router.post(
     '/conciliacao-faturamento/remessas/{cd_remessa}/conciliar',
     status_code=HTTPStatus.CREATED,
@@ -2330,6 +2357,10 @@ def conciliar_remessa_com_nfses(  # noqa: PLR0912, PLR0915
             ),
         )
 
+    _normalizar_centavo_excedente_na_glosa(
+        payload.notas,
+        valor_disponivel,
+    )
     total_alocado = sum(
         (_money(item.valor_alocado) for item in payload.notas),
         Decimal('0.00'),
@@ -4477,6 +4508,7 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
         else_=(
             ConciliacaoFaturamentoRemessa.valor_total
             - ConciliacaoFaturamentoRemessa.valor_glosado
+            - ConciliacaoFaturamentoRemessa.valor_impostos
         ),
     )
     recebimentos_por_vinculo = (
@@ -4844,6 +4876,7 @@ def consultar_conciliacoes_sem_recebimento(  # noqa: PLR0913, PLR0915, PLR1704
                     'valor_vinculado_remessa': _money(
                         vinculo.valor_total
                     ),
+                    'valor_alocado_nfse': _valor_alocado_vinculo(vinculo),
                     'valor_impostos': _valor_impostos_vinculo(vinculo),
                     'valor_glosado': _money(vinculo.valor_glosado),
                     'valor_recebido': valor_recebido_nfse,

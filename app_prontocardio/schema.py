@@ -836,6 +836,7 @@ class NfseSaldoRemessaPublic(BaseModel):
     data_emissao: datetime | None = None
     convenio: str
     cnpj_convenio: str
+    valor_bruto_nfse: Decimal
     valor_nfse: Decimal
     valor_utilizado: Decimal
     saldo_nfse: Decimal
@@ -880,14 +881,7 @@ class NfseConciliacaoRemessaInput(BaseModel):
 
     @model_validator(mode='after')
     def validate_glosa_e_recebimento(self):
-        if self.sn_glosado and self.valor_glosado <= 0:
-            raise ValueError(
-                'Informe um valor de glosa maior que zero para a NFS-e.'
-            )
-        if not self.sn_glosado and self.valor_glosado != 0:
-            raise ValueError(
-                'NFS-e sem glosa deve possuir valor glosado igual a zero.'
-            )
+        self.sn_glosado = self.valor_glosado > 0
         if (
             self.data_recebimento is not None
             and self.conta_bancaria_id is None
@@ -1113,14 +1107,7 @@ class RemessaConciliacaoInput(BaseModel):
 
     @model_validator(mode='after')
     def validate_valor_glosado(self):
-        if self.sn_glosado and self.valor_glosado <= 0:
-            raise ValueError(
-                'Informe um valor de glosa maior que zero para a remessa.'
-            )
-        if not self.sn_glosado and self.valor_glosado != 0:
-            raise ValueError(
-                'Remessa sem glosa deve possuir valor glosado igual a zero.'
-            )
+        self.sn_glosado = self.valor_glosado > 0
         return self
 
 
@@ -1299,6 +1286,7 @@ class NfseSemRecebimentoPublic(BaseModel):
     data_criacao: datetime
     valor_nfse: Decimal
     valor_vinculado_remessa: Decimal
+    valor_alocado_nfse: Decimal
     valor_impostos: Decimal
     valor_glosado: Decimal
     valor_recebido: Decimal
