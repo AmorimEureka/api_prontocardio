@@ -1,6 +1,6 @@
 import hashlib
 import re
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 from http import HTTPStatus
 from typing import Annotated
@@ -34,6 +34,10 @@ from app_prontocardio.models import (
     Usuario,
 )
 from app_prontocardio.schema import (
+    AcompanhamentoParticularFilter,
+    AcompanhamentoParticularItem,
+    AcompanhamentoParticularList,
+    AcompanhamentoParticularResumoStatus,
     AtendimentoSolicitacaoNotaPublic,
     EmissaoNfseCreate,
     EmissaoNfsePublic,
@@ -59,6 +63,7 @@ from app_prontocardio.schema import (
     SolicitacaoNotaWorkflowList,
     SolicitacaoNotaWorkflowPublic,
     SolicitacoesAtendimentoHistoricoList,
+    StatusAcompanhamentoParticular,
     ValidacaoSolicitacaoNotaInput,
 )
 from app_prontocardio.security import valida_token_usuario_atual
@@ -77,6 +82,7 @@ router = APIRouter(
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 SessionOracle = Annotated[Session, Depends(get_session_oracle)]
+CONVENIO_PARTICULAR = 'PARTICULAR'
 
 
 def _texto(value) -> str | None:
@@ -250,6 +256,342 @@ def _ultima_emissao_subquery():
         )
         .group_by(EmissaoNfse.solicitacao_nota_id)
         .subquery()
+    )
+
+
+def _consultar_atendimentos_particulares(
+    session_oracle: Session,
+    filtros: AcompanhamentoParticularFilter,
+) -> list[dict]:
+    inicio = datetime.combine(filtros.data_inicio, time.min)
+    fim = datetime.combine(
+        filtros.data_fim + timedelta(days=1),
+        time.min,
+    )
+    filtros_oracle = [
+        ModelContaAtendimento.cd_atendimento.is_not(None),
+        ModelContaAtendimento.cd_paciente.is_not(None),
+        ModelContaAtendimento.cd_convenio.is_not(None),
+        ModelContaAtendimento.nm_paciente.is_not(None),
+        ModelContaAtendimento.dt_atendimento >= inicio,
+        ModelContaAtendimento.dt_atendimento < fim,
+        func.upper(func.trim(ModelContaAtendimento.nm_convenio))
+        == CONVENIO_PARTICULAR,
+    ]
+    if filtros.codigo_atendimento is not None:
+        filtros_oracle.append(
+            ModelContaAtendimento.cd_atendimento
+            == filtros.codigo_atendimento
+        )
+    if nome_paciente := _texto(filtros.nome_paciente):
+        filtros_oracle.append(
+            ModelContaAtendimento.nm_paciente.ilike(
+                f'%{nome_paciente}%'
+            )
+        )
+    if filtros.tipo_atendimento is not None:
+        filtros_oracle.append(
+            ModelContaAtendimento.tp_atendimento
+            == filtros.tipo_atendimento.value
+        )
+
+    contas = (
+        select(
+            ModelContaAtendimento.cd_atendimento.label(
+                'codigo_atendimento'
+            ),
+            ModelContaAtendimento.cd_paciente.label('codigo_paciente'),
+            ModelContaAtendimento.cd_convenio.label('codigo_convenio'),
+            ModelContaAtendimento.nm_paciente.label('nome_paciente'),
+            ModelContaAtendimento.nm_convenio.label('convenio'),
+            ModelContaAtendimento.tp_atendimento.label(
+                'tipo_atendimento'
+            ),
+            ModelContaAtendimento.cd_reg.label('codigo_conta'),
+            func.min(ModelContaAtendimento.dt_atendimento).label(
+                'data_atendimento'
+            ),
+            func.max(ModelContaAtendimento.dt_alta).label('data_alta'),
+            func.coalesce(
+                func.max(ModelContaAtendimento.vl_total_registro),
+                0,
+            ).label('valor_conta'),
+            func.count().label('quantidade_lancamentos'),
+        )
+        .where(*filtros_oracle)
+        .group_by(
+            ModelContaAtendimento.cd_atendimento,
+            ModelContaAtendimento.cd_paciente,
+            ModelContaAtendimento.cd_convenio,
+            ModelContaAtendimento.nm_paciente,
+            ModelContaAtendimento.nm_convenio,
+            ModelContaAtendimento.tp_atendimento,
+            ModelContaAtendimento.cd_reg,
+        )
+        .subquery()
+    )
+    query = (
+        select(
+            contas.c.codigo_atendimento,
+            contas.c.codigo_paciente,
+            contas.c.codigo_convenio,
+            contas.c.nome_paciente,
+            contas.c.convenio,
+            contas.c.tipo_atendimento,
+            func.min(contas.c.data_atendimento).label('data_atendimento'),
+            func.max(contas.c.data_alta).label('data_alta'),
+            func.coalesce(func.sum(contas.c.valor_conta), 0).label(
+                'valor_conta'
+            ),
+            func.sum(contas.c.quantidade_lancamentos).label(
+                'quantidade_lancamentos'
+            ),
+        )
+        .group_by(
+            contas.c.codigo_atendimento,
+            contas.c.codigo_paciente,
+            contas.c.codigo_convenio,
+            contas.c.nome_paciente,
+            contas.c.convenio,
+            contas.c.tipo_atendimento,
+        )
+        .order_by(
+            func.min(contas.c.data_atendimento),
+            contas.c.nome_paciente,
+            contas.c.codigo_atendimento,
+        )
+    )
+    return [
+        dict(row._mapping)
+        for row in session_oracle.execute(query).all()
+    ]
+
+
+def _solicitacoes_mais_recentes_por_atendimento(
+    codigos_atendimento: set[int],
+    session_postgres: Session,
+) -> dict[int, tuple]:
+    if not codigos_atendimento:
+        return {}
+
+    ultima_emissao = _ultima_emissao_subquery()
+    rows = session_postgres.execute(
+        select(
+            SolicitacaoNota,
+            SolicitacaoNotaWorkflow,
+            EmissaoNfse,
+            EmissaoNfseArquivo.id.label('arquivo_id'),
+        )
+        .join(
+            SolicitacaoNotaWorkflow,
+            SolicitacaoNotaWorkflow.solicitacao_nota_id
+            == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            ultima_emissao,
+            ultima_emissao.c.solicitacao_nota_id == SolicitacaoNota.id,
+        )
+        .outerjoin(
+            EmissaoNfse,
+            EmissaoNfse.id == ultima_emissao.c.emissao_id,
+        )
+        .outerjoin(
+            EmissaoNfseArquivo,
+            EmissaoNfseArquivo.emissao_nfse_id == EmissaoNfse.id,
+        )
+        .where(
+            SolicitacaoNota.codigo_atendimento.in_(codigos_atendimento)
+        )
+        .order_by(
+            SolicitacaoNota.codigo_atendimento,
+            SolicitacaoNota.ativo.desc(),
+            SolicitacaoNota.id.desc(),
+        )
+    ).all()
+    recentes = {}
+    for solicitacao, workflow, emissao, arquivo_id in rows:
+        recentes.setdefault(
+            solicitacao.codigo_atendimento,
+            (solicitacao, workflow, emissao, arquivo_id),
+        )
+    return recentes
+
+
+def _status_acompanhamento_particular(
+    solicitacao: SolicitacaoNota | None,
+    workflow: SolicitacaoNotaWorkflow | None,
+    emissao: EmissaoNfse | None,
+) -> StatusAcompanhamentoParticular:
+    if solicitacao is None or workflow is None:
+        status = StatusAcompanhamentoParticular.SEM_SOLICITACAO
+    elif not solicitacao.ativo:
+        status = StatusAcompanhamentoParticular.INATIVA
+    else:
+        status_emissao = emissao.status if emissao is not None else None
+        if (
+            status_emissao == StatusEmissaoNfse.EMITIDA.value
+            or workflow.status == StatusWorkflowSolicitacao.EMITIDA.value
+        ):
+            status = StatusAcompanhamentoParticular.EMITIDA
+        elif (
+            status_emissao == StatusEmissaoNfse.ERRO.value
+            or workflow.status
+            == StatusWorkflowSolicitacao.ERRO_EMISSAO.value
+        ):
+            status = StatusAcompanhamentoParticular.ERRO_EMISSAO
+        elif status_emissao == StatusEmissaoNfse.PROCESSANDO.value:
+            status = StatusAcompanhamentoParticular.PROCESSANDO
+        elif (
+            status_emissao == StatusEmissaoNfse.PENDENTE.value
+            or workflow.status
+            == StatusWorkflowSolicitacao.EMISSAO_SOLICITADA.value
+        ):
+            status = StatusAcompanhamentoParticular.PENDENTE_EMISSAO
+        else:
+            status = StatusAcompanhamentoParticular(workflow.status)
+
+    return status
+
+
+@router.get(
+    '/acompanhamento-particular',
+    status_code=HTTPStatus.OK,
+    response_model=AcompanhamentoParticularList,
+)
+def acompanhar_atendimentos_particulares(
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    session_oracle: SessionOracle,
+    filtros_query: Annotated[AcompanhamentoParticularFilter, Query()],
+):
+    del usuario_atual
+    try:
+        atendimentos_oracle = _consultar_atendimentos_particulares(
+            session_oracle,
+            filtros_query,
+        )
+        solicitacoes_por_atendimento = (
+            _solicitacoes_mais_recentes_por_atendimento(
+                {
+                    atendimento['codigo_atendimento']
+                    for atendimento in atendimentos_oracle
+                },
+                session_postgres,
+            )
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail=(
+                'Não foi possível carregar os atendimentos particulares '
+                'no momento.'
+            ),
+        ) from exc
+
+    atendimentos = []
+    for atendimento in atendimentos_oracle:
+        dados_solicitacao = solicitacoes_por_atendimento.get(
+            atendimento['codigo_atendimento']
+        )
+        if dados_solicitacao is None:
+            solicitacao = workflow = emissao = arquivo_id = None
+        else:
+            solicitacao, workflow, emissao, arquivo_id = dados_solicitacao
+
+        status = _status_acompanhamento_particular(
+            solicitacao,
+            workflow,
+            emissao,
+        )
+        atendimentos.append(
+            AcompanhamentoParticularItem(
+                **atendimento,
+                status=status,
+                solicitacao_id=(
+                    solicitacao.id if solicitacao is not None else None
+                ),
+                workflow_status=(
+                    workflow.status if workflow is not None else None
+                ),
+                emissao_id=emissao.id if emissao is not None else None,
+                emissao_status=(
+                    emissao.status if emissao is not None else None
+                ),
+                numero_nfse=(
+                    emissao.numero_nfse if emissao is not None else None
+                ),
+                erro_emissao=(
+                    emissao.erro if emissao is not None else None
+                ),
+                arquivo_disponivel=bool(
+                    emissao is not None
+                    and emissao.status == StatusEmissaoNfse.EMITIDA.value
+                    and arquivo_id is not None
+                ),
+                solicitada_em=(
+                    solicitacao.data_criacao
+                    if solicitacao is not None
+                    else None
+                ),
+                atualizada_em=(
+                    emissao.data_atualizacao
+                    if emissao is not None
+                    else (
+                        workflow.data_atualizacao
+                        if workflow is not None
+                        else None
+                    )
+                ),
+            )
+        )
+
+    resumo = {
+        status: {
+            'quantidade': 0,
+            'valor_total': Decimal('0'),
+        }
+        for status in StatusAcompanhamentoParticular
+    }
+    for atendimento in atendimentos:
+        resumo[atendimento.status]['quantidade'] += 1
+        resumo[atendimento.status]['valor_total'] += (
+            atendimento.valor_conta or Decimal('0')
+        )
+
+    total_periodo = len(atendimentos)
+    valor_total_periodo = sum(
+        (
+            atendimento.valor_conta or Decimal('0')
+            for atendimento in atendimentos
+        ),
+        Decimal('0'),
+    )
+    if filtros_query.status is not None:
+        atendimentos = [
+            atendimento
+            for atendimento in atendimentos
+            if atendimento.status == filtros_query.status
+        ]
+
+    total = len(atendimentos)
+    inicio = filtros_query.offset
+    fim = inicio + filtros_query.limit
+    return AcompanhamentoParticularList(
+        atendimentos=atendimentos[inicio:fim],
+        resumo_status=[
+            AcompanhamentoParticularResumoStatus(
+                status=status,
+                **resumo[status],
+            )
+            for status in StatusAcompanhamentoParticular
+        ],
+        data_inicio=filtros_query.data_inicio,
+        data_fim=filtros_query.data_fim,
+        total_periodo=total_periodo,
+        total=total,
+        valor_total_periodo=valor_total_periodo,
+        limit=filtros_query.limit,
+        offset=filtros_query.offset,
     )
 
 
