@@ -17,30 +17,25 @@ def test_aplicacao_registra_rotas_criticas():
     } <= rotas
 
 
-def test_lifespan_nao_aguarda_sincronizacao_de_remessas(monkeypatch):
+def test_lifespan_disponibiliza_api_sem_sincronizacao_oracle(monkeypatch):
     app_module = importlib.import_module('app_prontocardio.app')
     chamadas = []
-
-    class ThreadFalsa:
-        def __init__(self, *, target, name, daemon):
-            chamadas.append({
-                'target': target,
-                'name': name,
-                'daemon': daemon,
-            })
-
-        def start(self):
-            chamadas.append('iniciada')
 
     monkeypatch.setattr(
         app_module.settings,
         'RUN_MIGRATIONS_ON_STARTUP',
         True,
     )
-    monkeypatch.setattr(app_module, 'ensure_postgres_schema', lambda: None)
-    monkeypatch.setattr(app_module, 'run_postgres_migrations', lambda: None)
-    monkeypatch.setattr(app_module, 'postgres_engine', object())
-    monkeypatch.setattr(app_module, 'Thread', ThreadFalsa)
+    monkeypatch.setattr(
+        app_module,
+        'ensure_postgres_schema',
+        lambda: chamadas.append('schema'),
+    )
+    monkeypatch.setattr(
+        app_module,
+        'run_postgres_migrations',
+        lambda: chamadas.append('migrations'),
+    )
 
     async def executar_lifespan():
         async with app_module.lifespan(app_module.app):
@@ -48,6 +43,4 @@ def test_lifespan_nao_aguarda_sincronizacao_de_remessas(monkeypatch):
 
     asyncio.run(executar_lifespan())
 
-    assert chamadas[0]['name'] == 'sincronizacao-totais-remessas'
-    assert chamadas[0]['daemon'] is True
-    assert chamadas[1:] == ['iniciada', 'api-disponivel']
+    assert chamadas == ['schema', 'migrations', 'api-disponivel']
