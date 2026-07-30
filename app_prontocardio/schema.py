@@ -378,12 +378,19 @@ class AcompanhamentoParticularItem(BaseModel):
     arquivo_disponivel: bool = False
     solicitada_em: datetime | None = None
     atualizada_em: datetime | None = None
+    solicitacao: SolicitacaoNotaWorkflowPublic | None = None
 
 
 class AcompanhamentoParticularResumoStatus(BaseModel):
     status: StatusAcompanhamentoParticular
     quantidade: int = Field(default=0, ge=0)
     valor_total: Decimal = Field(default=Decimal('0'), ge=0)
+
+
+class AcompanhamentoParticularPacienteDia(BaseModel):
+    nome: str
+    inicial: str
+    status: StatusAcompanhamentoParticular
 
 
 class AcompanhamentoParticularResumoDia(BaseModel):
@@ -393,6 +400,8 @@ class AcompanhamentoParticularResumoDia(BaseModel):
     pendentes: int = Field(default=0, ge=0)
     valor_total: Decimal = Field(default=Decimal('0'), ge=0)
     resumo_status: list[AcompanhamentoParticularResumoStatus]
+    pacientes: list[AcompanhamentoParticularPacienteDia]
+    pacientes_restantes: int = Field(default=0, ge=0)
 
 
 class AcompanhamentoParticularList(BaseModel):
