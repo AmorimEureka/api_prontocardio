@@ -386,9 +386,19 @@ class AcompanhamentoParticularResumoStatus(BaseModel):
     valor_total: Decimal = Field(default=Decimal('0'), ge=0)
 
 
+class AcompanhamentoParticularResumoDia(BaseModel):
+    data: date
+    total: int = Field(default=0, ge=0)
+    emitidas: int = Field(default=0, ge=0)
+    pendentes: int = Field(default=0, ge=0)
+    valor_total: Decimal = Field(default=Decimal('0'), ge=0)
+    resumo_status: list[AcompanhamentoParticularResumoStatus]
+
+
 class AcompanhamentoParticularList(BaseModel):
     atendimentos: list[AcompanhamentoParticularItem]
     resumo_status: list[AcompanhamentoParticularResumoStatus]
+    resumo_diario: list[AcompanhamentoParticularResumoDia]
     data_inicio: date
     data_fim: date
     total_periodo: int = Field(default=0, ge=0)

@@ -382,6 +382,18 @@ def test_acompanhamento_particular_cruza_atendimentos_com_solicitacoes(
     assert response.total_periodo == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
     assert response.total == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
     assert response.valor_total_periodo == Decimal('505.50')
+    assert len(response.resumo_diario) == 1
+    assert response.resumo_diario[0].data == data_referencia
+    assert (
+        response.resumo_diario[0].total
+        == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
+    )
+    assert response.resumo_diario[0].emitidas == 0
+    assert (
+        response.resumo_diario[0].pendentes
+        == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
+    )
+    assert response.resumo_diario[0].valor_total == Decimal('505.50')
     assert response.atendimentos[0].solicitacao_id == solicitacao.id
     assert response.atendimentos[0].status == (
         StatusAcompanhamentoParticular.PENDENTE_VALIDACAO
