@@ -37,6 +37,7 @@ from app_prontocardio.schema import (
     AcompanhamentoParticularFilter,
     AcompanhamentoParticularItem,
     AcompanhamentoParticularList,
+    AcompanhamentoParticularPacienteDia,
     AcompanhamentoParticularResumoDia,
     AcompanhamentoParticularResumoStatus,
     AtendimentoSolicitacaoNotaPublic,
@@ -568,6 +569,7 @@ def acompanhar_atendimentos_particulares(
                 'total': 0,
                 'emitidas': 0,
                 'valor_total': Decimal('0'),
+                'pacientes': [],
                 'status': {
                     status: {
                         'quantidade': 0,
@@ -582,6 +584,13 @@ def acompanhar_atendimentos_particulares(
         resumo_dia['valor_total'] += valor_conta
         resumo_dia['status'][atendimento.status]['quantidade'] += 1
         resumo_dia['status'][atendimento.status]['valor_total'] += valor_conta
+        resumo_dia['pacientes'].append(
+            AcompanhamentoParticularPacienteDia(
+                nome=atendimento.nome_paciente,
+                inicial=(atendimento.nome_paciente.strip()[:1].upper() or '?'),
+                status=atendimento.status,
+            )
+        )
         if atendimento.status == StatusAcompanhamentoParticular.EMITIDA:
             resumo_dia['emitidas'] += 1
 
@@ -603,8 +612,93 @@ def acompanhar_atendimentos_particulares(
     total = len(atendimentos)
     inicio = filtros_query.offset
     fim = inicio + filtros_query.limit
+    pagina_atendimentos = atendimentos[inicio:fim]
+    codigos_pagina = {
+        atendimento.codigo_atendimento
+        for atendimento in pagina_atendimentos
+        if atendimento.solicitacao_id is not None
+    }
+    procedimentos_por_atendimento, procedimentos_disponiveis = (
+        _consultar_procedimentos_atendimentos(
+            codigos_pagina,
+            session_oracle,
+        )
+    )
+    historicos_por_atendimento = _consultar_solicitacoes_atendimentos(
+        codigos_pagina,
+        session_postgres,
+    )
+    ids_usuarios = set()
+    for codigo_atendimento in codigos_pagina:
+        solicitacao, workflow, _emissao, _arquivo_id = (
+            solicitacoes_por_atendimento[codigo_atendimento]
+        )
+        ids_usuarios.add(solicitacao.usuario_id)
+        if workflow.validado_por_id is not None:
+            ids_usuarios.add(workflow.validado_por_id)
+    nomes_usuarios = {}
+    if ids_usuarios:
+        nomes_usuarios = dict(
+            session_postgres.execute(
+                select(Usuario.id, Usuario.nome).where(
+                    Usuario.id.in_(ids_usuarios)
+                )
+            ).all()
+        )
+    pagina_enriquecida = []
+    for atendimento in pagina_atendimentos:
+        dados_solicitacao = solicitacoes_por_atendimento.get(
+            atendimento.codigo_atendimento
+        )
+        if dados_solicitacao is None:
+            pagina_enriquecida.append(atendimento)
+            continue
+        solicitacao, workflow, _emissao, _arquivo_id = dados_solicitacao
+        solicitacao_publica = _workflow_public(
+            solicitacao,
+            workflow,
+            cadastrado_por=nomes_usuarios.get(solicitacao.usuario_id),
+            validado_por=nomes_usuarios.get(workflow.validado_por_id),
+        ).model_copy(
+            update={
+                'procedimentos_atendimento': (
+                    procedimentos_por_atendimento.get(
+                        atendimento.codigo_atendimento,
+                        [],
+                    )
+                ),
+                'procedimentos_atendimento_disponiveis': (
+                    procedimentos_disponiveis
+                ),
+                'valor_total_procedimentos': (
+                    _somar_valores_procedimentos(
+                        procedimentos_por_atendimento.get(
+                            atendimento.codigo_atendimento,
+                            [],
+                        )
+                    )
+                ),
+                'solicitacoes_anteriores': [
+                    anterior
+                    for anterior in historicos_por_atendimento.get(
+                        atendimento.codigo_atendimento,
+                        [],
+                    )
+                    if (
+                        anterior.data_criacao < solicitacao.data_criacao
+                        or (
+                            anterior.data_criacao == solicitacao.data_criacao
+                            and anterior.id < solicitacao.id
+                        )
+                    )
+                ],
+            }
+        )
+        pagina_enriquecida.append(
+            atendimento.model_copy(update={'solicitacao': solicitacao_publica})
+        )
     return AcompanhamentoParticularList(
-        atendimentos=atendimentos[inicio:fim],
+        atendimentos=pagina_enriquecida,
         resumo_status=[
             AcompanhamentoParticularResumoStatus(
                 status=status,
@@ -626,6 +720,11 @@ def acompanhar_atendimentos_particulares(
                     )
                     for status in StatusAcompanhamentoParticular
                 ],
+                pacientes=dados['pacientes'][:3],
+                pacientes_restantes=max(
+                    dados['total'] - len(dados['pacientes'][:3]),
+                    0,
+                ),
             )
             for data_resumo, dados in sorted(resumo_diario.items())
         ],
