@@ -372,9 +372,14 @@ class AcompanhamentoParticularItem(BaseModel):
     solicitacao_id: int | None = None
     workflow_status: StatusWorkflowSolicitacao | None = None
     emissao_id: int | None = None
+    lote_id: int | None = None
     emissao_status: StatusEmissaoNfse | None = None
+    cnpj_emissor: str | None = None
+    razao_social_emissor: str | None = None
     numero_nfse: str | None = None
+    protocolo: str | None = None
     erro_emissao: str | None = None
+    emissao_atualizada_em: datetime | None = None
     arquivo_disponivel: bool = False
     solicitada_em: datetime | None = None
     atualizada_em: datetime | None = None
