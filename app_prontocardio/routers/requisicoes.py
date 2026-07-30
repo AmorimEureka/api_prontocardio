@@ -37,6 +37,7 @@ from app_prontocardio.schema import (
     AcompanhamentoParticularFilter,
     AcompanhamentoParticularItem,
     AcompanhamentoParticularList,
+    AcompanhamentoParticularResumoDia,
     AcompanhamentoParticularResumoStatus,
     AtendimentoSolicitacaoNotaPublic,
     EmissaoNfseCreate,
@@ -558,6 +559,32 @@ def acompanhar_atendimentos_particulares(
             atendimento.valor_conta or Decimal('0')
         )
 
+    resumo_diario = {}
+    for atendimento in atendimentos:
+        data_atendimento = atendimento.data_atendimento.date()
+        resumo_dia = resumo_diario.setdefault(
+            data_atendimento,
+            {
+                'total': 0,
+                'emitidas': 0,
+                'valor_total': Decimal('0'),
+                'status': {
+                    status: {
+                        'quantidade': 0,
+                        'valor_total': Decimal('0'),
+                    }
+                    for status in StatusAcompanhamentoParticular
+                },
+            },
+        )
+        valor_conta = atendimento.valor_conta or Decimal('0')
+        resumo_dia['total'] += 1
+        resumo_dia['valor_total'] += valor_conta
+        resumo_dia['status'][atendimento.status]['quantidade'] += 1
+        resumo_dia['status'][atendimento.status]['valor_total'] += valor_conta
+        if atendimento.status == StatusAcompanhamentoParticular.EMITIDA:
+            resumo_dia['emitidas'] += 1
+
     total_periodo = len(atendimentos)
     valor_total_periodo = sum(
         (
@@ -584,6 +611,23 @@ def acompanhar_atendimentos_particulares(
                 **resumo[status],
             )
             for status in StatusAcompanhamentoParticular
+        ],
+        resumo_diario=[
+            AcompanhamentoParticularResumoDia(
+                data=data_resumo,
+                total=dados['total'],
+                emitidas=dados['emitidas'],
+                pendentes=dados['total'] - dados['emitidas'],
+                valor_total=dados['valor_total'],
+                resumo_status=[
+                    AcompanhamentoParticularResumoStatus(
+                        status=status,
+                        **dados['status'][status],
+                    )
+                    for status in StatusAcompanhamentoParticular
+                ],
+            )
+            for data_resumo, dados in sorted(resumo_diario.items())
         ],
         data_inicio=filtros_query.data_inicio,
         data_fim=filtros_query.data_fim,
