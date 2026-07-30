@@ -1,5 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
+from enum import Enum
 from zoneinfo import ZoneInfo
 
 from pydantic import (
@@ -315,6 +316,86 @@ class SolicitacaoNotaFilter(BaseModel):
     status: StatusWorkflowSolicitacao | None = None
     limit: int = Field(default=10, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
+
+
+class StatusAcompanhamentoParticular(str, Enum):
+    SEM_SOLICITACAO = 'SEM_SOLICITACAO'
+    PENDENTE_VALIDACAO = 'PENDENTE_VALIDACAO'
+    RECUSADA = 'RECUSADA'
+    VALIDADA = 'VALIDADA'
+    PENDENTE_EMISSAO = 'PENDENTE_EMISSAO'
+    PROCESSANDO = 'PROCESSANDO'
+    EMITIDA = 'EMITIDA'
+    ERRO_EMISSAO = 'ERRO_EMISSAO'
+    INATIVA = 'INATIVA'
+
+
+class AcompanhamentoParticularFilter(BaseModel):
+    data_inicio: date = Field(
+        default_factory=lambda: datetime.now(
+            ZoneInfo('America/Sao_Paulo')
+        ).date()
+    )
+    data_fim: date = Field(
+        default_factory=lambda: datetime.now(
+            ZoneInfo('America/Sao_Paulo')
+        ).date()
+    )
+    codigo_atendimento: int | None = Field(default=None, gt=0)
+    nome_paciente: str | None = Field(default=None, max_length=200)
+    tipo_atendimento: TipoAtendimento | None = None
+    status: StatusAcompanhamentoParticular | None = None
+    limit: int = Field(default=25, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
+
+    @model_validator(mode='after')
+    def validate_periodo(self):
+        if self.data_fim < self.data_inicio:
+            raise ValueError(
+                'A data final deve ser igual ou posterior à data inicial.'
+            )
+        return self
+
+
+class AcompanhamentoParticularItem(BaseModel):
+    codigo_atendimento: int
+    codigo_paciente: int
+    codigo_convenio: int
+    nome_paciente: str
+    convenio: str
+    tipo_atendimento: str | None = None
+    data_atendimento: datetime
+    data_alta: datetime | None = None
+    valor_conta: Decimal = Decimal('0')
+    quantidade_lancamentos: int = Field(default=0, ge=0)
+    status: StatusAcompanhamentoParticular
+    solicitacao_id: int | None = None
+    workflow_status: StatusWorkflowSolicitacao | None = None
+    emissao_id: int | None = None
+    emissao_status: StatusEmissaoNfse | None = None
+    numero_nfse: str | None = None
+    erro_emissao: str | None = None
+    arquivo_disponivel: bool = False
+    solicitada_em: datetime | None = None
+    atualizada_em: datetime | None = None
+
+
+class AcompanhamentoParticularResumoStatus(BaseModel):
+    status: StatusAcompanhamentoParticular
+    quantidade: int = Field(default=0, ge=0)
+    valor_total: Decimal = Field(default=Decimal('0'), ge=0)
+
+
+class AcompanhamentoParticularList(BaseModel):
+    atendimentos: list[AcompanhamentoParticularItem]
+    resumo_status: list[AcompanhamentoParticularResumoStatus]
+    data_inicio: date
+    data_fim: date
+    total_periodo: int = Field(default=0, ge=0)
+    total: int = Field(default=0, ge=0)
+    valor_total_periodo: Decimal = Field(default=Decimal('0'), ge=0)
+    limit: int
+    offset: int
 
 
 class SolicitacaoNotaEmissaoFilter(BaseModel):

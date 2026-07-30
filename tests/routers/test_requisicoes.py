@@ -1,5 +1,5 @@
 import hashlib
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from http import HTTPStatus
 from types import SimpleNamespace
@@ -24,6 +24,7 @@ from app_prontocardio.models import (
 )
 from app_prontocardio.routers import requisicoes
 from app_prontocardio.schema import (
+    AcompanhamentoParticularFilter,
     AtendimentoSolicitacaoNotaPublic,
     EmissaoNfseCreate,
     EmpresaEmissoraCreate,
@@ -35,6 +36,7 @@ from app_prontocardio.schema import (
     SolicitacaoNotaFilter,
     SolicitacaoNotaUpdate,
     SolicitacaoNotaWorkflowFilter,
+    StatusAcompanhamentoParticular,
     ValidacaoSolicitacaoNotaInput,
 )
 from app_prontocardio.services.airflow_nfse import (
@@ -50,6 +52,8 @@ TOTAL_SOLICITACOES_RECUSAS = 2
 QUANTIDADE_LOTE = 2
 EMPRESA_CNPJ = '05613278000158'
 EMPRESA_RAZAO_SOCIAL = 'PRONTOCARDIO PRONTOATENDIMENTO CARDIOLOGICO LTDA'
+ATENDIMENTO_SEM_SOLICITACAO = 999999
+TOTAL_ATENDIMENTOS_ACOMPANHAMENTO = 2
 
 
 def dados_atendimento():
@@ -319,6 +323,189 @@ def _criar_solicitacao(
     registro.razao_social_emissor = EMPRESA_RAZAO_SOCIAL
     session.commit()
     return solicitacao
+
+
+def test_acompanhamento_particular_cruza_atendimentos_com_solicitacoes(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    data_referencia = date(2026, 7, 29)
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_atendimentos_particulares',
+        lambda _session, _filtros: [
+            {
+                'codigo_atendimento': CODIGO_ATENDIMENTO,
+                'codigo_paciente': 789,
+                'codigo_convenio': 3,
+                'nome_paciente': 'MARIA DA SILVA',
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Ambulatório',
+                'data_atendimento': datetime(2026, 7, 29, 8, 30),
+                'data_alta': None,
+                'valor_conta': Decimal('385.50'),
+                'quantidade_lancamentos': 2,
+            },
+            {
+                'codigo_atendimento': ATENDIMENTO_SEM_SOLICITACAO,
+                'codigo_paciente': 456,
+                'codigo_convenio': 3,
+                'nome_paciente': 'JOÃO SEM SOLICITAÇÃO',
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Externo',
+                'data_atendimento': datetime(2026, 7, 29, 9, 15),
+                'data_alta': None,
+                'valor_conta': Decimal('120.00'),
+                'quantidade_lancamentos': 1,
+            },
+        ],
+    )
+
+    response = requisicoes.acompanhar_atendimentos_particulares(
+        usuario_teste,
+        session,
+        object(),
+        AcompanhamentoParticularFilter(
+            data_inicio=data_referencia,
+            data_fim=data_referencia,
+        ),
+    )
+
+    assert response.data_inicio == data_referencia
+    assert response.data_fim == data_referencia
+    assert response.total_periodo == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
+    assert response.total == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
+    assert response.valor_total_periodo == Decimal('505.50')
+    assert response.atendimentos[0].solicitacao_id == solicitacao.id
+    assert response.atendimentos[0].status == (
+        StatusAcompanhamentoParticular.PENDENTE_VALIDACAO
+    )
+    assert response.atendimentos[1].solicitacao_id is None
+    assert response.atendimentos[1].status == (
+        StatusAcompanhamentoParticular.SEM_SOLICITACAO
+    )
+    resumo = {
+        item.status: item.quantidade for item in response.resumo_status
+    }
+    assert resumo[StatusAcompanhamentoParticular.PENDENTE_VALIDACAO] == 1
+    assert resumo[StatusAcompanhamentoParticular.SEM_SOLICITACAO] == 1
+
+
+def test_acompanhamento_particular_filtra_status_apos_cruzamento(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    _criar_solicitacao(session, usuario_teste, monkeypatch)
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_atendimentos_particulares',
+        lambda _session, _filtros: [
+            {
+                'codigo_atendimento': CODIGO_ATENDIMENTO,
+                'codigo_paciente': 789,
+                'codigo_convenio': 3,
+                'nome_paciente': 'MARIA DA SILVA',
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Ambulatório',
+                'data_atendimento': datetime(2026, 7, 29, 8, 30),
+                'data_alta': None,
+                'valor_conta': Decimal('385.50'),
+                'quantidade_lancamentos': 2,
+            },
+            {
+                'codigo_atendimento': ATENDIMENTO_SEM_SOLICITACAO,
+                'codigo_paciente': 456,
+                'codigo_convenio': 3,
+                'nome_paciente': 'JOÃO SEM SOLICITAÇÃO',
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Externo',
+                'data_atendimento': datetime(2026, 7, 29, 9, 15),
+                'data_alta': None,
+                'valor_conta': Decimal('120.00'),
+                'quantidade_lancamentos': 1,
+            },
+        ],
+    )
+
+    response = requisicoes.acompanhar_atendimentos_particulares(
+        usuario_teste,
+        session,
+        object(),
+        AcompanhamentoParticularFilter(
+            data_inicio=date(2026, 7, 29),
+            data_fim=date(2026, 7, 29),
+            status=StatusAcompanhamentoParticular.SEM_SOLICITACAO,
+            limit=1,
+        ),
+    )
+
+    assert response.total_periodo == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
+    assert response.total == 1
+    assert len(response.atendimentos) == 1
+    assert (
+        response.atendimentos[0].codigo_atendimento
+        == ATENDIMENTO_SEM_SOLICITACAO
+    )
+
+
+def test_acompanhamento_particular_exige_periodo_em_ordem_cronologica():
+    with pytest.raises(
+        ValidationError,
+        match='data final deve ser igual ou posterior',
+    ):
+        AcompanhamentoParticularFilter(
+            data_inicio=date(2026, 7, 29),
+            data_fim=date(2026, 7, 1),
+        )
+
+
+@pytest.mark.parametrize(
+    ('workflow_status', 'emissao_status', 'status_esperado'),
+    [
+        ('VALIDADA', None, StatusAcompanhamentoParticular.VALIDADA),
+        (
+            'EMISSAO_SOLICITADA',
+            'PENDENTE',
+            StatusAcompanhamentoParticular.PENDENTE_EMISSAO,
+        ),
+        (
+            'EMISSAO_SOLICITADA',
+            'PROCESSANDO',
+            StatusAcompanhamentoParticular.PROCESSANDO,
+        ),
+        ('EMITIDA', 'EMITIDA', StatusAcompanhamentoParticular.EMITIDA),
+        (
+            'ERRO_EMISSAO',
+            'ERRO',
+            StatusAcompanhamentoParticular.ERRO_EMISSAO,
+        ),
+    ],
+)
+def test_status_acompanhamento_particular_reflete_emissao(
+    workflow_status,
+    emissao_status,
+    status_esperado,
+):
+    solicitacao = SimpleNamespace(ativo=True)
+    workflow = SimpleNamespace(status=workflow_status)
+    emissao = (
+        SimpleNamespace(status=emissao_status)
+        if emissao_status is not None
+        else None
+    )
+
+    assert requisicoes._status_acompanhamento_particular(
+        solicitacao,
+        workflow,
+        emissao,
+    ) == status_esperado
 
 
 def test_empresas_emissoras_rastreiam_criacao_edicao_e_inativacao(
