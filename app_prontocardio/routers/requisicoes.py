@@ -516,14 +516,31 @@ def acompanhar_atendimentos_particulares(
                     workflow.status if workflow is not None else None
                 ),
                 emissao_id=emissao.id if emissao is not None else None,
+                lote_id=emissao.lote_id if emissao is not None else None,
                 emissao_status=(
                     emissao.status if emissao is not None else None
+                ),
+                cnpj_emissor=(
+                    emissao.cnpj_emissor if emissao is not None else None
+                ),
+                razao_social_emissor=(
+                    emissao.razao_social_emissor
+                    if emissao is not None
+                    else None
                 ),
                 numero_nfse=(
                     emissao.numero_nfse if emissao is not None else None
                 ),
+                protocolo=(
+                    emissao.protocolo if emissao is not None else None
+                ),
                 erro_emissao=(
                     emissao.erro if emissao is not None else None
+                ),
+                emissao_atualizada_em=(
+                    emissao.data_atualizacao
+                    if emissao is not None
+                    else None
                 ),
                 arquivo_disponivel=bool(
                     emissao is not None
