@@ -481,6 +481,67 @@ def test_acompanhamento_particular_filtra_status_apos_cruzamento(
     )
 
 
+def test_acompanhamento_particular_expoe_detalhes_da_nfse_emitida(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    _solicitacao, emissao, _arquivo = _criar_emissao_emitida(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    data_referencia = date(2026, 7, 29)
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_atendimentos_particulares',
+        lambda _session, _filtros: [
+            {
+                'codigo_atendimento': CODIGO_ATENDIMENTO,
+                'codigo_paciente': 789,
+                'codigo_convenio': 3,
+                'nome_paciente': 'MARIA DA SILVA',
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Ambulatório',
+                'data_atendimento': datetime(2026, 7, 29, 8, 30),
+                'data_alta': None,
+                'valor_conta': Decimal('385.50'),
+                'quantidade_lancamentos': 2,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_procedimentos_atendimentos',
+        lambda codigos, _session: (
+            {codigo: [] for codigo in codigos},
+            True,
+        ),
+    )
+
+    response = requisicoes.acompanhar_atendimentos_particulares(
+        usuario_teste,
+        session,
+        object(),
+        AcompanhamentoParticularFilter(
+            data_inicio=data_referencia,
+            data_fim=data_referencia,
+        ),
+    )
+
+    item = response.atendimentos[0]
+    assert item.status == StatusAcompanhamentoParticular.EMITIDA
+    assert item.emissao_id == emissao.id
+    assert item.lote_id == emissao.lote_id
+    assert item.emissao_status == StatusEmissaoNfse.EMITIDA
+    assert item.cnpj_emissor == EMPRESA_CNPJ
+    assert item.razao_social_emissor == EMPRESA_RAZAO_SOCIAL
+    assert item.numero_nfse == '98765'
+    assert item.protocolo == 'PROTOCOLO-98765'
+    assert item.emissao_atualizada_em == emissao.data_atualizacao
+    assert item.arquivo_disponivel is True
+
+
 def test_acompanhamento_particular_limita_previa_diaria_a_quatro_bolinhas(
     session,
     usuario_teste,
