@@ -366,6 +366,14 @@ def test_acompanhamento_particular_cruza_atendimentos_com_solicitacoes(
             },
         ],
     )
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_procedimentos_atendimentos',
+        lambda codigos, _session: (
+            {codigo: [] for codigo in codigos},
+            True,
+        ),
+    )
 
     response = requisicoes.acompanhar_atendimentos_particulares(
         usuario_teste,
@@ -394,7 +402,13 @@ def test_acompanhamento_particular_cruza_atendimentos_com_solicitacoes(
         == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
     )
     assert response.resumo_diario[0].valor_total == Decimal('505.50')
+    assert [
+        paciente.inicial for paciente in response.resumo_diario[0].pacientes
+    ] == ['M', 'J']
+    assert response.resumo_diario[0].pacientes_restantes == 0
     assert response.atendimentos[0].solicitacao_id == solicitacao.id
+    assert response.atendimentos[0].solicitacao is not None
+    assert response.atendimentos[0].solicitacao.id == solicitacao.id
     assert response.atendimentos[0].status == (
         StatusAcompanhamentoParticular.PENDENTE_VALIDACAO
     )
@@ -465,6 +479,52 @@ def test_acompanhamento_particular_filtra_status_apos_cruzamento(
         response.atendimentos[0].codigo_atendimento
         == ATENDIMENTO_SEM_SOLICITACAO
     )
+
+
+def test_acompanhamento_particular_limita_previa_diaria_a_quatro_bolinhas(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    data_referencia = date(2026, 7, 29)
+    nomes = ['ALICE', 'BRUNO', 'CARLA', 'DANIEL', 'ELISA']
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_atendimentos_particulares',
+        lambda _session, _filtros: [
+            {
+                'codigo_atendimento': 900000 + indice,
+                'codigo_paciente': 800000 + indice,
+                'codigo_convenio': 3,
+                'nome_paciente': nome,
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Externo',
+                'data_atendimento': datetime(2026, 7, 29, 8, indice),
+                'data_alta': None,
+                'valor_conta': Decimal('10.00'),
+                'quantidade_lancamentos': 1,
+            }
+            for indice, nome in enumerate(nomes, start=1)
+        ],
+    )
+
+    response = requisicoes.acompanhar_atendimentos_particulares(
+        usuario_teste,
+        session,
+        object(),
+        AcompanhamentoParticularFilter(
+            data_inicio=data_referencia,
+            data_fim=data_referencia,
+        ),
+    )
+
+    resumo_dia = response.resumo_diario[0]
+    assert [paciente.inicial for paciente in resumo_dia.pacientes] == [
+        'A',
+        'B',
+        'C',
+    ]
+    assert resumo_dia.pacientes_restantes == 2
 
 
 def test_acompanhamento_particular_exige_periodo_em_ordem_cronologica():
