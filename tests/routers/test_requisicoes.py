@@ -573,13 +573,33 @@ def test_acompanhamento_particular_filtra_status_apos_cruzamento(
         ),
     )
 
-    assert response.total_periodo == TOTAL_ATENDIMENTOS_ACOMPANHAMENTO
+    assert response.total_periodo == 1
+    assert response.valor_total_periodo == Decimal('120.00')
     assert response.total == 1
     assert len(response.atendimentos) == 1
     assert (
         response.atendimentos[0].codigo_atendimento
         == ATENDIMENTO_SEM_SOLICITACAO
     )
+    resumo = {
+        item.status: item
+        for item in response.resumo_status
+    }
+    assert (
+        resumo[StatusAcompanhamentoParticular.SEM_SOLICITACAO].quantidade
+        == 1
+    )
+    assert (
+        resumo[StatusAcompanhamentoParticular.PENDENTE_VALIDACAO].quantidade
+        == 0
+    )
+    assert len(response.resumo_diario) == 1
+    assert response.resumo_diario[0].total == 1
+    assert response.resumo_diario[0].valor_total == Decimal('120.00')
+    assert [
+        paciente.nome
+        for paciente in response.resumo_diario[0].pacientes
+    ] == ['JOÃO SEM SOLICITAÇÃO']
 
 
 def test_acompanhamento_particular_expoe_detalhes_da_nfse_emitida(
