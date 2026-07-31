@@ -594,6 +594,13 @@ def acompanhar_atendimentos_particulares(
             )
         )
 
+    if filtros_query.status is not None:
+        atendimentos = [
+            atendimento
+            for atendimento in atendimentos
+            if atendimento.status == filtros_query.status
+        ]
+
     resumo = {
         status: {
             'quantidade': 0,
@@ -649,12 +656,6 @@ def acompanhar_atendimentos_particulares(
         ),
         Decimal('0'),
     )
-    if filtros_query.status is not None:
-        atendimentos = [
-            atendimento
-            for atendimento in atendimentos
-            if atendimento.status == filtros_query.status
-        ]
 
     total = len(atendimentos)
     inicio = filtros_query.offset
