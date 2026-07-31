@@ -273,6 +273,11 @@ def _consultar_atendimentos_particulares(
         filtros.data_fim + timedelta(days=1),
         time.min,
     )
+    convenios = (
+        (filtros.convenio.value,)
+        if filtros.convenio is not None
+        else CONVENIOS_ACOMPANHAMENTO_PARTICULAR
+    )
     filtros_oracle = [
         ModelContaAtendimento.cd_atendimento.is_not(None),
         ModelContaAtendimento.cd_paciente.is_not(None),
@@ -281,7 +286,7 @@ def _consultar_atendimentos_particulares(
         ModelContaAtendimento.dt_atendimento >= inicio,
         ModelContaAtendimento.dt_atendimento < fim,
         func.upper(func.trim(ModelContaAtendimento.nm_convenio)).in_(
-            CONVENIOS_ACOMPANHAMENTO_PARTICULAR
+            convenios
         ),
     ]
     if filtros.codigo_atendimento is not None:

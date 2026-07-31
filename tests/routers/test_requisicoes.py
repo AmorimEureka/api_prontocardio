@@ -122,6 +122,39 @@ def test_consulta_acompanhamento_inclui_particular_e_prontorede():
     assert convenios == [('PARTICULAR', 'PRONTOREDE')]
 
 
+def test_consulta_acompanhamento_filtra_convenio_selecionado():
+    capturado = {}
+
+    class ResultadoVazio:
+        @staticmethod
+        def all():
+            return []
+
+    class OracleSession:
+        @staticmethod
+        def execute(query):
+            capturado['query'] = query
+            return ResultadoVazio()
+
+    requisicoes._consultar_atendimentos_particulares(
+        OracleSession(),
+        AcompanhamentoParticularFilter(
+            data_inicio=date(2026, 7, 1),
+            data_fim=date(2026, 7, 31),
+            convenio='PRONTOREDE',
+        ),
+    )
+
+    compilada = capturado['query'].compile(dialect=oracle.dialect())
+    convenios = [
+        tuple(valor)
+        for valor in compilada.params.values()
+        if isinstance(valor, (list, tuple))
+    ]
+
+    assert convenios == [('PRONTOREDE',)]
+
+
 def test_consulta_atendimento_combina_conta_e_paciente():
     class ResultadoAtendimento:
         @staticmethod
