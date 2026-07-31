@@ -84,7 +84,10 @@ router = APIRouter(
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 SessionOracle = Annotated[Session, Depends(get_session_oracle)]
-CONVENIO_PARTICULAR = 'PARTICULAR'
+CONVENIOS_ACOMPANHAMENTO_PARTICULAR = (
+    'PARTICULAR',
+    'PRONTOREDE',
+)
 
 
 def _texto(value) -> str | None:
@@ -277,8 +280,9 @@ def _consultar_atendimentos_particulares(
         ModelContaAtendimento.nm_paciente.is_not(None),
         ModelContaAtendimento.dt_atendimento >= inicio,
         ModelContaAtendimento.dt_atendimento < fim,
-        func.upper(func.trim(ModelContaAtendimento.nm_convenio))
-        == CONVENIO_PARTICULAR,
+        func.upper(func.trim(ModelContaAtendimento.nm_convenio)).in_(
+            CONVENIOS_ACOMPANHAMENTO_PARTICULAR
+        ),
     ]
     if filtros.codigo_atendimento is not None:
         filtros_oracle.append(
@@ -485,8 +489,8 @@ def acompanhar_atendimentos_particulares(
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail=(
-                'Não foi possível carregar os atendimentos particulares '
-                'no momento.'
+                'Não foi possível carregar os atendimentos dos convênios '
+                'Particular e Prontorede no momento.'
             ),
         ) from exc
 
