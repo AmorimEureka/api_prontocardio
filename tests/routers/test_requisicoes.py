@@ -115,11 +115,14 @@ def test_consulta_acompanhamento_inclui_particular_e_prontorede():
         tuple(valor)
         for valor in compilada.params.values()
         if isinstance(valor, (list, tuple))
-        and set(valor) == {'PARTICULAR', 'PRONTOREDE'}
+        and set(valor)
+        == {'PARTICULAR', 'PRONTOCARDIO REDE', 'PRONTOREDE'}
     ]
 
     assert ' IN (__[POSTCOMPILE_' in str(compilada)
-    assert convenios == [('PARTICULAR', 'PRONTOREDE')]
+    assert convenios == [
+        ('PARTICULAR', 'PRONTOCARDIO REDE', 'PRONTOREDE')
+    ]
 
 
 def test_consulta_acompanhamento_filtra_convenio_selecionado():
@@ -152,7 +155,37 @@ def test_consulta_acompanhamento_filtra_convenio_selecionado():
         if isinstance(valor, (list, tuple))
     ]
 
-    assert convenios == [('PRONTOREDE',)]
+    assert convenios == [('PRONTOCARDIO REDE', 'PRONTOREDE')]
+
+
+def test_consulta_acompanhamento_normaliza_nome_prontorede():
+    class ResultadoProntorede:
+        @staticmethod
+        def all():
+            return [
+                SimpleNamespace(
+                    _mapping={
+                        'codigo_atendimento': CODIGO_ATENDIMENTO,
+                        'convenio': 'PRONTOCARDIO REDE',
+                    }
+                )
+            ]
+
+    class OracleSession:
+        @staticmethod
+        def execute(_query):
+            return ResultadoProntorede()
+
+    atendimentos = requisicoes._consultar_atendimentos_particulares(
+        OracleSession(),
+        AcompanhamentoParticularFilter(
+            data_inicio=date(2026, 7, 1),
+            data_fim=date(2026, 7, 31),
+            convenio='PRONTOREDE',
+        ),
+    )
+
+    assert atendimentos[0]['convenio'] == 'PRONTOREDE'
 
 
 def test_consulta_atendimento_combina_conta_e_paciente():
