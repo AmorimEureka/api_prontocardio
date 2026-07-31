@@ -1114,6 +1114,56 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
     assert procedimentos[0].prestador == 'DR. TESTE'
 
 
+def test_workflow_filtra_pelos_campos_da_tela(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    solicitacao = _criar_solicitacao(
+        session,
+        usuario_teste,
+        monkeypatch,
+    )
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_procedimentos_atendimentos',
+        lambda codigos, _session: (
+            {codigo: [] for codigo in codigos},
+            True,
+        ),
+    )
+
+    fila = requisicoes.listar_workflow_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaWorkflowFilter(
+            codigo_atendimento=CODIGO_ATENDIMENTO,
+            nome_paciente='MARIA',
+            cpf='456789',
+            convenio='CONVÊNIO',
+            tipo_atendimento='Ambulatório',
+            local='Clinica 1',
+        ),
+        object(),
+    )
+
+    assert fila.total == 1
+    assert [item.id for item in fila.solicitacoes] == [solicitacao.id]
+
+    fila_sem_correspondencia = requisicoes.listar_workflow_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaWorkflowFilter(
+            codigo_atendimento=CODIGO_ATENDIMENTO + 1,
+            convenio='CONVÊNIO TESTE',
+        ),
+        object(),
+    )
+
+    assert fila_sem_correspondencia.total == 0
+    assert fila_sem_correspondencia.solicitacoes == []
+
+
 @pytest.mark.parametrize(
     'status',
     [

@@ -1948,10 +1948,16 @@ def listar_workflow_solicitacoes_nota(
             SolicitacaoNota.ativo.is_(True),
             filtro_status,
         ]
+    if filtros_query.codigo_atendimento is not None:
+        filtros.append(
+            SolicitacaoNota.codigo_atendimento == filtros_query.codigo_atendimento
+        )
     if nome_paciente := _texto(filtros_query.nome_paciente):
         filtros.append(SolicitacaoNota.nm_paciente.ilike(f'%{nome_paciente}%'))
     if cpf := _texto(filtros_query.cpf):
         filtros.append(SolicitacaoNota.nr_cpf.ilike(f'%{cpf}%'))
+    if convenio := _texto(filtros_query.convenio):
+        filtros.append(SolicitacaoNota.convenio.ilike(f'%{convenio}%'))
     if tipo_atendimento := _texto(filtros_query.tipo_atendimento):
         filtros.append(SolicitacaoNota.tipo_atendimento == tipo_atendimento)
     if local := _texto(filtros_query.local):
