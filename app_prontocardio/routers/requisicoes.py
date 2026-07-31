@@ -41,6 +41,7 @@ from app_prontocardio.schema import (
     AcompanhamentoParticularResumoDia,
     AcompanhamentoParticularResumoStatus,
     AtendimentoSolicitacaoNotaPublic,
+    ConvenioAcompanhamentoParticular,
     EmissaoNfseCreate,
     EmissaoNfsePublic,
     EmpresaEmissoraCreate,
@@ -84,9 +85,19 @@ router = APIRouter(
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 SessionOracle = Annotated[Session, Depends(get_session_oracle)]
-CONVENIOS_ACOMPANHAMENTO_PARTICULAR = (
-    'PARTICULAR',
-    'PRONTOREDE',
+CONVENIOS_ORACLE_ACOMPANHAMENTO_PARTICULAR = {
+    ConvenioAcompanhamentoParticular.PARTICULAR: ('PARTICULAR',),
+    ConvenioAcompanhamentoParticular.PRONTOREDE: (
+        'PRONTOCARDIO REDE',
+        'PRONTOREDE',
+    ),
+}
+CONVENIOS_ACOMPANHAMENTO_PARTICULAR = tuple(
+    nome_oracle
+    for nomes_oracle in (
+        CONVENIOS_ORACLE_ACOMPANHAMENTO_PARTICULAR.values()
+    )
+    for nome_oracle in nomes_oracle
 )
 
 
@@ -274,7 +285,7 @@ def _consultar_atendimentos_particulares(
         time.min,
     )
     convenios = (
-        (filtros.convenio.value,)
+        CONVENIOS_ORACLE_ACOMPANHAMENTO_PARTICULAR[filtros.convenio]
         if filtros.convenio is not None
         else CONVENIOS_ACOMPANHAMENTO_PARTICULAR
     )
@@ -372,10 +383,20 @@ def _consultar_atendimentos_particulares(
             contas.c.codigo_atendimento,
         )
     )
-    return [
-        dict(row._mapping)
-        for row in session_oracle.execute(query).all()
-    ]
+    atendimentos = []
+    for row in session_oracle.execute(query).all():
+        atendimento = dict(row._mapping)
+        convenio_oracle = str(
+            atendimento.get('convenio') or ''
+        ).strip().upper()
+        for convenio, nomes_oracle in (
+            CONVENIOS_ORACLE_ACOMPANHAMENTO_PARTICULAR.items()
+        ):
+            if convenio_oracle in nomes_oracle:
+                atendimento['convenio'] = convenio.value
+                break
+        atendimentos.append(atendimento)
+    return atendimentos
 
 
 def _solicitacoes_mais_recentes_por_atendimento(
