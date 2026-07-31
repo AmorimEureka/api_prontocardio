@@ -300,8 +300,10 @@ class SolicitacaoNotaWorkflowFilter(BaseModel):
         StatusWorkflowSolicitacao.PENDENTE_VALIDACAO
     )
     incluir_inativas: bool = False
+    codigo_atendimento: int | None = Field(default=None, gt=0)
     nome_paciente: str | None = Field(default=None, max_length=200)
     cpf: str | None = Field(default=None, max_length=20)
+    convenio: str | None = Field(default=None, max_length=100)
     tipo_atendimento: str | None = Field(default=None, max_length=50)
     local: str | None = Field(default=None, max_length=20)
     limit: int = Field(default=10, ge=1, le=100)
