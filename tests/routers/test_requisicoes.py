@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.dialects import oracle
 
 from app_prontocardio.app import app
 from app_prontocardio.models import (
@@ -85,6 +86,40 @@ def dados_atendimento():
         ],
         valor_total_procedimentos=Decimal('385.50'),
     )
+
+
+def test_consulta_acompanhamento_inclui_particular_e_prontorede():
+    capturado = {}
+
+    class ResultadoVazio:
+        @staticmethod
+        def all():
+            return []
+
+    class OracleSession:
+        @staticmethod
+        def execute(query):
+            capturado['query'] = query
+            return ResultadoVazio()
+
+    requisicoes._consultar_atendimentos_particulares(
+        OracleSession(),
+        AcompanhamentoParticularFilter(
+            data_inicio=date(2026, 7, 1),
+            data_fim=date(2026, 7, 31),
+        ),
+    )
+
+    compilada = capturado['query'].compile(dialect=oracle.dialect())
+    convenios = [
+        tuple(valor)
+        for valor in compilada.params.values()
+        if isinstance(valor, (list, tuple))
+        and set(valor) == {'PARTICULAR', 'PRONTOREDE'}
+    ]
+
+    assert ' IN (__[POSTCOMPILE_' in str(compilada)
+    assert convenios == [('PARTICULAR', 'PRONTOREDE')]
 
 
 def test_consulta_atendimento_combina_conta_e_paciente():
