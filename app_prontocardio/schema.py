@@ -330,6 +330,11 @@ class StatusAcompanhamentoParticular(str, Enum):
     INATIVA = 'INATIVA'
 
 
+class ConvenioAcompanhamentoParticular(str, Enum):
+    PARTICULAR = 'PARTICULAR'
+    PRONTOREDE = 'PRONTOREDE'
+
+
 class AcompanhamentoParticularFilter(BaseModel):
     data_inicio: date = Field(
         default_factory=lambda: datetime.now(
@@ -344,6 +349,7 @@ class AcompanhamentoParticularFilter(BaseModel):
     codigo_atendimento: int | None = Field(default=None, gt=0)
     nome_paciente: str | None = Field(default=None, max_length=200)
     tipo_atendimento: TipoAtendimento | None = None
+    convenio: ConvenioAcompanhamentoParticular | None = None
     status: StatusAcompanhamentoParticular | None = None
     limit: int = Field(default=25, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
