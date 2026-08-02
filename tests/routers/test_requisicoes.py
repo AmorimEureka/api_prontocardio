@@ -31,6 +31,7 @@ from app_prontocardio.schema import (
     EmpresaEmissoraCreate,
     EmpresaEmissoraStatusUpdate,
     EmpresaEmissoraUpdate,
+    ProcedimentoAtendimentoPublic,
     SolicitacaoNotaCreate,
     SolicitacaoNotaEmissaoFilter,
     SolicitacaoNotaEmpresaEmissoraInput,
@@ -78,6 +79,8 @@ def dados_atendimento():
                 'codigo': '40304361',
                 'descricao': 'ECOCARDIOGRAMA TRANSTORÁCICO',
                 'grupo': 'EXAMES CARDIOLÓGICOS',
+                'convenio': 'PARTICULAR',
+                'convenio_elegivel_nfse': True,
                 'quantidade': Decimal('1'),
                 'valor_total': Decimal('385.50'),
                 'realizado_em': datetime(2026, 7, 23, 10, 30),
@@ -85,6 +88,7 @@ def dados_atendimento():
             }
         ],
         valor_total_procedimentos=Decimal('385.50'),
+        valor_total_procedimentos_elegiveis_nfse=Decimal('385.50'),
     )
 
 
@@ -209,6 +213,7 @@ def test_consulta_atendimento_combina_conta_e_paciente():
                     cd_pro_fat='40304361',
                     descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
                     ds_gru_fat='EXAMES CARDIOLÓGICOS',
+                    nm_convenio='PARTICULAR',
                     qt_lancamento=Decimal('1'),
                     vl_total_conta=Decimal('385.50'),
                     dt_lancamento=datetime(2026, 7, 23, 10, 30),
@@ -248,6 +253,59 @@ def test_consulta_atendimento_combina_conta_e_paciente():
 
     assert response == dados_atendimento()
     assert response.valor_total_procedimentos == Decimal('385.50')
+    assert (
+        response.valor_total_procedimentos_elegiveis_nfse
+        == Decimal('385.50')
+    )
+    assert response.procedimentos_atendimento[0].convenio == 'PARTICULAR'
+    assert (
+        response.procedimentos_atendimento[0].convenio_elegivel_nfse
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    ('convenio', 'elegivel'),
+    [
+        ('PARTICULAR', True),
+        ('PRONTOREDE', True),
+        ('PRONTOCARDIO REDE', True),
+        ('ISSEC', False),
+        (None, False),
+    ],
+)
+def test_identifica_convenios_elegiveis_para_nfse(convenio, elegivel):
+    assert requisicoes._convenio_elegivel_nfse(convenio) is elegivel
+
+
+def test_total_nfse_considera_somente_convenios_elegiveis():
+    procedimentos = [
+        ProcedimentoAtendimentoPublic(
+            descricao='PARTICULAR',
+            convenio='PARTICULAR',
+            convenio_elegivel_nfse=True,
+            valor_total=Decimal('161.84'),
+        ),
+        ProcedimentoAtendimentoPublic(
+            descricao='PRONTOREDE',
+            convenio='PRONTOREDE',
+            convenio_elegivel_nfse=True,
+            valor_total=Decimal('30.00'),
+        ),
+        ProcedimentoAtendimentoPublic(
+            descricao='ISSEC',
+            convenio='ISSEC',
+            convenio_elegivel_nfse=False,
+            valor_total=Decimal('89.64'),
+        ),
+    ]
+
+    assert requisicoes._somar_valores_procedimentos(
+        procedimentos
+    ) == Decimal('281.48')
+    assert requisicoes._somar_valores_procedimentos_elegiveis_nfse(
+        procedimentos
+    ) == Decimal('191.84')
 
 
 @pytest.mark.parametrize(
@@ -1062,6 +1120,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
                     cd_pro_fat='40304361',
                     descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
                     ds_gru_fat='EXAMES CARDIOLÓGICOS',
+                    nm_convenio='PARTICULAR',
                     qt_lancamento=Decimal('1'),
                     vl_total_conta=Decimal('385.50'),
                     dt_lancamento=datetime(2026, 7, 23, 10, 30),
@@ -1072,6 +1131,7 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
                     cd_pro_fat='10101012',
                     descricao='CONSULTA EM CARDIOLOGIA',
                     ds_gru_fat='PROCEDIMENTOS',
+                    nm_convenio='ISSEC',
                     qt_lancamento=Decimal('1'),
                     vl_total_conta=Decimal('210.00'),
                     dt_lancamento=datetime(2026, 7, 23, 9, 45),
@@ -1101,9 +1161,17 @@ def test_workflow_pendente_inclui_procedimentos_do_atendimento(
     ]
     assert procedimentos[0].descricao == 'ECOCARDIOGRAMA TRANSTORÁCICO'
     assert procedimentos[0].grupo == 'EXAMES CARDIOLÓGICOS'
+    assert procedimentos[0].convenio == 'PARTICULAR'
+    assert procedimentos[0].convenio_elegivel_nfse is True
+    assert procedimentos[1].convenio == 'ISSEC'
+    assert procedimentos[1].convenio_elegivel_nfse is False
     assert procedimentos[0].quantidade == Decimal('1')
     assert procedimentos[0].valor_total == Decimal('385.50')
     assert fila.solicitacoes[0].valor_total_procedimentos == Decimal('595.50')
+    assert (
+        fila.solicitacoes[0].valor_total_procedimentos_elegiveis_nfse
+        == Decimal('385.50')
+    )
     assert procedimentos[0].realizado_em == datetime(
         2026,
         7,

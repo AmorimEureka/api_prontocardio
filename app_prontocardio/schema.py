@@ -204,6 +204,8 @@ class ProcedimentoAtendimentoPublic(BaseModel):
     codigo: str | None = None
     descricao: str
     grupo: str | None = None
+    convenio: str | None = None
+    convenio_elegivel_nfse: bool = False
     quantidade: Decimal | None = None
     valor_total: Decimal | None = None
     realizado_em: datetime | None = None
@@ -252,6 +254,7 @@ class AtendimentoSolicitacaoNotaPublic(BaseModel):
     )
     procedimentos_atendimento_disponiveis: bool = True
     valor_total_procedimentos: Decimal = Decimal('0')
+    valor_total_procedimentos_elegiveis_nfse: Decimal = Decimal('0')
 
 
 class SolicitacaoNotaPublic(AtendimentoSolicitacaoNotaPublic):
