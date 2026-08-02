@@ -106,6 +106,27 @@ def _texto(value) -> str | None:
     return texto or None
 
 
+def _normalizar_convenio_procedimento(value) -> str | None:
+    convenio = _texto(value)
+    if convenio is None:
+        return None
+
+    convenio_oracle = convenio.upper()
+    for convenio_acompanhamento, nomes_oracle in (
+        CONVENIOS_ORACLE_ACOMPANHAMENTO_PARTICULAR.items()
+    ):
+        if convenio_oracle in nomes_oracle:
+            return convenio_acompanhamento.value
+    return convenio
+
+
+def _convenio_elegivel_nfse(value) -> bool:
+    return _normalizar_convenio_procedimento(value) in {
+        ConvenioAcompanhamentoParticular.PARTICULAR.value,
+        ConvenioAcompanhamentoParticular.PRONTOREDE.value,
+    }
+
+
 def _telefone_com_ddd(ddd, telefone) -> str | None:
     numero = re.sub(r'\D', '', _texto(telefone) or '')
     if not numero:
@@ -726,6 +747,14 @@ def acompanhar_atendimentos_particulares(
                         )
                     )
                 ),
+                'valor_total_procedimentos_elegiveis_nfse': (
+                    _somar_valores_procedimentos_elegiveis_nfse(
+                        procedimentos_por_atendimento.get(
+                            atendimento.codigo_atendimento,
+                            [],
+                        )
+                    )
+                ),
                 'solicitacoes_anteriores': [
                     anterior
                     for anterior in historicos_por_atendimento.get(
@@ -793,6 +822,19 @@ def _somar_valores_procedimentos(
         (
             procedimento.valor_total or Decimal('0')
             for procedimento in procedimentos
+        ),
+        Decimal('0'),
+    )
+
+
+def _somar_valores_procedimentos_elegiveis_nfse(
+    procedimentos: list[ProcedimentoAtendimentoPublic],
+) -> Decimal:
+    return sum(
+        (
+            procedimento.valor_total or Decimal('0')
+            for procedimento in procedimentos
+            if procedimento.convenio_elegivel_nfse
         ),
         Decimal('0'),
     )
@@ -933,6 +975,7 @@ def _consultar_procedimentos_atendimentos(
                 ModelContaAtendimento.cd_pro_fat,
                 ModelContaAtendimento.descricao,
                 ModelContaAtendimento.ds_gru_fat,
+                ModelContaAtendimento.nm_convenio,
                 ModelContaAtendimento.qt_lancamento,
                 ModelContaAtendimento.vl_total_conta,
                 ModelContaAtendimento.dt_lancamento,
@@ -958,6 +1001,9 @@ def _consultar_procedimentos_atendimentos(
         descricao = _texto(row.descricao)
         if not codigo and not descricao:
             continue
+        convenio = _normalizar_convenio_procedimento(
+            getattr(row, 'nm_convenio', None)
+        )
         procedimentos_por_atendimento.setdefault(
             int(row.cd_atendimento),
             [],
@@ -966,6 +1012,8 @@ def _consultar_procedimentos_atendimentos(
                 codigo=codigo,
                 descricao=descricao or f'Procedimento {codigo}',
                 grupo=_texto(row.ds_gru_fat),
+                convenio=convenio,
+                convenio_elegivel_nfse=_convenio_elegivel_nfse(convenio),
                 quantidade=row.qt_lancamento,
                 valor_total=row.vl_total_conta,
                 realizado_em=row.dt_lancamento,
@@ -1306,6 +1354,11 @@ def _consultar_atendimento(
         procedimentos_atendimento_disponiveis=procedimentos_disponiveis,
         valor_total_procedimentos=_somar_valores_procedimentos(
             procedimentos_atendimento
+        ),
+        valor_total_procedimentos_elegiveis_nfse=(
+            _somar_valores_procedimentos_elegiveis_nfse(
+                procedimentos_atendimento
+            )
         ),
     )
 
@@ -2060,6 +2113,14 @@ def listar_workflow_solicitacoes_nota(
                     ),
                     'valor_total_procedimentos': (
                         _somar_valores_procedimentos(
+                            procedimentos_por_atendimento.get(
+                                solicitacao.codigo_atendimento,
+                                [],
+                            )
+                        )
+                    ),
+                    'valor_total_procedimentos_elegiveis_nfse': (
+                        _somar_valores_procedimentos_elegiveis_nfse(
                             procedimentos_por_atendimento.get(
                                 solicitacao.codigo_atendimento,
                                 [],
