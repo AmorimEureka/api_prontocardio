@@ -204,6 +204,7 @@ class ProcedimentoAtendimentoPublic(BaseModel):
     codigo: str | None = None
     descricao: str
     grupo: str | None = None
+    codigo_convenio: int | None = None
     convenio: str | None = None
     convenio_elegivel_nfse: bool = False
     quantidade: Decimal | None = None
