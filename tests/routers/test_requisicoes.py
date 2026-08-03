@@ -46,9 +46,11 @@ from app_prontocardio.services.airflow_nfse import (
     AirflowNfseIndisponivelError,
     AirflowNfseTriggerError,
 )
+from scripts import corrigir_convenios_solicitacoes_nfse
 
 CODIGO_ATENDIMENTO = 123456
 CODIGO_CONVENIO = 20
+CODIGO_CONVENIO_PARTICULAR = 3
 TOTAL_SOLICITACOES = 3
 TOTAL_SOLICITACOES_RECUSAS = 2
 QUANTIDADE_LOTE = 2
@@ -79,6 +81,7 @@ def dados_atendimento():
                 'codigo': '40304361',
                 'descricao': 'ECOCARDIOGRAMA TRANSTORÁCICO',
                 'grupo': 'EXAMES CARDIOLÓGICOS',
+                'codigo_convenio': CODIGO_CONVENIO_PARTICULAR,
                 'convenio': 'PARTICULAR',
                 'convenio_elegivel_nfse': True,
                 'quantidade': Decimal('1'),
@@ -213,6 +216,7 @@ def test_consulta_atendimento_combina_conta_e_paciente():
                     cd_pro_fat='40304361',
                     descricao='ECOCARDIOGRAMA TRANSTORÁCICO',
                     ds_gru_fat='EXAMES CARDIOLÓGICOS',
+                    cd_convenio=CODIGO_CONVENIO_PARTICULAR,
                     nm_convenio='PARTICULAR',
                     qt_lancamento=Decimal('1'),
                     vl_total_conta=Decimal('385.50'),
@@ -258,6 +262,10 @@ def test_consulta_atendimento_combina_conta_e_paciente():
         == Decimal('385.50')
     )
     assert response.procedimentos_atendimento[0].convenio == 'PARTICULAR'
+    assert (
+        response.procedimentos_atendimento[0].codigo_convenio
+        == CODIGO_CONVENIO_PARTICULAR
+    )
     assert (
         response.procedimentos_atendimento[0].convenio_elegivel_nfse
         is True
@@ -306,6 +314,48 @@ def test_total_nfse_considera_somente_convenios_elegiveis():
     assert requisicoes._somar_valores_procedimentos_elegiveis_nfse(
         procedimentos
     ) == Decimal('191.84')
+
+
+def test_convenio_da_solicitacao_considera_procedimentos_elegiveis():
+    atendimento = dados_atendimento()
+
+    codigo_convenio, convenio = (
+        requisicoes._dados_convenio_procedimentos_elegiveis_nfse(
+            atendimento.procedimentos_atendimento,
+            atendimento.codigo_convenio,
+            atendimento.convenio,
+        )
+    )
+
+    assert codigo_convenio == CODIGO_CONVENIO_PARTICULAR
+    assert convenio == 'PARTICULAR'
+
+
+def test_correcao_existente_exige_procedimento_e_valor_elegiveis():
+    atendimento = dados_atendimento()
+    solicitacao = SimpleNamespace(
+        procedimento='ECOCARDIOGRAMA TRANSTORÁCICO',
+        valor_nota=Decimal('385.50'),
+    )
+
+    corresponde = (
+        corrigir_convenios_solicitacoes_nfse
+        ._corresponde_aos_itens_elegiveis(
+            solicitacao,
+            atendimento.procedimentos_atendimento,
+        )
+    )
+    assert corresponde
+
+    solicitacao.valor_nota = Decimal('385.49')
+    corresponde = (
+        corrigir_convenios_solicitacoes_nfse
+        ._corresponde_aos_itens_elegiveis(
+            solicitacao,
+            atendimento.procedimentos_atendimento,
+        )
+    )
+    assert not corresponde
 
 
 @pytest.mark.parametrize(
@@ -387,8 +437,8 @@ def test_cadastro_busca_novamente_oracle_e_grava_snapshot(
     assert registro is not None
     assert registro.codigo_atendimento == CODIGO_ATENDIMENTO
     assert registro.nm_paciente == 'MARIA DA SILVA'
-    assert registro.codigo_convenio == CODIGO_CONVENIO
-    assert registro.convenio == 'CONVÊNIO TESTE'
+    assert registro.codigo_convenio == CODIGO_CONVENIO_PARTICULAR
+    assert registro.convenio == 'PARTICULAR'
     assert registro.nr_fone == '85999999999'
     assert registro.valor_nota == Decimal('60.75')
     assert registro.local == 'Clinica 2'
@@ -1208,7 +1258,7 @@ def test_workflow_filtra_pelos_campos_da_tela(
             codigo_atendimento=CODIGO_ATENDIMENTO,
             nome_paciente='MARIA',
             cpf='456789',
-            convenio='CONVÊNIO',
+            convenio='PARTICULAR',
             tipo_atendimento='Ambulatório',
             local='Clinica 1',
         ),
