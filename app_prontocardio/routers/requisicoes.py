@@ -840,6 +840,37 @@ def _somar_valores_procedimentos_elegiveis_nfse(
     )
 
 
+def _dados_convenio_procedimentos_elegiveis_nfse(
+    procedimentos: list[ProcedimentoAtendimentoPublic],
+    codigo_convenio_padrao: int,
+    convenio_padrao: str,
+) -> tuple[int, str]:
+    codigo_convenio = None
+    convenios = []
+    for procedimento in procedimentos:
+        if not procedimento.convenio_elegivel_nfse:
+            continue
+        convenio = _normalizar_convenio_procedimento(
+            procedimento.convenio
+        )
+        if convenio is None:
+            continue
+        if (
+            codigo_convenio is None
+            and procedimento.codigo_convenio is not None
+        ):
+            codigo_convenio = procedimento.codigo_convenio
+        if convenio not in convenios:
+            convenios.append(convenio)
+
+    if not convenios:
+        return codigo_convenio_padrao, convenio_padrao
+    return (
+        codigo_convenio or codigo_convenio_padrao,
+        ' / '.join(convenios),
+    )
+
+
 def _consultar_solicitacoes_atendimentos(
     codigos_atendimento: set[int],
     session_postgres: Session,
@@ -975,6 +1006,7 @@ def _consultar_procedimentos_atendimentos(
                 ModelContaAtendimento.cd_pro_fat,
                 ModelContaAtendimento.descricao,
                 ModelContaAtendimento.ds_gru_fat,
+                ModelContaAtendimento.cd_convenio,
                 ModelContaAtendimento.nm_convenio,
                 ModelContaAtendimento.qt_lancamento,
                 ModelContaAtendimento.vl_total_conta,
@@ -1012,6 +1044,11 @@ def _consultar_procedimentos_atendimentos(
                 codigo=codigo,
                 descricao=descricao or f'Procedimento {codigo}',
                 grupo=_texto(row.ds_gru_fat),
+                codigo_convenio=(
+                    int(row.cd_convenio)
+                    if getattr(row, 'cd_convenio', None) is not None
+                    else None
+                ),
                 convenio=convenio,
                 convenio_elegivel_nfse=_convenio_elegivel_nfse(convenio),
                 quantidade=row.qt_lancamento,
@@ -2583,12 +2620,19 @@ def cadastrar_solicitacao_nota(
         payload.codigo_atendimento,
         session_oracle,
     )
+    codigo_convenio, convenio = (
+        _dados_convenio_procedimentos_elegiveis_nfse(
+            atendimento.procedimentos_atendimento,
+            atendimento.codigo_convenio,
+            atendimento.convenio,
+        )
+    )
     solicitacao = SolicitacaoNota(
         codigo_atendimento=atendimento.codigo_atendimento,
         codigo_paciente=atendimento.codigo_paciente,
-        codigo_convenio=atendimento.codigo_convenio,
+        codigo_convenio=codigo_convenio,
         nm_paciente=atendimento.nm_paciente,
-        convenio=atendimento.convenio,
+        convenio=convenio,
         local=payload.local.value,
         procedimento=payload.procedimento,
         tipo_atendimento=atendimento.tipo_atendimento,
