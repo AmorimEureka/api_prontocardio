@@ -1,7 +1,7 @@
 import hashlib
 import re
 from datetime import datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from http import HTTPStatus
 from typing import Annotated
 from urllib.parse import quote
@@ -25,6 +25,7 @@ from app_prontocardio.models import (
     LoteEmissaoNfse,
     ModelContaAtendimento,
     ModelHpcPaciente,
+    NfseXml,
     SolicitacaoNota,
     SolicitacaoNotaEvento,
     SolicitacaoNotaWorkflow,
@@ -76,6 +77,11 @@ from app_prontocardio.services.airflow_nfse import (
     airflow_nfse_configurado,
     disparar_dag_emissao_nfse,
 )
+from app_prontocardio.services.iss_fortaleza import (
+    IssFortalezaIndisponivelError,
+    IssFortalezaNotaNaoEncontradaError,
+    baixar_pdf_nfse_publica,
+)
 
 router = APIRouter(
     prefix='/app_glosas/requisicoes',
@@ -99,6 +105,13 @@ CONVENIOS_ACOMPANHAMENTO_PARTICULAR = tuple(
     )
     for nome_oracle in nomes_oracle
 )
+CENTAVOS = Decimal('0.01')
+TAMANHO_CPF = 11
+TAMANHO_CNPJ = 14
+STATUS_NFSE_EMITIDA_ACOMPANHAMENTO = {
+    StatusAcompanhamentoParticular.EMITIDA,
+    StatusAcompanhamentoParticular.EMITIDA_DIRETAMENTE_ISS,
+}
 
 
 def _texto(value) -> str | None:
@@ -346,6 +359,7 @@ def _consultar_atendimentos_particulares(
             ModelContaAtendimento.cd_paciente.label('codigo_paciente'),
             ModelContaAtendimento.cd_convenio.label('codigo_convenio'),
             ModelContaAtendimento.nm_paciente.label('nome_paciente'),
+            ModelHpcPaciente.cpf.label('nr_cpf'),
             ModelContaAtendimento.nm_convenio.label('convenio'),
             ModelContaAtendimento.tp_atendimento.label(
                 'tipo_atendimento'
@@ -361,12 +375,18 @@ def _consultar_atendimentos_particulares(
             ).label('valor_conta'),
             func.count().label('quantidade_lancamentos'),
         )
+        .outerjoin(
+            ModelHpcPaciente,
+            ModelHpcPaciente.cd_paciente
+            == ModelContaAtendimento.cd_paciente,
+        )
         .where(*filtros_oracle)
         .group_by(
             ModelContaAtendimento.cd_atendimento,
             ModelContaAtendimento.cd_paciente,
             ModelContaAtendimento.cd_convenio,
             ModelContaAtendimento.nm_paciente,
+            ModelHpcPaciente.cpf,
             ModelContaAtendimento.nm_convenio,
             ModelContaAtendimento.tp_atendimento,
             ModelContaAtendimento.cd_reg,
@@ -379,6 +399,7 @@ def _consultar_atendimentos_particulares(
             contas.c.codigo_paciente,
             contas.c.codigo_convenio,
             contas.c.nome_paciente,
+            contas.c.nr_cpf,
             contas.c.convenio,
             contas.c.tipo_atendimento,
             func.min(contas.c.data_atendimento).label('data_atendimento'),
@@ -395,6 +416,7 @@ def _consultar_atendimentos_particulares(
             contas.c.codigo_paciente,
             contas.c.codigo_convenio,
             contas.c.nome_paciente,
+            contas.c.nr_cpf,
             contas.c.convenio,
             contas.c.tipo_atendimento,
         )
@@ -470,6 +492,168 @@ def _solicitacoes_mais_recentes_por_atendimento(
     return recentes
 
 
+def _somente_digitos(value) -> str:
+    return ''.join(
+        caractere
+        for caractere in str(value or '')
+        if caractere.isdigit()
+    )
+
+
+def _valor_monetario(value) -> Decimal:
+    if value in (None, ''):
+        return Decimal('0.00')
+    texto = str(value).strip().replace('R$', '').replace(' ', '')
+    if ',' in texto:
+        texto = texto.replace('.', '').replace(',', '.')
+    try:
+        return Decimal(texto).quantize(
+            CENTAVOS,
+            rounding=ROUND_HALF_UP,
+        )
+    except InvalidOperation:
+        return Decimal('0.00')
+
+
+def _valor_nfse_xml(nota: NfseXml) -> Decimal:
+    return _valor_monetario(
+        nota.valor_servicos or nota.valor_liquido_nfse
+    )
+
+
+def _cpf_nfse_xml(nota: NfseXml) -> str:
+    for documento in (nota.tomador_cpf, nota.tomador_cnpj):
+        digitos = _somente_digitos(documento)
+        if len(digitos) == TAMANHO_CPF:
+            return digitos
+    return ''
+
+
+def _numero_nfse_normalizado(value) -> str:
+    numero = str(value or '').strip()
+    return numero.lstrip('0') or ('0' if numero else '')
+
+
+def _consultar_nfses_externas_por_atendimento(  # noqa: PLR0912
+    atendimentos: list[dict],
+    solicitacoes_por_atendimento: dict[int, tuple],
+    session_postgres: Session,
+) -> dict[int, NfseXml]:
+    cpfs = set()
+    for atendimento in atendimentos:
+        dados_solicitacao = solicitacoes_por_atendimento.get(
+            atendimento['codigo_atendimento']
+        )
+        solicitacao = dados_solicitacao[0] if dados_solicitacao else None
+        cpf = _somente_digitos(
+            solicitacao.nr_cpf if solicitacao is not None else None
+        ) or _somente_digitos(atendimento.get('nr_cpf'))
+        if len(cpf) == TAMANHO_CPF:
+            cpfs.add(cpf)
+    if not cpfs:
+        return {}
+
+    notas = session_postgres.scalars(
+        select(NfseXml).where(
+            or_(
+                NfseXml.tomador_cpf.in_(cpfs),
+                NfseXml.tomador_cnpj.in_(cpfs),
+            ),
+            NfseXml.numero_nfse.is_not(None),
+            or_(
+                NfseXml.cancelamento_codigo.is_(None),
+                NfseXml.cancelamento_codigo == '',
+            ),
+        )
+    ).all()
+    if not notas:
+        return {}
+
+    emissoes_internas = session_postgres.execute(
+        select(EmissaoNfse.cnpj_emissor, EmissaoNfse.numero_nfse).where(
+            EmissaoNfse.status == StatusEmissaoNfse.EMITIDA.value,
+            EmissaoNfse.numero_nfse.is_not(None),
+        )
+    ).all()
+    identidades_internas = {
+        (
+            _somente_digitos(cnpj),
+            _numero_nfse_normalizado(numero),
+        )
+        for cnpj, numero in emissoes_internas
+        if cnpj
+    }
+    numeros_internos_sem_cnpj = {
+        _numero_nfse_normalizado(numero)
+        for cnpj, numero in emissoes_internas
+        if not cnpj
+    }
+
+    notas_por_chave: dict[tuple[str, Decimal], list[NfseXml]] = {}
+    for nota in notas:
+        identidade = (
+            _somente_digitos(nota.prestador_cnpj),
+            _numero_nfse_normalizado(nota.numero_nfse),
+        )
+        if (
+            identidade in identidades_internas
+            or identidade[1] in numeros_internos_sem_cnpj
+        ):
+            continue
+        cpf = _cpf_nfse_xml(nota)
+        valor = _valor_nfse_xml(nota)
+        if not cpf or valor <= 0:
+            continue
+        notas_por_chave.setdefault((cpf, valor), []).append(nota)
+
+    correspondencias = {}
+    for atendimento in sorted(
+        atendimentos,
+        key=lambda item: (
+            item.get('data_atendimento') or datetime.min,
+            item['codigo_atendimento'],
+        ),
+    ):
+        codigo_atendimento = atendimento['codigo_atendimento']
+        dados_solicitacao = solicitacoes_por_atendimento.get(
+            codigo_atendimento
+        )
+        solicitacao = dados_solicitacao[0] if dados_solicitacao else None
+        cpf = _somente_digitos(
+            solicitacao.nr_cpf if solicitacao is not None else None
+        ) or _somente_digitos(atendimento.get('nr_cpf'))
+        valores = []
+        if solicitacao is not None and solicitacao.valor_nota is not None:
+            valores.append(_valor_monetario(solicitacao.valor_nota))
+        valor_conta = _valor_monetario(atendimento.get('valor_conta'))
+        if valor_conta not in valores:
+            valores.append(valor_conta)
+
+        candidatos = []
+        chave_escolhida = None
+        for valor in valores:
+            chave = (cpf, valor)
+            if notas_por_chave.get(chave):
+                candidatos = notas_por_chave[chave]
+                chave_escolhida = chave
+                break
+        if not candidatos or chave_escolhida is None:
+            continue
+
+        data_atendimento = atendimento.get('data_atendimento')
+
+        def proximidade(nota: NfseXml):
+            if nota.data_hora is None or data_atendimento is None:
+                return (1, float('inf'), nota.row_hash)
+            diferenca = (nota.data_hora - data_atendimento).total_seconds()
+            return (0 if diferenca >= 0 else 1, abs(diferenca), nota.row_hash)
+
+        nota = min(candidatos, key=proximidade)
+        candidatos.remove(nota)
+        correspondencias[codigo_atendimento] = nota
+    return correspondencias
+
+
 def _status_acompanhamento_particular(
     solicitacao: SolicitacaoNota | None,
     workflow: SolicitacaoNotaWorkflow | None,
@@ -511,7 +695,7 @@ def _status_acompanhamento_particular(
     status_code=HTTPStatus.OK,
     response_model=AcompanhamentoParticularList,
 )
-def acompanhar_atendimentos_particulares(
+def acompanhar_atendimentos_particulares(  # noqa: PLR0912, PLR0915
     usuario_atual: ValidaUsuarioAtual,
     session_postgres: SessionPostgres,
     session_oracle: SessionOracle,
@@ -529,6 +713,13 @@ def acompanhar_atendimentos_particulares(
                     atendimento['codigo_atendimento']
                     for atendimento in atendimentos_oracle
                 },
+                session_postgres,
+            )
+        )
+        nfses_externas_por_atendimento = (
+            _consultar_nfses_externas_por_atendimento(
+                atendimentos_oracle,
+                solicitacoes_por_atendimento,
                 session_postgres,
             )
         )
@@ -551,10 +742,24 @@ def acompanhar_atendimentos_particulares(
         else:
             solicitacao, workflow, emissao, arquivo_id = dados_solicitacao
 
+        nfse_externa = nfses_externas_por_atendimento.get(
+            atendimento['codigo_atendimento']
+        )
         status = _status_acompanhamento_particular(
             solicitacao,
             workflow,
             emissao,
+        )
+        if (
+            nfse_externa is not None
+            and status != StatusAcompanhamentoParticular.EMITIDA
+        ):
+            status = (
+                StatusAcompanhamentoParticular.EMITIDA_DIRETAMENTE_ISS
+            )
+        emissao_externa = (
+            status
+            == StatusAcompanhamentoParticular.EMITIDA_DIRETAMENTE_ISS
         )
         atendimentos.append(
             AcompanhamentoParticularItem(
@@ -572,15 +777,48 @@ def acompanhar_atendimentos_particulares(
                     emissao.status if emissao is not None else None
                 ),
                 cnpj_emissor=(
-                    emissao.cnpj_emissor if emissao is not None else None
+                    nfse_externa.prestador_cnpj
+                    if emissao_externa
+                    else (
+                        emissao.cnpj_emissor
+                        if emissao is not None
+                        else None
+                    )
                 ),
                 razao_social_emissor=(
-                    emissao.razao_social_emissor
-                    if emissao is not None
-                    else None
+                    nfse_externa.prestador_razao_social
+                    if emissao_externa
+                    else (
+                        emissao.razao_social_emissor
+                        if emissao is not None
+                        else None
+                    )
                 ),
                 numero_nfse=(
-                    emissao.numero_nfse if emissao is not None else None
+                    nfse_externa.numero_nfse
+                    if emissao_externa
+                    else (
+                        emissao.numero_nfse
+                        if emissao is not None
+                        else None
+                    )
+                ),
+                codigo_verificacao_nfse=(
+                    nfse_externa.codigo_verificacao_nfse
+                    if emissao_externa
+                    else None
+                ),
+                valor_nfse=(
+                    _valor_nfse_xml(nfse_externa)
+                    if emissao_externa
+                    else (
+                        solicitacao.valor_nota
+                        if solicitacao is not None
+                        else None
+                    )
+                ),
+                nfse_externa_row_hash=(
+                    nfse_externa.row_hash if emissao_externa else None
                 ),
                 protocolo=(
                     emissao.protocolo if emissao is not None else None
@@ -589,14 +827,30 @@ def acompanhar_atendimentos_particulares(
                     emissao.erro if emissao is not None else None
                 ),
                 emissao_atualizada_em=(
-                    emissao.data_atualizacao
-                    if emissao is not None
-                    else None
+                    nfse_externa.data_hora
+                    if emissao_externa
+                    else (
+                        emissao.data_atualizacao
+                        if emissao is not None
+                        else None
+                    )
                 ),
                 arquivo_disponivel=bool(
-                    emissao is not None
-                    and emissao.status == StatusEmissaoNfse.EMITIDA.value
-                    and arquivo_id is not None
+                    (
+                        emissao_externa
+                        and nfse_externa.numero_nfse
+                        and nfse_externa.codigo_verificacao_nfse
+                        and len(
+                            _somente_digitos(nfse_externa.prestador_cnpj)
+                        )
+                        == TAMANHO_CNPJ
+                    )
+                    or (
+                        emissao is not None
+                        and emissao.status
+                        == StatusEmissaoNfse.EMITIDA.value
+                        and arquivo_id is not None
+                    )
                 ),
                 solicitada_em=(
                     solicitacao.data_criacao
@@ -604,12 +858,16 @@ def acompanhar_atendimentos_particulares(
                     else None
                 ),
                 atualizada_em=(
-                    emissao.data_atualizacao
-                    if emissao is not None
+                    nfse_externa.data_hora
+                    if emissao_externa
                     else (
-                        workflow.data_atualizacao
-                        if workflow is not None
-                        else None
+                        emissao.data_atualizacao
+                        if emissao is not None
+                        else (
+                            workflow.data_atualizacao
+                            if workflow is not None
+                            else None
+                        )
                     )
                 ),
             )
@@ -666,7 +924,7 @@ def acompanhar_atendimentos_particulares(
                 status=atendimento.status,
             )
         )
-        if atendimento.status == StatusAcompanhamentoParticular.EMITIDA:
+        if atendimento.status in STATUS_NFSE_EMITIDA_ACOMPANHAMENTO:
             resumo_dia['emitidas'] += 1
 
     total_periodo = len(atendimentos)
@@ -2479,6 +2737,87 @@ def solicitar_emissao_nfse(
             'Solicitação registrada e DAG do Airflow acionada. '
             f'Execução: {lote.dag_run_id}.'
         ),
+    )
+
+
+@router.get(
+    '/nfse-externas/{row_hash}/pdf',
+    status_code=HTTPStatus.OK,
+    response_class=Response,
+)
+def consultar_pdf_nfse_externa(
+    row_hash: str,
+    usuario_atual: ValidaUsuarioAtual,
+    session_postgres: SessionPostgres,
+    download: bool = Query(default=False),
+):
+    del usuario_atual
+    nota = session_postgres.get(NfseXml, row_hash)
+    if nota is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='NFS-e externa não encontrada.',
+        )
+    if nota.cancelamento_codigo:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A NFS-e externa está cancelada.',
+        )
+
+    numero_nfse = _texto(nota.numero_nfse)
+    codigo_verificacao = _texto(nota.codigo_verificacao_nfse)
+    prestador_cnpj = _somente_digitos(nota.prestador_cnpj)
+    if (
+        not numero_nfse
+        or not codigo_verificacao
+        or len(prestador_cnpj) != TAMANHO_CNPJ
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'A NFS-e externa não possui os dados necessários para '
+                'consultar o PDF no ISS Fortaleza.'
+            ),
+        )
+
+    try:
+        conteudo = baixar_pdf_nfse_publica(
+            numero_nfse,
+            codigo_verificacao,
+            prestador_cnpj,
+        )
+    except IssFortalezaNotaNaoEncontradaError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except IssFortalezaIndisponivelError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    identificador = ''.join(
+        caractere
+        for caractere in numero_nfse
+        if caractere.isalnum() or caractere in '-_'
+    )[:80]
+    nome_arquivo = (
+        f'NFS-e {identificador or row_hash[:12]} - ISS Fortaleza.pdf'
+    )
+    fallback = f'nfse-iss-{identificador or row_hash[:12]}.pdf'
+    disposicao = 'attachment' if download else 'inline'
+    return Response(
+        content=conteudo,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': (
+                f'{disposicao}; filename="{fallback}"; '
+                f"filename*=UTF-8''{quote(nome_arquivo, safe='')}"
+            ),
+            'Content-Length': str(len(conteudo)),
+            'X-Content-Type-Options': 'nosniff',
+        },
     )
 
 
