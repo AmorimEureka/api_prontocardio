@@ -3,6 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from http import HTTPStatus
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi import HTTPException
@@ -557,7 +558,14 @@ def test_acompanhamento_particular_cruza_atendimentos_com_solicitacoes(
                 'nome_paciente': 'MARIA DA SILVA',
                 'convenio': 'PARTICULAR',
                 'tipo_atendimento': 'Ambulatório',
-                'data_atendimento': datetime(2026, 7, 29, 8, 30),
+                'data_atendimento': datetime(
+                    2026,
+                    7,
+                    29,
+                    8,
+                    30,
+                    tzinfo=ZoneInfo('America/Sao_Paulo'),
+                ),
                 'data_alta': None,
                 'valor_conta': Decimal('385.50'),
                 'quantidade_lancamentos': 2,
@@ -806,7 +814,14 @@ def test_acompanhamento_particular_identifica_nfse_emitida_direto_no_iss(
                 'nr_cpf': '123.456.789-01',
                 'convenio': 'PARTICULAR',
                 'tipo_atendimento': 'Ambulatório',
-                'data_atendimento': datetime(2026, 7, 29, 8, 30),
+                'data_atendimento': datetime(
+                    2026,
+                    7,
+                    29,
+                    8,
+                    30,
+                    tzinfo=ZoneInfo('America/Sao_Paulo'),
+                ),
                 'data_alta': None,
                 'valor_conta': Decimal('385.50'),
                 'quantidade_lancamentos': 2,
