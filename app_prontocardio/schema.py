@@ -310,8 +310,22 @@ class SolicitacaoNotaWorkflowFilter(BaseModel):
     convenio: str | None = Field(default=None, max_length=100)
     tipo_atendimento: str | None = Field(default=None, max_length=50)
     local: str | None = Field(default=None, max_length=20)
+    data_inicio: date | None = None
+    data_fim: date | None = None
     limit: int = Field(default=10, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
+
+    @model_validator(mode='after')
+    def validate_periodo(self):
+        if (
+            self.data_inicio is not None
+            and self.data_fim is not None
+            and self.data_fim < self.data_inicio
+        ):
+            raise ValueError(
+                'A data final deve ser igual ou posterior à data inicial.'
+            )
+        return self
 
 
 class SolicitacaoNotaFilter(BaseModel):

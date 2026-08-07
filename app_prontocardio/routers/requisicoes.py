@@ -2322,6 +2322,19 @@ def listar_workflow_solicitacoes_nota(
         filtros.append(SolicitacaoNota.tipo_atendimento == tipo_atendimento)
     if local := _texto(filtros_query.local):
         filtros.append(SolicitacaoNota.local == local)
+    if filtros_query.data_inicio is not None:
+        filtros.append(
+            SolicitacaoNota.data_criacao
+            >= datetime.combine(filtros_query.data_inicio, time.min)
+        )
+    if filtros_query.data_fim is not None:
+        filtros.append(
+            SolicitacaoNota.data_criacao
+            < datetime.combine(
+                filtros_query.data_fim + timedelta(days=1),
+                time.min,
+            )
+        )
 
     criador = aliased(Usuario)
     validador = aliased(Usuario)

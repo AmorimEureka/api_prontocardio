@@ -1372,6 +1372,14 @@ def test_workflow_filtra_pelos_campos_da_tela(
         usuario_teste,
         monkeypatch,
     )
+    registro_solicitacao = session.get(SolicitacaoNota, solicitacao.id)
+    registro_solicitacao.data_criacao = datetime(2026, 7, 23, 10, 30)
+    session.commit()
+    assert session.scalar(
+        select(SolicitacaoNota.data_criacao).where(
+            SolicitacaoNota.id == solicitacao.id
+        )
+    ) == datetime(2026, 7, 23, 10, 30)
     monkeypatch.setattr(
         requisicoes,
         '_consultar_procedimentos_atendimentos',
@@ -1391,6 +1399,8 @@ def test_workflow_filtra_pelos_campos_da_tela(
             convenio='PARTICULAR',
             tipo_atendimento='Ambulatório',
             local='Clinica 1',
+            data_inicio=date(2026, 7, 23),
+            data_fim=date(2026, 7, 23),
         ),
         object(),
     )
@@ -1410,6 +1420,30 @@ def test_workflow_filtra_pelos_campos_da_tela(
 
     assert fila_sem_correspondencia.total == 0
     assert fila_sem_correspondencia.solicitacoes == []
+
+    fila_fora_do_periodo = requisicoes.listar_workflow_solicitacoes_nota(
+        usuario_teste,
+        session,
+        SolicitacaoNotaWorkflowFilter(
+            data_inicio=date(2026, 7, 24),
+            data_fim=date(2026, 7, 31),
+        ),
+        object(),
+    )
+
+    assert fila_fora_do_periodo.total == 0
+    assert fila_fora_do_periodo.solicitacoes == []
+
+
+def test_workflow_rejeita_periodo_de_solicitacao_invertido():
+    with pytest.raises(
+        ValidationError,
+        match='A data final deve ser igual ou posterior à data inicial',
+    ):
+        SolicitacaoNotaWorkflowFilter(
+            data_inicio=date(2026, 7, 31),
+            data_fim=date(2026, 7, 1),
+        )
 
 
 @pytest.mark.parametrize(
