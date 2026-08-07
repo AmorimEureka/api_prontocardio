@@ -346,10 +346,12 @@ class NfseXml:
         init=False,
     )
     tomador_cnpj: Mapped[str | None] = mapped_column(String, init=False)
+    tomador_cpf: Mapped[str | None] = mapped_column(String, init=False)
     tomador_razao_social: Mapped[str | None] = mapped_column(
         String,
         init=False,
     )
+    valor_servicos: Mapped[str | None] = mapped_column(String, init=False)
     valor_pis: Mapped[str | None] = mapped_column(String, init=False)
     valor_cofins: Mapped[str | None] = mapped_column(String, init=False)
     valor_csll: Mapped[str | None] = mapped_column(String, init=False)
@@ -358,6 +360,10 @@ class NfseXml:
     outras_retencoes: Mapped[str | None] = mapped_column(String, init=False)
     valor_iss_retido: Mapped[str | None] = mapped_column(String, init=False)
     valor_liquido_nfse: Mapped[str | None] = mapped_column(String, init=False)
+    codigo_verificacao_nfse: Mapped[str | None] = mapped_column(
+        String,
+        init=False,
+    )
     cancelamento_codigo: Mapped[str | None] = mapped_column(String, init=False)
 
 

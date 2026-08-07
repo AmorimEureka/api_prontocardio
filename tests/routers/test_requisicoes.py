@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.dialects import oracle
 
 from app_prontocardio.app import app
@@ -17,6 +17,7 @@ from app_prontocardio.models import (
     EmpresaEmissora,
     EmpresaEmissoraEvento,
     LoteEmissaoNfse,
+    NfseXml,
     SolicitacaoNota,
     SolicitacaoNotaEvento,
     SolicitacaoNotaWorkflow,
@@ -769,6 +770,120 @@ def test_acompanhamento_particular_expoe_detalhes_da_nfse_emitida(
     assert item.protocolo == 'PROTOCOLO-98765'
     assert item.emissao_atualizada_em == emissao.data_atualizacao
     assert item.arquivo_disponivel is True
+
+
+def test_acompanhamento_particular_identifica_nfse_emitida_direto_no_iss(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    session.execute(
+        insert(NfseXml).values(
+            row_hash='nfse-externa-iss',
+            data_hora=datetime(2026, 7, 29, 10, 15),
+            numero_nfse='54321',
+            codigo_verificacao_nfse='123456789',
+            prestador_cnpj='59932105000121',
+            prestador_razao_social='CLINICA PRONTOCARDIO LTDA',
+            tomador_cpf='12345678901',
+            tomador_cnpj=None,
+            tomador_razao_social='MARIA DA SILVA',
+            valor_servicos='385.50',
+            valor_liquido_nfse='385.50',
+            cancelamento_codigo=None,
+        )
+    )
+    session.commit()
+    monkeypatch.setattr(
+        requisicoes,
+        '_consultar_atendimentos_particulares',
+        lambda _session, _filtros: [
+            {
+                'codigo_atendimento': CODIGO_ATENDIMENTO,
+                'codigo_paciente': 789,
+                'codigo_convenio': 3,
+                'nome_paciente': 'MARIA DA SILVA',
+                'nr_cpf': '123.456.789-01',
+                'convenio': 'PARTICULAR',
+                'tipo_atendimento': 'Ambulatório',
+                'data_atendimento': datetime(2026, 7, 29, 8, 30),
+                'data_alta': None,
+                'valor_conta': Decimal('385.50'),
+                'quantidade_lancamentos': 2,
+            },
+        ],
+    )
+
+    response = requisicoes.acompanhar_atendimentos_particulares(
+        usuario_teste,
+        session,
+        object(),
+        AcompanhamentoParticularFilter(
+            data_inicio=date(2026, 7, 29),
+            data_fim=date(2026, 7, 29),
+        ),
+    )
+
+    item = response.atendimentos[0]
+    assert item.status == (
+        StatusAcompanhamentoParticular.EMITIDA_DIRETAMENTE_ISS
+    )
+    assert item.solicitacao_id is None
+    assert item.numero_nfse == '54321'
+    assert item.codigo_verificacao_nfse == '123456789'
+    assert item.valor_nfse == Decimal('385.50')
+    assert item.nfse_externa_row_hash == 'nfse-externa-iss'
+    assert item.arquivo_disponivel is True
+    assert response.resumo_diario[0].emitidas == 1
+    assert response.resumo_diario[0].pendentes == 0
+    resumo = {
+        resumo.status: resumo.quantidade
+        for resumo in response.resumo_status
+    }
+    assert (
+        resumo[
+            StatusAcompanhamentoParticular.EMITIDA_DIRETAMENTE_ISS
+        ]
+        == 1
+    )
+
+
+def test_pdf_nfse_externa_e_obtido_pela_validacao_publica_do_iss(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    session.execute(
+        insert(NfseXml).values(
+            row_hash='nfse-externa-pdf',
+            numero_nfse='54321',
+            codigo_verificacao_nfse='123456789',
+            prestador_cnpj='59932105000121',
+            cancelamento_codigo=None,
+        )
+    )
+    session.commit()
+    chamadas = []
+    monkeypatch.setattr(
+        requisicoes,
+        'baixar_pdf_nfse_publica',
+        lambda numero, codigo, cnpj: (
+            chamadas.append((numero, codigo, cnpj))
+            or b'%PDF-1.7\nnota externa'
+        ),
+    )
+
+    response = requisicoes.consultar_pdf_nfse_externa(
+        'nfse-externa-pdf',
+        usuario_teste,
+        session,
+        download=False,
+    )
+
+    assert response.media_type == 'application/pdf'
+    assert response.body == b'%PDF-1.7\nnota externa'
+    assert chamadas == [('54321', '123456789', '59932105000121')]
+    assert response.headers['content-disposition'].startswith('inline;')
 
 
 def test_acompanhamento_particular_limita_previa_diaria_a_quatro_bolinhas(
