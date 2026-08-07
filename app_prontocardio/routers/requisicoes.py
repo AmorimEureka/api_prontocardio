@@ -521,6 +521,14 @@ def _valor_nfse_xml(nota: NfseXml) -> Decimal:
     )
 
 
+def _data_hora_local_naive(value: datetime | None) -> datetime | None:
+    if value is None or value.tzinfo is None:
+        return value
+    return value.astimezone(ZoneInfo('America/Sao_Paulo')).replace(
+        tzinfo=None
+    )
+
+
 def _cpf_nfse_xml(nota: NfseXml) -> str:
     for documento in (nota.tomador_cpf, nota.tomador_cnpj):
         digitos = _somente_digitos(documento)
@@ -610,7 +618,8 @@ def _consultar_nfses_externas_por_atendimento(  # noqa: PLR0912
     for atendimento in sorted(
         atendimentos,
         key=lambda item: (
-            item.get('data_atendimento') or datetime.min,
+            _data_hora_local_naive(item.get('data_atendimento'))
+            or datetime.min,
             item['codigo_atendimento'],
         ),
     ):
@@ -640,12 +649,15 @@ def _consultar_nfses_externas_por_atendimento(  # noqa: PLR0912
         if not candidatos or chave_escolhida is None:
             continue
 
-        data_atendimento = atendimento.get('data_atendimento')
+        data_atendimento = _data_hora_local_naive(
+            atendimento.get('data_atendimento')
+        )
 
         def proximidade(nota: NfseXml):
             if nota.data_hora is None or data_atendimento is None:
                 return (1, float('inf'), nota.row_hash)
-            diferenca = (nota.data_hora - data_atendimento).total_seconds()
+            data_nfse = _data_hora_local_naive(nota.data_hora)
+            diferenca = (data_nfse - data_atendimento).total_seconds()
             return (0 if diferenca >= 0 else 1, abs(diferenca), nota.row_hash)
 
         nota = min(candidatos, key=proximidade)
