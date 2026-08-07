@@ -332,6 +332,7 @@ class StatusAcompanhamentoParticular(str, Enum):
     PENDENTE_EMISSAO = 'PENDENTE_EMISSAO'
     PROCESSANDO = 'PROCESSANDO'
     EMITIDA = 'EMITIDA'
+    EMITIDA_DIRETAMENTE_ISS = 'EMITIDA_DIRETAMENTE_ISS'
     ERRO_EMISSAO = 'ERRO_EMISSAO'
     INATIVA = 'INATIVA'
 
@@ -374,6 +375,7 @@ class AcompanhamentoParticularItem(BaseModel):
     codigo_paciente: int
     codigo_convenio: int
     nome_paciente: str
+    nr_cpf: str | None = None
     convenio: str
     tipo_atendimento: str | None = None
     data_atendimento: datetime
@@ -389,6 +391,9 @@ class AcompanhamentoParticularItem(BaseModel):
     cnpj_emissor: str | None = None
     razao_social_emissor: str | None = None
     numero_nfse: str | None = None
+    codigo_verificacao_nfse: str | None = None
+    valor_nfse: Decimal | None = None
+    nfse_externa_row_hash: str | None = None
     protocolo: str | None = None
     erro_emissao: str | None = None
     emissao_atualizada_em: datetime | None = None
