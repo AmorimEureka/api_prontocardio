@@ -470,13 +470,12 @@ def _gerar_relatorios(  # noqa: PLR0913
                 ],
                 'situacao': (
                     {
-                        'item': 'item e remessa localizados',
-                        'guia_carteira': (
-                            'guia, carteira e remessa localizadas; serviço '
-                            'não localizado no Oracle'
+                        'data_guia_servico_carteira': (
+                            'data, guia, serviço, carteira e remessa '
+                            'localizados'
                         ),
-                        'competencia_servico_carteira': (
-                            'competência, serviço, carteira e remessa '
+                        'data_servico_carteira': (
+                            'data, serviço, carteira e remessa '
                             'localizados; guia não localizada no Oracle'
                         ),
                     }[
@@ -1126,20 +1125,14 @@ def main() -> None:  # noqa: PLR0915
             'linhas_localizadas_no_oracle': len(
                 classificacao_sem_processo_oracle.identificadas
             ),
-            'linhas_localizadas_chave_item': sum(
-                criterio == 'item'
+            'linhas_localizadas_chave_data_guia_servico_carteira': sum(
+                criterio == 'data_guia_servico_carteira'
                 for criterio in (
                     classificacao_sem_processo_oracle.criterios.values()
                 )
             ),
-            'linhas_localizadas_chave_guia_carteira': sum(
-                criterio == 'guia_carteira'
-                for criterio in (
-                    classificacao_sem_processo_oracle.criterios.values()
-                )
-            ),
-            'linhas_localizadas_chave_competencia_servico_carteira': sum(
-                criterio == 'competencia_servico_carteira'
+            'linhas_localizadas_chave_data_servico_carteira': sum(
+                criterio == 'data_servico_carteira'
                 for criterio in (
                     classificacao_sem_processo_oracle.criterios.values()
                 )

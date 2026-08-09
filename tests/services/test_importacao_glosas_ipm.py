@@ -13,16 +13,15 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     ChaveProcesso,
     associar_demonstrativos_a_processos,
     associar_processos_a_remessas,
-    chave_conta_demonstrativo,
-    chave_item_competencia_demonstrativo,
-    chave_item_competencia_oracle,
     chave_item_demonstrativo,
     chave_item_oracle,
+    chave_item_sem_guia_demonstrativo,
+    chave_item_sem_guia_oracle,
     classificar_demonstrativos_sem_processo_por_oracle,
     indexar_processos,
     normalizar_carteira,
     normalizar_competencia,
-    normalizar_mes_ano,
+    normalizar_data,
     resolver_item,
 )
 from scripts.importar_glosas_demonstrativo_ipm import (
@@ -136,6 +135,7 @@ def test_chave_do_item_ignora_zeros_a_esquerda_da_carteira():
     demo = demonstrativo(codigo_beneficiario='123.456.789-0')
     oracle = {
         'cd_remessa': 10,
+        'dt_competencia': date(2025, 12, 15),
         'nr_guia': 'guia-1',
         'cd_pro_fat': 'servico-1',
         'nr_carteira': '0000.123.456.789-0',
@@ -145,30 +145,62 @@ def test_chave_do_item_ignora_zeros_a_esquerda_da_carteira():
     assert normalizar_carteira('0002025080010920') == '2025080010920'
 
 
-def test_chave_da_conta_desconsidera_servico():
-    demo = demonstrativo(codigo_servico='SERVICO-DEMONSTRATIVO')
+def test_primeira_chave_exige_data_guia_servico_e_carteira():
+    demo = demonstrativo()
+    oracle = {
+        'cd_remessa': 10,
+        'dt_competencia': date(2025, 12, 15),
+        'nr_guia': 'GUIA-1',
+        'cd_pro_fat': 'SERVICO-1',
+        'nr_carteira': '001234567890',
+    }
+    chave = chave_item_demonstrativo(demo, 10)
 
-    assert chave_conta_demonstrativo(demo, 10) == (
-        10,
-        'GUIA-1',
-        '1234567890',
+    assert chave == chave_item_oracle(oracle)
+    assert chave != chave_item_oracle(
+        {**oracle, 'dt_competencia': date(2025, 12, 1)}
+    )
+    assert chave != chave_item_oracle({**oracle, 'nr_guia': 'OUTRA-GUIA'})
+    assert chave != chave_item_oracle(
+        {**oracle, 'cd_pro_fat': 'OUTRO-SERVICO'}
+    )
+    assert chave != chave_item_oracle(
+        {**oracle, 'nr_carteira': '009999999999'}
     )
 
 
-def test_chave_alternativa_usa_mes_ano_e_desconsidera_guia():
+def test_segunda_chave_usa_data_exata_e_desconsidera_guia():
     demo = demonstrativo(numero_guia_senha='GUIA-DEMONSTRATIVO')
     oracle = {
         'cd_remessa': 10,
-        'dt_competencia': date(2025, 12, 1),
+        'dt_competencia': date(2025, 12, 15),
         'nr_guia': 'GUIA-ORACLE',
         'cd_pro_fat': 'SERVICO-1',
         'nr_carteira': '001234567890',
     }
 
-    assert normalizar_mes_ano('15/12/2025') == (2025, 12)
+    assert normalizar_data('15/12/2025') == date(2025, 12, 15)
     assert (
-        chave_item_competencia_demonstrativo(demo, 10)
-        == chave_item_competencia_oracle(oracle)
+        chave_item_sem_guia_demonstrativo(demo, 10)
+        == chave_item_sem_guia_oracle(oracle)
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_oracle(
+        {**oracle, 'dt_competencia': date(2025, 12, 1)}
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_oracle(
+        {**oracle, 'cd_pro_fat': 'OUTRO-SERVICO'}
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_oracle(
+        {**oracle, 'nr_carteira': '009999999999'}
     )
 
 
@@ -210,6 +242,7 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
     )
     item_oracle_mesma_conta = {
         'cd_remessa': 40,
+        'dt_competencia': date(2025, 12, 15),
         'nr_guia': 'GUIA-1',
         'cd_pro_fat': 'SERVICO-ORACLE',
         'nr_carteira': '001234567890',
@@ -225,7 +258,7 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         'nr_guia': 'GUIA-ORACLE',
         'cd_pro_fat': 'SERVICO-COMPETENCIA',
         'nr_carteira': '001234567890',
-        'dt_competencia': date(2025, 12, 1),
+        'dt_competencia': date(2025, 12, 15),
     }
     itens_por_chave = {
         chave_item_demonstrativo(localizada, 10): [
@@ -270,32 +303,30 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
 
     assert classificacao.identificadas == {
         'localizada': 10,
-        'localizada-por-conta': 40,
         'localizada-por-competencia': 50,
     }
     assert classificacao.criterios == {
-        'localizada': 'item',
-        'localizada-por-conta': 'guia_carteira',
-        'localizada-por-competencia': 'competencia_servico_carteira',
+        'localizada': 'data_guia_servico_carteira',
+        'localizada-por-competencia': 'data_servico_carteira',
     }
     assert [
         item['id_registro'] for item in classificacao.sem_correspondencia
-    ] == ['ausente']
+    ] == ['ausente', 'localizada-por-conta']
     assert [
         (item['id_registro'], remessas)
         for item, remessas in classificacao.ambiguas
     ] == [('ambigua', (30, 31))]
 
 
-def test_nao_reclassifica_por_guia_e_carteira_quando_conta_e_ambigua():
+def test_nao_reclassifica_pela_segunda_chave_quando_conta_e_ambigua():
     linha = demonstrativo(
         id_registro='conta-ambigua',
-        codigo_servico='SERVICO-DEMONSTRATIVO',
     )
     item_oracle = {
         'cd_remessa': 10,
-        'nr_guia': 'GUIA-1',
-        'cd_pro_fat': 'SERVICO-ORACLE',
+        'dt_competencia': date(2025, 12, 15),
+        'nr_guia': 'GUIA-ORACLE',
+        'cd_pro_fat': 'SERVICO-1',
         'nr_carteira': '001234567890',
     }
 
@@ -304,8 +335,8 @@ def test_nao_reclassifica_por_guia_e_carteira_quando_conta_e_ambigua():
         {Decimal('100.00'): {10}},
         {
             chave_item_oracle(item_oracle): [
-                {'cd_reg': 100, 'cd_lancamento': 1},
-                {'cd_reg': 101, 'cd_lancamento': 2},
+                {**item_oracle, 'cd_reg': 100, 'cd_lancamento': 1},
+                {**item_oracle, 'cd_reg': 101, 'cd_lancamento': 2},
             ],
         },
     )
@@ -325,7 +356,7 @@ def test_chave_alternativa_nao_repete_correspondencia_da_chave_anterior():
         'nr_guia': 'OUTRA-GUIA',
         'cd_pro_fat': 'SERVICO-1',
         'nr_carteira': '001234567890',
-        'dt_competencia': date(2025, 12, 1),
+        'dt_competencia': date(2025, 12, 15),
     }
 
     classificacao = classificar_demonstrativos_sem_processo_por_oracle(
@@ -349,7 +380,7 @@ def test_chave_alternativa_nao_repete_correspondencia_da_chave_anterior():
         'prioridade-chave-anterior': 10,
     }
     assert classificacao.criterios == {
-        'prioridade-chave-anterior': 'item',
+        'prioridade-chave-anterior': 'data_guia_servico_carteira',
     }
     assert classificacao.ambiguas == ()
 
