@@ -15,6 +15,7 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     associar_processos_a_remessas,
     chave_item_demonstrativo,
     chave_item_oracle,
+    classificar_demonstrativos_sem_processo_por_oracle,
     indexar_processos,
     normalizar_competencia,
     resolver_item,
@@ -102,12 +103,27 @@ def test_classifica_associacoes_ambiguas_e_remessas_nao_encontradas():
 
     associacao = associar_processos_a_remessas(
         [primeiro, segundo],
-        {(date(2025, 12, 1), Decimal('100.00')): {10, 11}},
+        {Decimal('100.00'): {10, 11}},
     )
 
     assert associacao.unicas == {}
     assert associacao.ambiguas == ((primeiro, (10, 11)),)
     assert associacao.nao_encontradas == (segundo,)
+
+
+def test_associa_processo_a_remessa_sem_usar_competencia():
+    processo = ChaveProcesso(
+        'P001/2026',
+        date(2022, 1, 1),
+        Decimal('18450.96'),
+    )
+
+    associacao = associar_processos_a_remessas(
+        [processo],
+        {Decimal('18450.96'): {1000}},
+    )
+
+    assert associacao.unicas == {processo: 1000}
 
 
 def test_chave_do_item_usa_os_dez_ultimos_digitos_da_carteira():
@@ -140,6 +156,49 @@ def test_nao_resolve_candidatos_de_contas_diferentes():
 
     assert resolucao.status == 'ambiguo'
     assert resolucao.conta is None
+
+
+def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
+    localizada = demonstrativo(id_registro='localizada')
+    ausente = demonstrativo(
+        id_registro='ausente',
+        valor_protocolo=Decimal('200.00'),
+    )
+    ambigua = demonstrativo(
+        id_registro='ambigua',
+        valor_protocolo=Decimal('300.00'),
+    )
+    itens_por_chave = {
+        chave_item_demonstrativo(localizada, 10): [
+            {'cd_reg': 100, 'cd_lancamento': 1},
+            {'cd_reg': 100, 'cd_lancamento': 2},
+        ],
+        chave_item_demonstrativo(ambigua, 30): [
+            {'cd_reg': 300, 'cd_lancamento': 1},
+        ],
+        chave_item_demonstrativo(ambigua, 31): [
+            {'cd_reg': 301, 'cd_lancamento': 1},
+        ],
+    }
+
+    classificacao = classificar_demonstrativos_sem_processo_por_oracle(
+        [localizada, ausente, ambigua],
+        {
+            Decimal('100.00'): {10},
+            Decimal('200.00'): {20},
+            Decimal('300.00'): {30, 31},
+        },
+        itens_por_chave,
+    )
+
+    assert classificacao.identificadas == {'localizada': 10}
+    assert [
+        item['id_registro'] for item in classificacao.sem_correspondencia
+    ] == ['ausente']
+    assert [
+        (item['id_registro'], remessas)
+        for item, remessas in classificacao.ambiguas
+    ] == [('ambigua', (30, 31))]
 
 
 def test_aplica_nfse_recebimento_e_glosa_nas_tabelas_existentes(

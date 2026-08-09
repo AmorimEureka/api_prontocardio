@@ -37,6 +37,7 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     chave_conta_bancaria,
     chave_item_demonstrativo,
     chave_item_oracle,
+    classificar_demonstrativos_sem_processo_por_oracle,
     hash_nfse_ipm,
     indexar_processos,
     normalizar_digitos,
@@ -207,10 +208,9 @@ def _carregar_postgres(
 
 def _carregar_remessas_oracle(
     session: Session,
-    competencias: set[date],
     cnpjs: set[str],
-) -> tuple[dict[tuple[date, Decimal], set[int]], dict[int, dict]]:
-    if not competencias or not cnpjs:
+) -> tuple[dict[Decimal, set[int]], dict[int, dict]]:
+    if not cnpjs:
         return {}, {}
     contas = (
         select(
@@ -218,20 +218,28 @@ def _carregar_remessas_oracle(
             ModelContaAtendimento.cd_convenio.label('cd_convenio'),
             ModelContaAtendimento.cnpj_convenio.label('cnpj_convenio'),
             ModelContaAtendimento.nm_convenio.label('convenio'),
-            ModelContaAtendimento.dt_competencia.label('competencia'),
             ModelContaAtendimento.cd_reg.label('conta'),
             ModelContaAtendimento.vl_total_registro.label('valor'),
+            func.min(ModelContaAtendimento.dt_competencia).label(
+                'competencia'
+            ),
         )
         .where(
             ModelContaAtendimento.cd_remessa.is_not(None),
-            ModelContaAtendimento.dt_competencia.in_(competencias),
             func.regexp_replace(
                 ModelContaAtendimento.cnpj_convenio,
                 '[^0-9]',
                 '',
             ).in_(cnpjs),
         )
-        .distinct()
+        .group_by(
+            ModelContaAtendimento.cd_remessa,
+            ModelContaAtendimento.cd_convenio,
+            ModelContaAtendimento.cnpj_convenio,
+            ModelContaAtendimento.nm_convenio,
+            ModelContaAtendimento.cd_reg,
+            ModelContaAtendimento.vl_total_registro,
+        )
         .subquery()
     )
     query = select(
@@ -239,16 +247,15 @@ def _carregar_remessas_oracle(
         contas.c.cd_convenio,
         contas.c.cnpj_convenio,
         contas.c.convenio,
-        contas.c.competencia,
         func.sum(func.coalesce(contas.c.valor, 0)).label('valor_total'),
+        func.min(contas.c.competencia).label('competencia'),
     ).group_by(
         contas.c.cd_remessa,
         contas.c.cd_convenio,
         contas.c.cnpj_convenio,
         contas.c.convenio,
-        contas.c.competencia,
     )
-    indice: dict[tuple[date, Decimal], set[int]] = defaultdict(set)
+    indice: dict[Decimal, set[int]] = defaultdict(set)
     dados = {}
     for linha in session.execute(query).mappings():
         item = dict(linha)
@@ -256,7 +263,7 @@ def _carregar_remessas_oracle(
         item['cd_remessa'] = codigo
         item['cnpj_convenio'] = normalizar_digitos(item['cnpj_convenio'])
         item['valor_total'] = normalizar_dinheiro(item['valor_total'])
-        indice[(item['competencia'], item['valor_total'])].add(codigo)
+        indice[item['valor_total']].add(codigo)
         dados[codigo] = item
     return dict(indice), dados
 
@@ -421,7 +428,8 @@ def _linha_processo_relatorio(
 
 def _gerar_relatorios(  # noqa: PLR0913
     diretorio: Path,
-    demonstrativos_sem_processo: tuple,
+    demonstrativos_sem_processo_iniciais: tuple,
+    classificacao_sem_processo_oracle,
     associacao_historica,
     processos_escopo: set[ChaveProcesso],
     itens_sem_correspondencia: list[dict],
@@ -444,7 +452,43 @@ def _gerar_relatorios(  # noqa: PLR0913
     _gravar_csv(
         diretorio / 'linhas_sem_processo.csv',
         campos_demo,
-        [dict(item) for item in demonstrativos_sem_processo],
+        [
+            dict(item)
+            for item in classificacao_sem_processo_oracle.sem_correspondencia
+        ],
+    )
+    _gravar_csv(
+        diretorio / 'linhas_localizadas_no_oracle.csv',
+        [*campos_demo, 'cd_remessa', 'situacao'],
+        [
+            {
+                **dict(item),
+                'cd_remessa': classificacao_sem_processo_oracle.identificadas[
+                    str(item['id_registro'])
+                ],
+                'situacao': (
+                    'item e remessa localizados; processo IPM não localizado '
+                    'por protocolo e valor'
+                ),
+            }
+            for item in demonstrativos_sem_processo_iniciais
+            if str(item['id_registro'])
+            in classificacao_sem_processo_oracle.identificadas
+        ],
+    )
+    _gravar_csv(
+        diretorio / 'linhas_correspondencia_oracle_ambigua.csv',
+        [*campos_demo, 'remessas_candidatas', 'quantidade_candidatas'],
+        [
+            {
+                **dict(item),
+                'remessas_candidatas': ','.join(
+                    str(remessa) for remessa in remessas
+                ),
+                'quantidade_candidatas': len(remessas),
+            }
+            for item, remessas in classificacao_sem_processo_oracle.ambiguas
+        ],
     )
     campos_processo = [
         'numero_processo',
@@ -846,7 +890,9 @@ def _aplicar_plano(
                 recebimento_integral=(
                     finalizado and remessa.valor_glosado == 0
                 ),
-                data_competencia=remessa.processo.competencia,
+                data_competencia=remessa.dados_oracle.get(
+                    'competencia', remessa.processo.competencia
+                ),
             )
             financeira.data_registro = agora
             session.add(financeira)
@@ -964,10 +1010,6 @@ def main() -> None:  # noqa: PLR0915
             <= chave.competencia
             <= fontes['fim_fisico']
         }
-        competencias = {
-            chave.competencia
-            for chave in processos_escopo | processos_historicos
-        }
         cnpjs = {
             normalizar_digitos(item['cnpj_operadora'])
             for item in fontes['demonstrativos']
@@ -976,7 +1018,6 @@ def main() -> None:  # noqa: PLR0915
         with Session(oracle_engine) as session_oracle:
             indice_remessas, dados_remessas = _carregar_remessas_oracle(
                 session_oracle,
-                competencias,
                 cnpjs,
             )
             associacao_escopo = associar_processos_a_remessas(
@@ -987,9 +1028,24 @@ def main() -> None:  # noqa: PLR0915
                 processos_historicos,
                 indice_remessas,
             )
+            remessas_para_itens = set(associacao_escopo.unicas.values())
+            for demonstrativo in associacao_demo.sem_processo:
+                remessas_para_itens.update(
+                    indice_remessas.get(
+                        normalizar_dinheiro(demonstrativo['valor_protocolo']),
+                        set(),
+                    )
+                )
             itens_por_chave, itens_por_identidade = _carregar_itens_oracle(
                 session_oracle,
-                set(associacao_escopo.unicas.values()),
+                remessas_para_itens,
+            )
+            classificacao_sem_processo_oracle = (
+                classificar_demonstrativos_sem_processo_por_oracle(
+                    associacao_demo.sem_processo,
+                    indice_remessas,
+                    itens_por_chave,
+                )
             )
             contas_oracle = _carregar_contas_oracle(session_oracle)
 
@@ -1048,7 +1104,18 @@ def main() -> None:  # noqa: PLR0915
                 normalizar_dinheiro(item['valor_glosa']) > 0
                 for item in fontes['demonstrativos']
             ),
-            'linhas_sem_processo': len(associacao_demo.sem_processo),
+            'linhas_sem_associacao_processo_ipm': len(
+                associacao_demo.sem_processo
+            ),
+            'linhas_localizadas_no_oracle': len(
+                classificacao_sem_processo_oracle.identificadas
+            ),
+            'linhas_correspondencia_oracle_ambigua': len(
+                classificacao_sem_processo_oracle.ambiguas
+            ),
+            'linhas_sem_processo': len(
+                classificacao_sem_processo_oracle.sem_correspondencia
+            ),
             'linhas_processo_ambiguo': len(associacao_demo.ambiguas),
             'processos_remessa_unica': len(associacao_escopo.unicas),
             'associacoes_ambiguas_escopo': len(associacao_escopo.ambiguas),
@@ -1104,6 +1171,7 @@ def main() -> None:  # noqa: PLR0915
         _gerar_relatorios(
             diretorio,
             associacao_demo.sem_processo,
+            classificacao_sem_processo_oracle,
             associacao_historica,
             processos_escopo,
             itens_sem_correspondencia,
