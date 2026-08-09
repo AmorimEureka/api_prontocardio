@@ -32,6 +32,13 @@ class AssociacaoRemessa:
 
 
 @dataclass(frozen=True)
+class ClassificacaoSemProcessoOracle:
+    identificadas: dict[str, int]
+    sem_correspondencia: tuple[Mapping, ...]
+    ambiguas: tuple[tuple[Mapping, tuple[int, ...]], ...]
+
+
+@dataclass(frozen=True)
 class ResolucaoItem:
     status: str
     conta: int | None = None
@@ -119,16 +126,13 @@ def associar_demonstrativos_a_processos(
 
 def associar_processos_a_remessas(
     processos: Iterable[ChaveProcesso],
-    remessas_por_competencia_valor: Mapping[tuple[date, Decimal], set[int]],
+    remessas_por_valor: Mapping[Decimal, set[int]],
 ) -> AssociacaoRemessa:
     unicas = {}
     ambiguas = []
     nao_encontradas = []
     for processo in sorted(set(processos)):
-        candidatos = remessas_por_competencia_valor.get(
-            (processo.competencia, processo.valor_protocolo),
-            set(),
-        )
+        candidatos = remessas_por_valor.get(processo.valor_protocolo, set())
         if not candidatos:
             nao_encontradas.append(processo)
         elif len(candidatos) > 1:
@@ -183,6 +187,59 @@ def resolver_item(
             candidatos=itens,
         )
     return ResolucaoItem(status='ambiguo', candidatos=itens)
+
+
+def classificar_demonstrativos_sem_processo_por_oracle(
+    demonstrativos: Iterable[Mapping],
+    remessas_por_valor: Mapping[Decimal, set[int]],
+    itens_por_chave: Mapping[tuple, Iterable[Mapping]],
+) -> ClassificacaoSemProcessoOracle:
+    identificadas = {}
+    sem_correspondencia = []
+    ambiguas = []
+    for linha in demonstrativos:
+        remessas_seguras = []
+        remessas_ambiguas = []
+        for cd_remessa in sorted(
+            remessas_por_valor.get(
+                normalizar_dinheiro(linha['valor_protocolo']),
+                set(),
+            )
+        ):
+            itens = itens_por_chave.get(
+                chave_item_demonstrativo(linha, cd_remessa),
+                (),
+            )
+            resolucao = resolver_item(
+                (
+                    int(item['cd_reg']),
+                    int(item['cd_lancamento']),
+                )
+                for item in itens
+            )
+            if resolucao.status in {'item_unico', 'conta_unica'}:
+                remessas_seguras.append(cd_remessa)
+            elif resolucao.status == 'ambiguo':
+                remessas_ambiguas.append(cd_remessa)
+
+        candidatas = tuple(
+            sorted({
+                *remessas_seguras,
+                *remessas_ambiguas,
+            })
+        )
+        if len(remessas_seguras) == 1 and not remessas_ambiguas:
+            identificadas[str(linha['id_registro'])] = remessas_seguras[0]
+        elif candidatas:
+            ambiguas.append((linha, candidatas))
+        else:
+            sem_correspondencia.append(linha)
+
+    return ClassificacaoSemProcessoOracle(
+        identificadas=identificadas,
+        sem_correspondencia=tuple(sem_correspondencia),
+        ambiguas=tuple(ambiguas),
+    )
 
 
 def chave_conta_bancaria(linha: Mapping) -> tuple[str, str]:
