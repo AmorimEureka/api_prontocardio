@@ -470,13 +470,14 @@ def _gerar_relatorios(  # noqa: PLR0913
                 ],
                 'situacao': (
                     {
-                        'data_guia_servico_carteira': (
-                            'data, guia, serviço, carteira e remessa '
-                            'localizados'
+                        'competencia_guia_servico_carteira': (
+                            'competência (MM/AAAA), guia, serviço, carteira '
+                            'e remessa localizados'
                         ),
-                        'data_servico_carteira': (
-                            'data, serviço, carteira e remessa '
-                            'localizados; guia não localizada no Oracle'
+                        'competencia_servico_carteira': (
+                            'competência (MM/AAAA), serviço, carteira e '
+                            'remessa localizados; guia não localizada no '
+                            'Oracle'
                         ),
                     }[
                         classificacao_sem_processo_oracle.criterios[
@@ -1125,14 +1126,14 @@ def main() -> None:  # noqa: PLR0915
             'linhas_localizadas_no_oracle': len(
                 classificacao_sem_processo_oracle.identificadas
             ),
-            'linhas_localizadas_chave_data_guia_servico_carteira': sum(
-                criterio == 'data_guia_servico_carteira'
+            'linhas_localizadas_chave_competencia_guia_servico_carteira': sum(
+                criterio == 'competencia_guia_servico_carteira'
                 for criterio in (
                     classificacao_sem_processo_oracle.criterios.values()
                 )
             ),
-            'linhas_localizadas_chave_data_servico_carteira': sum(
-                criterio == 'data_servico_carteira'
+            'linhas_localizadas_chave_competencia_servico_carteira': sum(
+                criterio == 'competencia_servico_carteira'
                 for criterio in (
                     classificacao_sem_processo_oracle.criterios.values()
                 )
