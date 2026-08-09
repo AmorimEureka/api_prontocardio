@@ -21,7 +21,7 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     indexar_processos,
     normalizar_carteira,
     normalizar_competencia,
-    normalizar_data,
+    normalizar_mes_ano,
     resolver_item,
 )
 from scripts.importar_glosas_demonstrativo_ipm import (
@@ -145,7 +145,7 @@ def test_chave_do_item_ignora_zeros_a_esquerda_da_carteira():
     assert normalizar_carteira('0002025080010920') == '2025080010920'
 
 
-def test_primeira_chave_exige_data_guia_servico_e_carteira():
+def test_primeira_chave_exige_mes_ano_guia_servico_e_carteira():
     demo = demonstrativo()
     oracle = {
         'cd_remessa': 10,
@@ -157,8 +157,11 @@ def test_primeira_chave_exige_data_guia_servico_e_carteira():
     chave = chave_item_demonstrativo(demo, 10)
 
     assert chave == chave_item_oracle(oracle)
-    assert chave != chave_item_oracle(
+    assert chave == chave_item_oracle(
         {**oracle, 'dt_competencia': date(2025, 12, 1)}
+    )
+    assert chave != chave_item_oracle(
+        {**oracle, 'dt_competencia': date(2025, 11, 15)}
     )
     assert chave != chave_item_oracle({**oracle, 'nr_guia': 'OUTRA-GUIA'})
     assert chave != chave_item_oracle(
@@ -169,7 +172,7 @@ def test_primeira_chave_exige_data_guia_servico_e_carteira():
     )
 
 
-def test_segunda_chave_usa_data_exata_e_desconsidera_guia():
+def test_segunda_chave_usa_mes_ano_e_desconsidera_guia():
     demo = demonstrativo(numero_guia_senha='GUIA-DEMONSTRATIVO')
     oracle = {
         'cd_remessa': 10,
@@ -179,7 +182,7 @@ def test_segunda_chave_usa_data_exata_e_desconsidera_guia():
         'nr_carteira': '001234567890',
     }
 
-    assert normalizar_data('15/12/2025') == date(2025, 12, 15)
+    assert normalizar_mes_ano('15/12/2025') == (2025, 12)
     assert (
         chave_item_sem_guia_demonstrativo(demo, 10)
         == chave_item_sem_guia_oracle(oracle)
@@ -187,8 +190,14 @@ def test_segunda_chave_usa_data_exata_e_desconsidera_guia():
     assert chave_item_sem_guia_demonstrativo(
         demo,
         10,
-    ) != chave_item_sem_guia_oracle(
+    ) == chave_item_sem_guia_oracle(
         {**oracle, 'dt_competencia': date(2025, 12, 1)}
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_oracle(
+        {**oracle, 'dt_competencia': date(2025, 11, 15)}
     )
     assert chave_item_sem_guia_demonstrativo(
         demo,
@@ -306,8 +315,8 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         'localizada-por-competencia': 50,
     }
     assert classificacao.criterios == {
-        'localizada': 'data_guia_servico_carteira',
-        'localizada-por-competencia': 'data_servico_carteira',
+        'localizada': 'competencia_guia_servico_carteira',
+        'localizada-por-competencia': 'competencia_servico_carteira',
     }
     assert [
         item['id_registro'] for item in classificacao.sem_correspondencia
@@ -380,7 +389,7 @@ def test_chave_alternativa_nao_repete_correspondencia_da_chave_anterior():
         'prioridade-chave-anterior': 10,
     }
     assert classificacao.criterios == {
-        'prioridade-chave-anterior': 'data_guia_servico_carteira',
+        'prioridade-chave-anterior': 'competencia_guia_servico_carteira',
     }
     assert classificacao.ambiguas == ()
 
