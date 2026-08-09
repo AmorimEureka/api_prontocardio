@@ -59,17 +59,16 @@ def normalizar_carteira(valor) -> str:
     return normalizar_digitos(valor).lstrip('0')
 
 
-def normalizar_mes_ano(valor) -> tuple[int, int] | None:
+def normalizar_data(valor) -> date | None:
     if isinstance(valor, datetime):
         valor = valor.date()
     if isinstance(valor, date):
-        return valor.year, valor.month
+        return valor
 
     bruto = str(valor or '').strip()
     for formato in ('%Y-%m-%d', '%d/%m/%Y'):
         try:
-            resultado = datetime.strptime(bruto[:10], formato)
-            return resultado.year, resultado.month
+            return datetime.strptime(bruto[:10], formato).date()
         except ValueError:
             continue
     return None
@@ -170,6 +169,7 @@ def associar_processos_a_remessas(
 def chave_item_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
     return (
         cd_remessa,
+        normalizar_data(linha['data_realizacao']),
         normalizar_texto(linha['numero_guia_senha']),
         normalizar_texto(linha['codigo_servico']),
         normalizar_carteira(linha['codigo_beneficiario']),
@@ -179,33 +179,29 @@ def chave_item_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
 def chave_item_oracle(linha: Mapping) -> tuple:
     return (
         int(linha['cd_remessa']),
+        normalizar_data(linha['dt_competencia']),
         normalizar_texto(linha['nr_guia']),
         normalizar_texto(linha['cd_pro_fat']),
         normalizar_carteira(linha['nr_carteira']),
     )
 
 
-def chave_conta_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
-    chave_item = chave_item_demonstrativo(linha, cd_remessa)
-    return chave_item[0], chave_item[1], chave_item[3]
-
-
-def chave_item_competencia_demonstrativo(
+def chave_item_sem_guia_demonstrativo(
     linha: Mapping,
     cd_remessa: int,
 ) -> tuple:
     return (
         cd_remessa,
-        normalizar_mes_ano(linha['data_realizacao']),
+        normalizar_data(linha['data_realizacao']),
         normalizar_texto(linha['codigo_servico']),
         normalizar_carteira(linha['codigo_beneficiario']),
     )
 
 
-def chave_item_competencia_oracle(linha: Mapping) -> tuple:
+def chave_item_sem_guia_oracle(linha: Mapping) -> tuple:
     return (
         int(linha['cd_remessa']),
-        normalizar_mes_ano(linha['dt_competencia']),
+        normalizar_data(linha['dt_competencia']),
         normalizar_texto(linha['cd_pro_fat']),
         normalizar_carteira(linha['nr_carteira']),
     )
@@ -286,16 +282,13 @@ def classificar_demonstrativos_sem_processo_por_oracle(
     criterios = {}
     sem_correspondencia = []
     ambiguas = []
-    itens_por_conta: dict[tuple, list[Mapping]] = defaultdict(list)
-    itens_por_competencia: dict[tuple, list[Mapping]] = defaultdict(list)
-    for chave, itens in itens_por_chave.items():
-        chave_conta = chave[0], chave[1], chave[3]
-        itens_por_conta[chave_conta].extend(itens)
+    itens_por_chave_sem_guia: dict[tuple, list[Mapping]] = defaultdict(list)
+    for itens in itens_por_chave.values():
         for item in itens:
-            if normalizar_mes_ano(item.get('dt_competencia')) is None:
+            if normalizar_data(item.get('dt_competencia')) is None:
                 continue
-            itens_por_competencia[
-                chave_item_competencia_oracle(item)
+            itens_por_chave_sem_guia[
+                chave_item_sem_guia_oracle(item)
             ].append(item)
 
     for linha in demonstrativos:
@@ -313,11 +306,10 @@ def classificar_demonstrativos_sem_processo_por_oracle(
             linha,
             remessas_candidatas,
             (
-                ('item', itens_por_chave, chave_item_demonstrativo),
                 (
-                    'guia_carteira',
-                    itens_por_conta,
-                    chave_conta_demonstrativo,
+                    'data_guia_servico_carteira',
+                    itens_por_chave,
+                    chave_item_demonstrativo,
                 ),
             ),
         )
@@ -332,9 +324,9 @@ def classificar_demonstrativos_sem_processo_por_oracle(
                 remessas_candidatas,
                 (
                     (
-                        'competencia_servico_carteira',
-                        itens_por_competencia,
-                        chave_item_competencia_demonstrativo,
+                        'data_servico_carteira',
+                        itens_por_chave_sem_guia,
+                        chave_item_sem_guia_demonstrativo,
                     ),
                 ),
             )
