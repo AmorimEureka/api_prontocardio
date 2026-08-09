@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 CENTAVOS = Decimal('0.01')
 
@@ -57,6 +57,22 @@ def normalizar_digitos(valor) -> str:
 
 def normalizar_carteira(valor) -> str:
     return normalizar_digitos(valor).lstrip('0')
+
+
+def normalizar_mes_ano(valor) -> tuple[int, int] | None:
+    if isinstance(valor, datetime):
+        valor = valor.date()
+    if isinstance(valor, date):
+        return valor.year, valor.month
+
+    bruto = str(valor or '').strip()
+    for formato in ('%Y-%m-%d', '%d/%m/%Y'):
+        try:
+            resultado = datetime.strptime(bruto[:10], formato)
+            return resultado.year, resultado.month
+        except ValueError:
+            continue
+    return None
 
 
 def normalizar_dinheiro(valor) -> Decimal:
@@ -174,6 +190,27 @@ def chave_conta_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
     return chave_item[0], chave_item[1], chave_item[3]
 
 
+def chave_item_competencia_demonstrativo(
+    linha: Mapping,
+    cd_remessa: int,
+) -> tuple:
+    return (
+        cd_remessa,
+        normalizar_mes_ano(linha['data_realizacao']),
+        normalizar_texto(linha['codigo_servico']),
+        normalizar_carteira(linha['codigo_beneficiario']),
+    )
+
+
+def chave_item_competencia_oracle(linha: Mapping) -> tuple:
+    return (
+        int(linha['cd_remessa']),
+        normalizar_mes_ano(linha['dt_competencia']),
+        normalizar_texto(linha['cd_pro_fat']),
+        normalizar_carteira(linha['nr_carteira']),
+    )
+
+
 def resolver_item(
     candidatos: Iterable[tuple[int, int]],
 ) -> ResolucaoItem:
@@ -199,6 +236,47 @@ def resolver_item(
     return ResolucaoItem(status='ambiguo', candidatos=itens)
 
 
+def _resolver_remessas_por_criterios(
+    linha: Mapping,
+    remessas: Iterable[int],
+    criterios: Iterable[
+        tuple[
+            str,
+            Mapping[tuple, Iterable[Mapping]],
+            Callable[[Mapping, int], tuple],
+        ]
+    ],
+) -> tuple[list[int], list[int], dict[int, str]]:
+    remessas_seguras = []
+    remessas_ambiguas = []
+    criterios_seguros = {}
+    fontes = tuple(criterios)
+
+    for cd_remessa in remessas:
+        criterio_encontrado = None
+        itens = ()
+        for criterio, indice, gerar_chave in fontes:
+            itens = indice.get(gerar_chave(linha, cd_remessa), ())
+            if itens:
+                criterio_encontrado = criterio
+                break
+
+        resolucao = resolver_item(
+            (
+                int(item['cd_reg']),
+                int(item['cd_lancamento']),
+            )
+            for item in itens
+        )
+        if resolucao.status in {'item_unico', 'conta_unica'}:
+            remessas_seguras.append(cd_remessa)
+            criterios_seguros[cd_remessa] = str(criterio_encontrado)
+        elif resolucao.status == 'ambiguo':
+            remessas_ambiguas.append(cd_remessa)
+
+    return remessas_seguras, remessas_ambiguas, criterios_seguros
+
+
 def classificar_demonstrativos_sem_processo_por_oracle(
     demonstrativos: Iterable[Mapping],
     remessas_por_valor: Mapping[Decimal, set[int]],
@@ -209,44 +287,57 @@ def classificar_demonstrativos_sem_processo_por_oracle(
     sem_correspondencia = []
     ambiguas = []
     itens_por_conta: dict[tuple, list[Mapping]] = defaultdict(list)
+    itens_por_competencia: dict[tuple, list[Mapping]] = defaultdict(list)
     for chave, itens in itens_por_chave.items():
         chave_conta = chave[0], chave[1], chave[3]
         itens_por_conta[chave_conta].extend(itens)
+        for item in itens:
+            if normalizar_mes_ano(item.get('dt_competencia')) is None:
+                continue
+            itens_por_competencia[
+                chave_item_competencia_oracle(item)
+            ].append(item)
 
     for linha in demonstrativos:
-        remessas_seguras = []
-        remessas_ambiguas = []
-        criterios_seguros = {}
-        for cd_remessa in sorted(
+        remessas_candidatas = sorted(
             remessas_por_valor.get(
                 normalizar_dinheiro(linha['valor_protocolo']),
                 set(),
             )
-        ):
-            itens_exatos = itens_por_chave.get(
-                chave_item_demonstrativo(linha, cd_remessa),
-                (),
-            )
-            criterio = 'item'
-            itens = itens_exatos
-            if not itens:
-                criterio = 'guia_carteira'
-                itens = itens_por_conta.get(
-                    chave_conta_demonstrativo(linha, cd_remessa),
-                    (),
-                )
-            resolucao = resolver_item(
+        )
+        (
+            remessas_seguras,
+            remessas_ambiguas,
+            criterios_seguros,
+        ) = _resolver_remessas_por_criterios(
+            linha,
+            remessas_candidatas,
+            (
+                ('item', itens_por_chave, chave_item_demonstrativo),
                 (
-                    int(item['cd_reg']),
-                    int(item['cd_lancamento']),
-                )
-                for item in itens
+                    'guia_carteira',
+                    itens_por_conta,
+                    chave_conta_demonstrativo,
+                ),
+            ),
+        )
+
+        if not remessas_seguras and not remessas_ambiguas:
+            (
+                remessas_seguras,
+                remessas_ambiguas,
+                criterios_seguros,
+            ) = _resolver_remessas_por_criterios(
+                linha,
+                remessas_candidatas,
+                (
+                    (
+                        'competencia_servico_carteira',
+                        itens_por_competencia,
+                        chave_item_competencia_demonstrativo,
+                    ),
+                ),
             )
-            if resolucao.status in {'item_unico', 'conta_unica'}:
-                remessas_seguras.append(cd_remessa)
-                criterios_seguros[cd_remessa] = criterio
-            elif resolucao.status == 'ambiguo':
-                remessas_ambiguas.append(cd_remessa)
 
         candidatas = tuple(
             sorted({
