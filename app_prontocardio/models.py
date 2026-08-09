@@ -329,6 +329,30 @@ class RegistroGlosa:
 
 
 @table_registry.mapped_as_dataclass
+class RegistroGlosaDemonstrativoIpm:
+    __tablename__ = 'registros_glosa_demonstrativo_ipm'
+    __table_args__ = (
+        Index(
+            'ix_registros_glosa_demo_ipm_registro_glosa',
+            'registro_glosa_id',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id_registro: Mapped[str] = mapped_column(String, primary_key=True)
+    registro_glosa_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.registros_glosa.id',
+            ondelete='CASCADE',
+        )
+    )
+    data_importacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
 class PrazoRecursoConvenio:
     __tablename__ = 'prazos_recurso_convenio'
     __table_args__ = (
