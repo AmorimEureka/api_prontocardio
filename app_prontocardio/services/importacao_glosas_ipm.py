@@ -34,6 +34,7 @@ class AssociacaoRemessa:
 @dataclass(frozen=True)
 class ClassificacaoSemProcessoOracle:
     identificadas: dict[str, int]
+    criterios: dict[str, str]
     sem_correspondencia: tuple[Mapping, ...]
     ambiguas: tuple[tuple[Mapping, tuple[int, ...]], ...]
 
@@ -52,6 +53,10 @@ def normalizar_texto(valor) -> str:
 
 def normalizar_digitos(valor) -> str:
     return re.sub(r'[^0-9]', '', str(valor or ''))
+
+
+def normalizar_carteira(valor) -> str:
+    return normalizar_digitos(valor).lstrip('0')
 
 
 def normalizar_dinheiro(valor) -> Decimal:
@@ -151,7 +156,7 @@ def chave_item_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
         cd_remessa,
         normalizar_texto(linha['numero_guia_senha']),
         normalizar_texto(linha['codigo_servico']),
-        normalizar_digitos(linha['codigo_beneficiario'])[-10:],
+        normalizar_carteira(linha['codigo_beneficiario']),
     )
 
 
@@ -160,8 +165,13 @@ def chave_item_oracle(linha: Mapping) -> tuple:
         int(linha['cd_remessa']),
         normalizar_texto(linha['nr_guia']),
         normalizar_texto(linha['cd_pro_fat']),
-        normalizar_digitos(linha['nr_carteira'])[-10:],
+        normalizar_carteira(linha['nr_carteira']),
     )
+
+
+def chave_conta_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
+    chave_item = chave_item_demonstrativo(linha, cd_remessa)
+    return chave_item[0], chave_item[1], chave_item[3]
 
 
 def resolver_item(
@@ -195,21 +205,36 @@ def classificar_demonstrativos_sem_processo_por_oracle(
     itens_por_chave: Mapping[tuple, Iterable[Mapping]],
 ) -> ClassificacaoSemProcessoOracle:
     identificadas = {}
+    criterios = {}
     sem_correspondencia = []
     ambiguas = []
+    itens_por_conta: dict[tuple, list[Mapping]] = defaultdict(list)
+    for chave, itens in itens_por_chave.items():
+        chave_conta = chave[0], chave[1], chave[3]
+        itens_por_conta[chave_conta].extend(itens)
+
     for linha in demonstrativos:
         remessas_seguras = []
         remessas_ambiguas = []
+        criterios_seguros = {}
         for cd_remessa in sorted(
             remessas_por_valor.get(
                 normalizar_dinheiro(linha['valor_protocolo']),
                 set(),
             )
         ):
-            itens = itens_por_chave.get(
+            itens_exatos = itens_por_chave.get(
                 chave_item_demonstrativo(linha, cd_remessa),
                 (),
             )
+            criterio = 'item'
+            itens = itens_exatos
+            if not itens:
+                criterio = 'guia_carteira'
+                itens = itens_por_conta.get(
+                    chave_conta_demonstrativo(linha, cd_remessa),
+                    (),
+                )
             resolucao = resolver_item(
                 (
                     int(item['cd_reg']),
@@ -219,6 +244,7 @@ def classificar_demonstrativos_sem_processo_por_oracle(
             )
             if resolucao.status in {'item_unico', 'conta_unica'}:
                 remessas_seguras.append(cd_remessa)
+                criterios_seguros[cd_remessa] = criterio
             elif resolucao.status == 'ambiguo':
                 remessas_ambiguas.append(cd_remessa)
 
@@ -229,7 +255,10 @@ def classificar_demonstrativos_sem_processo_por_oracle(
             })
         )
         if len(remessas_seguras) == 1 and not remessas_ambiguas:
-            identificadas[str(linha['id_registro'])] = remessas_seguras[0]
+            id_registro = str(linha['id_registro'])
+            remessa = remessas_seguras[0]
+            identificadas[id_registro] = remessa
+            criterios[id_registro] = criterios_seguros[remessa]
         elif candidatas:
             ambiguas.append((linha, candidatas))
         else:
@@ -237,6 +266,7 @@ def classificar_demonstrativos_sem_processo_por_oracle(
 
     return ClassificacaoSemProcessoOracle(
         identificadas=identificadas,
+        criterios=criterios,
         sem_correspondencia=tuple(sem_correspondencia),
         ambiguas=tuple(ambiguas),
     )

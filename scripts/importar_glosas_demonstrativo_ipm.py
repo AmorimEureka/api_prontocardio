@@ -467,8 +467,17 @@ def _gerar_relatorios(  # noqa: PLR0913
                     str(item['id_registro'])
                 ],
                 'situacao': (
-                    'item e remessa localizados; processo IPM não localizado '
-                    'por protocolo e valor'
+                    (
+                        'item e remessa localizados'
+                        if classificacao_sem_processo_oracle.criterios[
+                            str(item['id_registro'])
+                        ] == 'item'
+                        else (
+                            'guia, carteira e remessa localizadas; serviço '
+                            'não localizado no Oracle'
+                        )
+                    )
+                    + '; processo IPM não localizado por protocolo e valor'
                 ),
             }
             for item in demonstrativos_sem_processo_iniciais

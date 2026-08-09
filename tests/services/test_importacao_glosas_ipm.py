@@ -13,10 +13,12 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     ChaveProcesso,
     associar_demonstrativos_a_processos,
     associar_processos_a_remessas,
+    chave_conta_demonstrativo,
     chave_item_demonstrativo,
     chave_item_oracle,
     classificar_demonstrativos_sem_processo_por_oracle,
     indexar_processos,
+    normalizar_carteira,
     normalizar_competencia,
     resolver_item,
 )
@@ -126,7 +128,7 @@ def test_associa_processo_a_remessa_sem_usar_competencia():
     assert associacao.unicas == {processo: 1000}
 
 
-def test_chave_do_item_usa_os_dez_ultimos_digitos_da_carteira():
+def test_chave_do_item_ignora_zeros_a_esquerda_da_carteira():
     demo = demonstrativo(codigo_beneficiario='123.456.789-0')
     oracle = {
         'cd_remessa': 10,
@@ -136,6 +138,17 @@ def test_chave_do_item_usa_os_dez_ultimos_digitos_da_carteira():
     }
 
     assert chave_item_demonstrativo(demo, 10) == chave_item_oracle(oracle)
+    assert normalizar_carteira('0002025080010920') == '2025080010920'
+
+
+def test_chave_da_conta_desconsidera_servico():
+    demo = demonstrativo(codigo_servico='SERVICO-DEMONSTRATIVO')
+
+    assert chave_conta_demonstrativo(demo, 10) == (
+        10,
+        'GUIA-1',
+        '1234567890',
+    )
 
 
 def test_resolve_multiplos_lancamentos_mesma_conta_sem_inventar_lancamento():
@@ -168,6 +181,18 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         id_registro='ambigua',
         valor_protocolo=Decimal('300.00'),
     )
+    localizada_por_conta = demonstrativo(
+        id_registro='localizada-por-conta',
+        valor_protocolo=Decimal('400.00'),
+        codigo_servico='SERVICO-DEMONSTRATIVO',
+        codigo_beneficiario='1234567890',
+    )
+    item_oracle_mesma_conta = {
+        'cd_remessa': 40,
+        'nr_guia': 'GUIA-1',
+        'cd_pro_fat': 'SERVICO-ORACLE',
+        'nr_carteira': '001234567890',
+    }
     itens_por_chave = {
         chave_item_demonstrativo(localizada, 10): [
             {'cd_reg': 100, 'cd_lancamento': 1},
@@ -179,19 +204,30 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         chave_item_demonstrativo(ambigua, 31): [
             {'cd_reg': 301, 'cd_lancamento': 1},
         ],
+        chave_item_oracle(item_oracle_mesma_conta): [
+            {'cd_reg': 400, 'cd_lancamento': 1},
+        ],
     }
 
     classificacao = classificar_demonstrativos_sem_processo_por_oracle(
-        [localizada, ausente, ambigua],
+        [localizada, ausente, ambigua, localizada_por_conta],
         {
             Decimal('100.00'): {10},
             Decimal('200.00'): {20},
             Decimal('300.00'): {30, 31},
+            Decimal('400.00'): {40},
         },
         itens_por_chave,
     )
 
-    assert classificacao.identificadas == {'localizada': 10}
+    assert classificacao.identificadas == {
+        'localizada': 10,
+        'localizada-por-conta': 40,
+    }
+    assert classificacao.criterios == {
+        'localizada': 'item',
+        'localizada-por-conta': 'guia_carteira',
+    }
     assert [
         item['id_registro'] for item in classificacao.sem_correspondencia
     ] == ['ausente']
@@ -199,6 +235,37 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         (item['id_registro'], remessas)
         for item, remessas in classificacao.ambiguas
     ] == [('ambigua', (30, 31))]
+
+
+def test_nao_reclassifica_por_guia_e_carteira_quando_conta_e_ambigua():
+    linha = demonstrativo(
+        id_registro='conta-ambigua',
+        codigo_servico='SERVICO-DEMONSTRATIVO',
+    )
+    item_oracle = {
+        'cd_remessa': 10,
+        'nr_guia': 'GUIA-1',
+        'cd_pro_fat': 'SERVICO-ORACLE',
+        'nr_carteira': '001234567890',
+    }
+
+    classificacao = classificar_demonstrativos_sem_processo_por_oracle(
+        [linha],
+        {Decimal('100.00'): {10}},
+        {
+            chave_item_oracle(item_oracle): [
+                {'cd_reg': 100, 'cd_lancamento': 1},
+                {'cd_reg': 101, 'cd_lancamento': 2},
+            ],
+        },
+    )
+
+    assert classificacao.identificadas == {}
+    assert classificacao.sem_correspondencia == ()
+    assert [
+        (item['id_registro'], remessas)
+        for item, remessas in classificacao.ambiguas
+    ] == [('conta-ambigua', (10,))]
 
 
 def test_aplica_nfse_recebimento_e_glosa_nas_tabelas_existentes(
