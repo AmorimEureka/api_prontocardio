@@ -6,7 +6,11 @@ from http import HTTPStatus
 import pytest
 from fastapi import HTTPException
 
-from app_prontocardio.models import PrazoRecursoConvenio, RegistroGlosa
+from app_prontocardio.models import (
+    ModelContaAtendimento,
+    PrazoRecursoConvenio,
+    RegistroGlosa,
+)
 from app_prontocardio.routers.app_glosas import (
     consultar_convenios,
     consultar_glosas_registradas,
@@ -71,13 +75,22 @@ def test_atendimento_aceita_identificadores_alfanumericos_da_view():
         cd_lancamento=2,
         cd_pro_fat='U370796',
         nr_guia='GUIA-ABC',
+        nr_carteira='CARTEIRA-123',
         cd_ati_med='AT-01',
         cnpj_convenio='39427632000171',
     )
 
     assert atendimento.cd_pro_fat == 'U370796'
     assert atendimento.nr_guia == 'GUIA-ABC'
+    assert atendimento.nr_carteira == 'CARTEIRA-123'
     assert atendimento.cd_ati_med == 'AT-01'
+
+
+def test_modelo_conta_atendimento_mapeia_nr_carteira_da_view():
+    coluna = ModelContaAtendimento.__table__.c.nr_carteira
+
+    assert str(coluna.type) == 'VARCHAR(25)'
+    assert coluna.nullable is True
 
 
 def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
