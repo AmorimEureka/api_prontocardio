@@ -211,3 +211,6 @@ server/
 
 # Backups locais do banco de dados
 /backups/
+
+# Relatórios locais de auditoria com dados assistenciais
+/relatorios/
