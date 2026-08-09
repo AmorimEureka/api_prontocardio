@@ -842,6 +842,7 @@ class Atendimento(BaseModel):
     descricao: str | None = None
     nr_guia: str | None = None
     cd_senha: str | None = None
+    nr_carteira: str | None = None
     dt_atendimento: datetime | None = None
     dt_alta: datetime | None = None
     dt_remessa: datetime | None = None
