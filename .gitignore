@@ -213,3 +213,9 @@ server/certificates/
 server/**/*.crt
 server/**/*.key
 server/**/*.pem
+
+# Backups locais do banco de dados
+/backups/
+
+# Relatórios locais de auditoria com dados assistenciais
+/relatorios/

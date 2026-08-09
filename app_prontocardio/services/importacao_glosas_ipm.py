@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Iterable, Mapping
+
+CENTAVOS = Decimal('0.01')
+
+
+@dataclass(frozen=True, order=True)
+class ChaveProcesso:
+    numero_processo: str
+    competencia: date
+    valor_protocolo: Decimal
+
+
+@dataclass(frozen=True)
+class AssociacaoDemonstrativo:
+    unicas: dict[str, ChaveProcesso]
+    sem_processo: tuple[Mapping, ...]
+    ambiguas: tuple[tuple[Mapping, tuple[ChaveProcesso, ...]], ...]
+
+
+@dataclass(frozen=True)
+class AssociacaoRemessa:
+    unicas: dict[ChaveProcesso, int]
+    ambiguas: tuple[tuple[ChaveProcesso, tuple[int, ...]], ...]
+    nao_encontradas: tuple[ChaveProcesso, ...]
+
+
+@dataclass(frozen=True)
+class ResolucaoItem:
+    status: str
+    conta: int | None = None
+    cd_lancamento: int | None = None
+    candidatos: tuple[tuple[int, int], ...] = ()
+
+
+def normalizar_texto(valor) -> str:
+    return str(valor or '').strip().upper()
+
+
+def normalizar_digitos(valor) -> str:
+    return re.sub(r'[^0-9]', '', str(valor or ''))
+
+
+def normalizar_dinheiro(valor) -> Decimal:
+    return Decimal(valor or 0).quantize(CENTAVOS, ROUND_HALF_UP)
+
+
+def normalizar_competencia(valor) -> date | None:
+    bruto = str(valor or '').strip()
+    for formato in ('%m/%Y', '%m/%y'):
+        try:
+            resultado = datetime.strptime(bruto, formato)
+            return date(resultado.year, resultado.month, 1)
+        except ValueError:
+            continue
+    return None
+
+
+def indexar_processos(
+    linhas: Iterable[Mapping],
+) -> tuple[
+    dict[tuple[str, Decimal], set[ChaveProcesso]],
+    dict[ChaveProcesso, Mapping],
+]:
+    indice: dict[tuple[str, Decimal], set[ChaveProcesso]] = defaultdict(set)
+    dados: dict[ChaveProcesso, Mapping] = {}
+    for linha in linhas:
+        competencia = normalizar_competencia(linha['competencia_producao'])
+        if competencia is None or linha['valor_protocolo'] is None:
+            continue
+        chave = ChaveProcesso(
+            numero_processo=normalizar_texto(linha['numero_processo']),
+            competencia=competencia,
+            valor_protocolo=normalizar_dinheiro(linha['valor_protocolo']),
+        )
+        if not chave.numero_processo:
+            continue
+        dados[chave] = linha
+        for identificador in (linha.get('nr'), linha.get('nr_origem')):
+            protocolo = normalizar_texto(identificador)
+            if protocolo:
+                indice[(protocolo, chave.valor_protocolo)].add(chave)
+    return dict(indice), dados
+
+
+def associar_demonstrativos_a_processos(
+    demonstrativos: Iterable[Mapping],
+    indice_processos: Mapping[tuple[str, Decimal], set[ChaveProcesso]],
+) -> AssociacaoDemonstrativo:
+    unicas = {}
+    sem_processo = []
+    ambiguas = []
+    for linha in demonstrativos:
+        candidatos = indice_processos.get(
+            (
+                normalizar_texto(linha['numero_protocolo']),
+                normalizar_dinheiro(linha['valor_protocolo']),
+            ),
+            set(),
+        )
+        if not candidatos:
+            sem_processo.append(linha)
+        elif len(candidatos) > 1:
+            ambiguas.append((linha, tuple(sorted(candidatos))))
+        else:
+            unicas[str(linha['id_registro'])] = next(iter(candidatos))
+    return AssociacaoDemonstrativo(
+        unicas=unicas,
+        sem_processo=tuple(sem_processo),
+        ambiguas=tuple(ambiguas),
+    )
+
+
+def associar_processos_a_remessas(
+    processos: Iterable[ChaveProcesso],
+    remessas_por_competencia_valor: Mapping[tuple[date, Decimal], set[int]],
+) -> AssociacaoRemessa:
+    unicas = {}
+    ambiguas = []
+    nao_encontradas = []
+    for processo in sorted(set(processos)):
+        candidatos = remessas_por_competencia_valor.get(
+            (processo.competencia, processo.valor_protocolo),
+            set(),
+        )
+        if not candidatos:
+            nao_encontradas.append(processo)
+        elif len(candidatos) > 1:
+            ambiguas.append((processo, tuple(sorted(candidatos))))
+        else:
+            unicas[processo] = next(iter(candidatos))
+    return AssociacaoRemessa(
+        unicas=unicas,
+        ambiguas=tuple(ambiguas),
+        nao_encontradas=tuple(nao_encontradas),
+    )
+
+
+def chave_item_demonstrativo(linha: Mapping, cd_remessa: int) -> tuple:
+    return (
+        cd_remessa,
+        normalizar_texto(linha['numero_guia_senha']),
+        normalizar_texto(linha['codigo_servico']),
+        normalizar_digitos(linha['codigo_beneficiario'])[-10:],
+    )
+
+
+def chave_item_oracle(linha: Mapping) -> tuple:
+    return (
+        int(linha['cd_remessa']),
+        normalizar_texto(linha['nr_guia']),
+        normalizar_texto(linha['cd_pro_fat']),
+        normalizar_digitos(linha['nr_carteira'])[-10:],
+    )
+
+
+def resolver_item(
+    candidatos: Iterable[tuple[int, int]],
+) -> ResolucaoItem:
+    itens = tuple(sorted(set(candidatos)))
+    if not itens:
+        return ResolucaoItem(status='nao_encontrado')
+    if len(itens) == 1:
+        conta, lancamento = itens[0]
+        return ResolucaoItem(
+            status='item_unico',
+            conta=conta,
+            cd_lancamento=lancamento,
+            candidatos=itens,
+        )
+    contas = {item[0] for item in itens}
+    if len(contas) == 1:
+        return ResolucaoItem(
+            status='conta_unica',
+            conta=next(iter(contas)),
+            cd_lancamento=None,
+            candidatos=itens,
+        )
+    return ResolucaoItem(status='ambiguo', candidatos=itens)
+
+
+def chave_conta_bancaria(linha: Mapping) -> tuple[str, str]:
+    return (
+        normalizar_digitos(linha['codigo_agencia']),
+        normalizar_digitos(linha['conta']),
+    )
+
+
+def hash_nfse_ipm(id_registro: str) -> str:
+    return f'ipm:{str(id_registro).strip()}'
