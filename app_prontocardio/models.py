@@ -1211,6 +1211,7 @@ class ModelContaAtendimento:
     descricao: Mapped[str | None] = mapped_column(String, init=False)
     nr_guia: Mapped[str | None] = mapped_column(String, init=False)
     cd_senha: Mapped[str | None] = mapped_column(String, init=False)
+    nr_carteira: Mapped[str | None] = mapped_column(String(25), init=False)
     dt_atendimento: Mapped[datetime | None] = mapped_column(
         DateTime,
         init=False,
