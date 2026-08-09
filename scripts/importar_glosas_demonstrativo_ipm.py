@@ -297,6 +297,7 @@ def _carregar_itens_oracle(
                 ModelContaAtendimento.descricao,
                 ModelContaAtendimento.dt_atendimento,
                 ModelContaAtendimento.dt_alta,
+                ModelContaAtendimento.dt_competencia,
                 ModelContaAtendimento.dt_lancamento,
                 ModelContaAtendimento.qt_lancamento,
                 ModelContaAtendimento.vl_total_conta,
@@ -440,6 +441,7 @@ def _gerar_relatorios(  # noqa: PLR0913
     campos_demo = [
         'id_registro',
         'referencia',
+        'data_realizacao',
         'numero_protocolo',
         'valor_protocolo',
         'numero_guia_senha',
@@ -467,16 +469,21 @@ def _gerar_relatorios(  # noqa: PLR0913
                     str(item['id_registro'])
                 ],
                 'situacao': (
-                    (
-                        'item e remessa localizados'
-                        if classificacao_sem_processo_oracle.criterios[
-                            str(item['id_registro'])
-                        ] == 'item'
-                        else (
+                    {
+                        'item': 'item e remessa localizados',
+                        'guia_carteira': (
                             'guia, carteira e remessa localizadas; serviço '
                             'não localizado no Oracle'
-                        )
-                    )
+                        ),
+                        'competencia_servico_carteira': (
+                            'competência, serviço, carteira e remessa '
+                            'localizados; guia não localizada no Oracle'
+                        ),
+                    }[
+                        classificacao_sem_processo_oracle.criterios[
+                            str(item['id_registro'])
+                        ]
+                    ]
                     + '; processo IPM não localizado por protocolo e valor'
                 ),
             }
@@ -1118,6 +1125,24 @@ def main() -> None:  # noqa: PLR0915
             ),
             'linhas_localizadas_no_oracle': len(
                 classificacao_sem_processo_oracle.identificadas
+            ),
+            'linhas_localizadas_chave_item': sum(
+                criterio == 'item'
+                for criterio in (
+                    classificacao_sem_processo_oracle.criterios.values()
+                )
+            ),
+            'linhas_localizadas_chave_guia_carteira': sum(
+                criterio == 'guia_carteira'
+                for criterio in (
+                    classificacao_sem_processo_oracle.criterios.values()
+                )
+            ),
+            'linhas_localizadas_chave_competencia_servico_carteira': sum(
+                criterio == 'competencia_servico_carteira'
+                for criterio in (
+                    classificacao_sem_processo_oracle.criterios.values()
+                )
             ),
             'linhas_correspondencia_oracle_ambigua': len(
                 classificacao_sem_processo_oracle.ambiguas

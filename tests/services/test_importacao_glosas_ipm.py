@@ -14,12 +14,15 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     associar_demonstrativos_a_processos,
     associar_processos_a_remessas,
     chave_conta_demonstrativo,
+    chave_item_competencia_demonstrativo,
+    chave_item_competencia_oracle,
     chave_item_demonstrativo,
     chave_item_oracle,
     classificar_demonstrativos_sem_processo_por_oracle,
     indexar_processos,
     normalizar_carteira,
     normalizar_competencia,
+    normalizar_mes_ano,
     resolver_item,
 )
 from scripts.importar_glosas_demonstrativo_ipm import (
@@ -50,6 +53,7 @@ def demonstrativo(**alteracoes):
         'id_registro': 'demo-1',
         'numero_protocolo': 'protocolo-1',
         'valor_protocolo': Decimal('100.00'),
+        'data_realizacao': date(2025, 12, 15),
         'numero_guia_senha': 'GUIA-1',
         'codigo_servico': 'SERVICO-1',
         'codigo_beneficiario': '1234567890',
@@ -151,6 +155,23 @@ def test_chave_da_conta_desconsidera_servico():
     )
 
 
+def test_chave_alternativa_usa_mes_ano_e_desconsidera_guia():
+    demo = demonstrativo(numero_guia_senha='GUIA-DEMONSTRATIVO')
+    oracle = {
+        'cd_remessa': 10,
+        'dt_competencia': date(2025, 12, 1),
+        'nr_guia': 'GUIA-ORACLE',
+        'cd_pro_fat': 'SERVICO-1',
+        'nr_carteira': '001234567890',
+    }
+
+    assert normalizar_mes_ano('15/12/2025') == (2025, 12)
+    assert (
+        chave_item_competencia_demonstrativo(demo, 10)
+        == chave_item_competencia_oracle(oracle)
+    )
+
+
 def test_resolve_multiplos_lancamentos_mesma_conta_sem_inventar_lancamento():
     resolucao = resolver_item([
         (CONTA_TESTE, 1),
@@ -193,6 +214,19 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         'cd_pro_fat': 'SERVICO-ORACLE',
         'nr_carteira': '001234567890',
     }
+    localizada_por_competencia = demonstrativo(
+        id_registro='localizada-por-competencia',
+        valor_protocolo=Decimal('500.00'),
+        numero_guia_senha='GUIA-DEMONSTRATIVO',
+        codigo_servico='SERVICO-COMPETENCIA',
+    )
+    item_oracle_mesma_competencia = {
+        'cd_remessa': 50,
+        'nr_guia': 'GUIA-ORACLE',
+        'cd_pro_fat': 'SERVICO-COMPETENCIA',
+        'nr_carteira': '001234567890',
+        'dt_competencia': date(2025, 12, 1),
+    }
     itens_por_chave = {
         chave_item_demonstrativo(localizada, 10): [
             {'cd_reg': 100, 'cd_lancamento': 1},
@@ -207,15 +241,29 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
         chave_item_oracle(item_oracle_mesma_conta): [
             {'cd_reg': 400, 'cd_lancamento': 1},
         ],
+        chave_item_oracle(item_oracle_mesma_competencia): [
+            {
+                **item_oracle_mesma_competencia,
+                'cd_reg': 500,
+                'cd_lancamento': 1,
+            },
+        ],
     }
 
     classificacao = classificar_demonstrativos_sem_processo_por_oracle(
-        [localizada, ausente, ambigua, localizada_por_conta],
+        [
+            localizada,
+            ausente,
+            ambigua,
+            localizada_por_conta,
+            localizada_por_competencia,
+        ],
         {
             Decimal('100.00'): {10},
             Decimal('200.00'): {20},
             Decimal('300.00'): {30, 31},
             Decimal('400.00'): {40},
+            Decimal('500.00'): {50},
         },
         itens_por_chave,
     )
@@ -223,10 +271,12 @@ def test_reclassifica_linha_sem_processo_quando_item_existe_no_oracle():
     assert classificacao.identificadas == {
         'localizada': 10,
         'localizada-por-conta': 40,
+        'localizada-por-competencia': 50,
     }
     assert classificacao.criterios == {
         'localizada': 'item',
         'localizada-por-conta': 'guia_carteira',
+        'localizada-por-competencia': 'competencia_servico_carteira',
     }
     assert [
         item['id_registro'] for item in classificacao.sem_correspondencia
@@ -266,6 +316,42 @@ def test_nao_reclassifica_por_guia_e_carteira_quando_conta_e_ambigua():
         (item['id_registro'], remessas)
         for item, remessas in classificacao.ambiguas
     ] == [('conta-ambigua', (10,))]
+
+
+def test_chave_alternativa_nao_repete_correspondencia_da_chave_anterior():
+    linha = demonstrativo(id_registro='prioridade-chave-anterior')
+    item_alternativo = {
+        'cd_remessa': 11,
+        'nr_guia': 'OUTRA-GUIA',
+        'cd_pro_fat': 'SERVICO-1',
+        'nr_carteira': '001234567890',
+        'dt_competencia': date(2025, 12, 1),
+    }
+
+    classificacao = classificar_demonstrativos_sem_processo_por_oracle(
+        [linha],
+        {Decimal('100.00'): {10, 11}},
+        {
+            chave_item_demonstrativo(linha, 10): [
+                {'cd_reg': 100, 'cd_lancamento': 1},
+            ],
+            chave_item_oracle(item_alternativo): [
+                {
+                    **item_alternativo,
+                    'cd_reg': 110,
+                    'cd_lancamento': 1,
+                },
+            ],
+        },
+    )
+
+    assert classificacao.identificadas == {
+        'prioridade-chave-anterior': 10,
+    }
+    assert classificacao.criterios == {
+        'prioridade-chave-anterior': 'item',
+    }
+    assert classificacao.ambiguas == ()
 
 
 def test_aplica_nfse_recebimento_e_glosa_nas_tabelas_existentes(
