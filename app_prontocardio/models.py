@@ -1211,6 +1211,7 @@ class ModelContaAtendimento:
     cd_gru_fat: Mapped[int | None] = mapped_column(init=False)
     ds_gru_fat: Mapped[str | None] = mapped_column(String, init=False)
     cd_pro_fat: Mapped[str | None] = mapped_column(String, init=False)
+    cd_tuss: Mapped[str | None] = mapped_column(String, init=False)
     descricao: Mapped[str | None] = mapped_column(String, init=False)
     nr_guia: Mapped[str | None] = mapped_column(String, init=False)
     cd_senha: Mapped[str | None] = mapped_column(String, init=False)

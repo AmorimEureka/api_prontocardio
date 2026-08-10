@@ -208,6 +208,15 @@ def chave_item_sem_guia_oracle(linha: Mapping) -> tuple:
     )
 
 
+def chave_item_sem_guia_tuss_oracle(linha: Mapping) -> tuple:
+    return (
+        int(linha['cd_remessa']),
+        normalizar_mes_ano(linha['dt_competencia']),
+        normalizar_texto(linha['cd_tuss']),
+        normalizar_carteira(linha['nr_carteira']),
+    )
+
+
 def resolver_item(
     candidatos: Iterable[tuple[int, int]],
 ) -> ResolucaoItem:
@@ -284,6 +293,7 @@ def classificar_demonstrativos_sem_processo_por_oracle(
     sem_correspondencia = []
     ambiguas = []
     itens_por_chave_sem_guia: dict[tuple, list[Mapping]] = defaultdict(list)
+    itens_por_chave_tuss: dict[tuple, list[Mapping]] = defaultdict(list)
     for itens in itens_por_chave.values():
         for item in itens:
             if normalizar_mes_ano(item.get('dt_competencia')) is None:
@@ -291,6 +301,10 @@ def classificar_demonstrativos_sem_processo_por_oracle(
             itens_por_chave_sem_guia[
                 chave_item_sem_guia_oracle(item)
             ].append(item)
+            if normalizar_texto(item.get('cd_tuss')):
+                itens_por_chave_tuss[
+                    chave_item_sem_guia_tuss_oracle(item)
+                ].append(item)
 
     for linha in demonstrativos:
         remessas_candidatas = sorted(
@@ -327,6 +341,23 @@ def classificar_demonstrativos_sem_processo_por_oracle(
                     (
                         'competencia_servico_carteira',
                         itens_por_chave_sem_guia,
+                        chave_item_sem_guia_demonstrativo,
+                    ),
+                ),
+            )
+
+        if not remessas_seguras and not remessas_ambiguas:
+            (
+                remessas_seguras,
+                remessas_ambiguas,
+                criterios_seguros,
+            ) = _resolver_remessas_por_criterios(
+                linha,
+                remessas_candidatas,
+                (
+                    (
+                        'competencia_tuss_carteira',
+                        itens_por_chave_tuss,
                         chave_item_sem_guia_demonstrativo,
                     ),
                 ),
