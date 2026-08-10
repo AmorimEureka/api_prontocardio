@@ -17,6 +17,7 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     chave_item_oracle,
     chave_item_sem_guia_demonstrativo,
     chave_item_sem_guia_oracle,
+    chave_item_sem_guia_tuss_oracle,
     classificar_demonstrativos_sem_processo_por_oracle,
     indexar_processos,
     normalizar_carteira,
@@ -213,6 +214,44 @@ def test_segunda_chave_usa_mes_ano_e_desconsidera_guia():
     )
 
 
+def test_terceira_chave_usa_mes_ano_tuss_carteira_e_desconsidera_guia():
+    demo = demonstrativo(
+        numero_guia_senha='GUIA-DEMONSTRATIVO',
+        codigo_servico='TUSS-1',
+    )
+    oracle = {
+        'cd_remessa': 10,
+        'dt_competencia': date(2025, 12, 15),
+        'nr_guia': 'GUIA-ORACLE',
+        'cd_pro_fat': 'SERVICO-INTERNO',
+        'cd_tuss': 'TUSS-1',
+        'nr_carteira': '001234567890',
+    }
+
+    assert (
+        chave_item_sem_guia_demonstrativo(demo, 10)
+        == chave_item_sem_guia_tuss_oracle(oracle)
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_tuss_oracle(
+        {**oracle, 'dt_competencia': date(2025, 11, 15)}
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_tuss_oracle(
+        {**oracle, 'cd_tuss': 'OUTRO-TUSS'}
+    )
+    assert chave_item_sem_guia_demonstrativo(
+        demo,
+        10,
+    ) != chave_item_sem_guia_tuss_oracle(
+        {**oracle, 'nr_carteira': '009999999999'}
+    )
+
+
 def test_resolve_multiplos_lancamentos_mesma_conta_sem_inventar_lancamento():
     resolucao = resolver_item([
         (CONTA_TESTE, 1),
@@ -391,6 +430,36 @@ def test_chave_alternativa_nao_repete_correspondencia_da_chave_anterior():
     assert classificacao.criterios == {
         'prioridade-chave-anterior': 'competencia_guia_servico_carteira',
     }
+    assert classificacao.ambiguas == ()
+
+
+def test_terceira_chave_so_classifica_linha_nao_resolvida_pelas_anteriores():
+    linha = demonstrativo(
+        id_registro='localizada-por-tuss',
+        codigo_servico='TUSS-1',
+    )
+    item_oracle = {
+        'cd_remessa': 10,
+        'nr_guia': 'OUTRA-GUIA',
+        'cd_pro_fat': 'SERVICO-INTERNO',
+        'cd_tuss': 'TUSS-1',
+        'nr_carteira': '001234567890',
+        'dt_competencia': date(2025, 12, 15),
+        'cd_reg': 100,
+        'cd_lancamento': 1,
+    }
+
+    classificacao = classificar_demonstrativos_sem_processo_por_oracle(
+        [linha],
+        {Decimal('100.00'): {10}},
+        {chave_item_oracle(item_oracle): [item_oracle]},
+    )
+
+    assert classificacao.identificadas == {'localizada-por-tuss': 10}
+    assert classificacao.criterios == {
+        'localizada-por-tuss': 'competencia_tuss_carteira',
+    }
+    assert classificacao.sem_correspondencia == ()
     assert classificacao.ambiguas == ()
 
 

@@ -294,6 +294,7 @@ def _carregar_itens_oracle(
                 ModelContaAtendimento.nr_guia,
                 ModelContaAtendimento.nr_carteira,
                 ModelContaAtendimento.cd_pro_fat,
+                ModelContaAtendimento.cd_tuss,
                 ModelContaAtendimento.descricao,
                 ModelContaAtendimento.dt_atendimento,
                 ModelContaAtendimento.dt_alta,
@@ -478,6 +479,11 @@ def _gerar_relatorios(  # noqa: PLR0913
                             'competência (MM/AAAA), serviço, carteira e '
                             'remessa localizados; guia não localizada no '
                             'Oracle'
+                        ),
+                        'competencia_tuss_carteira': (
+                            'competência (MM/AAAA), serviço TUSS, carteira '
+                            'e remessa localizados; guia e CD_PRO_FAT não '
+                            'localizados no Oracle'
                         ),
                     }[
                         classificacao_sem_processo_oracle.criterios[
@@ -1134,6 +1140,12 @@ def main() -> None:  # noqa: PLR0915
             ),
             'linhas_localizadas_chave_competencia_servico_carteira': sum(
                 criterio == 'competencia_servico_carteira'
+                for criterio in (
+                    classificacao_sem_processo_oracle.criterios.values()
+                )
+            ),
+            'linhas_localizadas_chave_competencia_tuss_carteira': sum(
+                criterio == 'competencia_tuss_carteira'
                 for criterio in (
                     classificacao_sem_processo_oracle.criterios.values()
                 )
