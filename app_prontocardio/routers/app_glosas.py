@@ -5,7 +5,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import String, cast, func, select
+from sqlalchemy import String, cast, false, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -15,6 +15,7 @@ from app_prontocardio.models import (
     ConciliacaoFaturamentoRemessa,
     ModelContaAtendimento,
     ModelConvenio,
+    ModelHpcPaciente,
     PrazoRecursoConvenio,
     RegistroGlosa,
     TipoAtendimento,
@@ -42,6 +43,7 @@ router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 TEXT_FILTER_FIELDS = {'nm_paciente', 'nm_convenio', 'descricao'}
+ORACLE_IN_MAX_VALUES = 1000
 
 
 def _is_oracle_connect_timeout(exc: SQLAlchemyError) -> bool:
@@ -322,12 +324,46 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
                     query = query.where(coluna == valor.value)
                 continue
 
+            if chave == 'cd_paciente' and isinstance(valor, tuple):
+                if not valor:
+                    query = query.where(false())
+                    continue
+
+                grupos = (
+                    valor[indice : indice + ORACLE_IN_MAX_VALUES]
+                    for indice in range(0, len(valor), ORACLE_IN_MAX_VALUES)
+                )
+                query = query.where(
+                    or_(*(coluna.in_(grupo) for grupo in grupos))
+                )
+                continue
+
             if chave in TEXT_FILTER_FIELDS and isinstance(valor, str):
                 query = query.where(coluna.ilike(f'%{valor}%'))
             else:
                 query = query.where(coluna == valor)
 
     return query
+
+
+def _resolver_filtro_nome_paciente(
+    session: Session,
+    filtros: dict,
+) -> dict:
+    filtros_resolvidos = dict(filtros)
+    nome_paciente = filtros_resolvidos.pop('nm_paciente', None)
+    if not isinstance(nome_paciente, str):
+        return filtros_resolvidos
+
+    codigos_paciente = tuple(
+        session.scalars(
+            select(ModelHpcPaciente.cd_paciente).where(
+                ModelHpcPaciente.paciente.ilike(f'%{nome_paciente}%')
+            )
+        )
+    )
+    filtros_resolvidos['cd_paciente'] = codigos_paciente
+    return filtros_resolvidos
 
 
 def _excluir_convenios_desabilitados(query, codigos_desabilitados):
@@ -382,6 +418,8 @@ def conta_atendimento(
                     'Informe pelo menos um criterio para realizar a pesquisa.'
                 ),
             )
+
+        filtros = _resolver_filtro_nome_paciente(session, filtros)
 
         codigos_desabilitados = tuple(
             session_postgres.scalars(

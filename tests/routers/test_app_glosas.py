@@ -2,9 +2,12 @@ from copy import deepcopy
 from datetime import date, datetime
 from decimal import Decimal
 from http import HTTPStatus
+from unittest.mock import Mock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
+from sqlalchemy.dialects import oracle
 
 from app_prontocardio.models import (
     ModelContaAtendimento,
@@ -12,6 +15,8 @@ from app_prontocardio.models import (
     RegistroGlosa,
 )
 from app_prontocardio.routers.app_glosas import (
+    _aplicar_filtros_conta_atendimento,
+    _resolver_filtro_nome_paciente,
     consultar_convenios,
     consultar_glosas_registradas,
     deletar_glosa,
@@ -91,6 +96,65 @@ def test_modelo_conta_atendimento_mapeia_nr_carteira_da_view():
 
     assert str(coluna.type) == 'VARCHAR(25)'
     assert coluna.nullable is True
+
+
+def test_filtro_por_nome_busca_primeiro_na_view_de_pacientes():
+    session = Mock()
+    session.scalars.return_value = [101, 202]
+
+    filtros = _resolver_filtro_nome_paciente(
+        session,
+        {'nm_paciente': 'ARLENE GONCA', 'cd_remessa': 17509},
+    )
+    consulta_pacientes = session.scalars.call_args.args[0]
+    sql_pacientes = str(
+        consulta_pacientes.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert filtros == {'cd_remessa': 17509, 'cd_paciente': (101, 202)}
+    assert '"HPC_V_PACIENTES".PACIENTE' in sql_pacientes
+
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        filtros,
+    )
+
+    sql_contas = str(
+        query.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'HPC_V_PACIENTES' not in sql_contas
+    assert 'CD_PACIENTE IN (101, 202)' in sql_contas
+    assert '"HPC_V_CONTA_ATENDIMENTO".NM_PACIENTE' not in sql_contas
+
+
+def test_filtro_por_nome_sem_paciente_nao_consulta_todas_as_contas():
+    session = Mock()
+    session.scalars.return_value = []
+
+    filtros = _resolver_filtro_nome_paciente(
+        session,
+        {'nm_paciente': 'PACIENTE INEXISTENTE'},
+    )
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        filtros,
+    )
+    sql = str(
+        query.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert filtros == {'cd_paciente': ()}
+    assert 'WHERE 0 = 1' in sql
 
 
 def test_criar_glosa_ignora_sn_ativo_do_payload(cliente, token_teste):
