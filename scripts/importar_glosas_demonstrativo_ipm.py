@@ -10,7 +10,8 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import delete, func, inspect, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app_prontocardio.database import oracle_engine, postgres_engine
@@ -18,10 +19,12 @@ from app_prontocardio.models import (
     AuditoriaConciliacaoFaturamento,
     ConciliacaoFaturamento,
     ConciliacaoFaturamentoRemessa,
+    GlosaNaoVinculadaIpm,
     ModelContaAtendimento,
     ModelGruPro,
     ModelHpcContaBancaria,
     ModelProFat,
+    NfseXml,
     ProcessoConciliacaoRemessa,
     RecebimentoRemessa,
     RegistroGlosa,
@@ -31,24 +34,26 @@ from app_prontocardio.models import (
     Usuario,
 )
 from app_prontocardio.services.importacao_glosas_ipm import (
+    AssociacaoDemonstrativo,
     ChaveProcesso,
-    associar_demonstrativos_a_processos,
+    IndicesItensOracle,
     associar_processos_a_remessas,
     chave_conta_bancaria,
-    chave_item_demonstrativo,
-    chave_item_oracle,
     classificar_demonstrativos_sem_processo_por_oracle,
     hash_nfse_ipm,
-    indexar_processos,
+    indexar_itens_oracle,
+    normalizar_competencia,
     normalizar_digitos,
     normalizar_dinheiro,
+    normalizar_mes_ano,
     normalizar_texto,
-    resolver_item,
+    resolver_correspondencia_item_oracle,
 )
 
 DATA_INICIAL_PADRAO = date(2025, 12, 1)
 DATA_FINAL_PADRAO = date(2026, 6, 30)
-ORACLE_IN_CHUNK_SIZE = 900
+MESES_POR_ANO = 12
+CONVENIO_IPM = 10
 
 
 @dataclass(frozen=True)
@@ -57,6 +62,8 @@ class ItemGlosaPlano:
     cd_lancamento: int | None
     demonstrativos: tuple[dict, ...]
     itens_oracle: tuple[dict, ...]
+    codigo_glosa: str | None = None
+    criterios_correspondencia: tuple[str | None, ...] = ()
 
     @property
     def valor_glosa(self) -> Decimal:
@@ -77,6 +84,7 @@ class RemessaPlano:
     cd_remessa: int
     dados_oracle: dict
     itens_glosa: tuple[ItemGlosaPlano, ...]
+    valor_glosa_nao_vinculada: Decimal = Decimal('0.00')
 
     @property
     def valor_total(self) -> Decimal:
@@ -87,7 +95,7 @@ class RemessaPlano:
         return normalizar_dinheiro(
             sum(
                 (item.valor_glosa for item in self.itens_glosa),
-                Decimal('0.00'),
+                self.valor_glosa_nao_vinculada,
             )
         )
 
@@ -134,6 +142,22 @@ def _argumentos() -> argparse.Namespace:
     parser.add_argument('--usuario-id', type=int)
     parser.add_argument('--aplicar', action='store_true')
     parser.add_argument(
+        '--substituir-carga-planilha',
+        action='store_true',
+        help=(
+            'Simula ou aplica a substituição integral da carga anterior da '
+            'planilha, preservando os demais dados de origem.'
+        ),
+    )
+    parser.add_argument(
+        '--dump-seguranca',
+        type=Path,
+        help=(
+            'Dump completo já validado, obrigatório ao aplicar a '
+            'substituição da carga anterior.'
+        ),
+    )
+    parser.add_argument(
         '--confirmar-gravacao',
         action='store_true',
         help='Confirma explicitamente a gravação na conexão configurada.',
@@ -150,6 +174,12 @@ def _proximo_dia(data_final: date) -> date:
     return date.fromordinal(data_final.toordinal() + 1)
 
 
+def _primeiro_dia_mes_seguinte(ano: int, mes: int) -> date:
+    if mes == MESES_POR_ANO:
+        return date(ano + 1, 1, 1)
+    return date(ano, mes + 1, 1)
+
+
 def _carregar_postgres(
     session: Session,
     data_inicial: date,
@@ -161,7 +191,7 @@ def _carregar_postgres(
             text(
                 """
             SELECT *
-              FROM api_prontocardio.demonstrativo_conta_ipm
+              FROM api_prontocardio.demonstrativo_processos_ipm
              WHERE referencia >= :inicio
                AND referencia < :fim
              ORDER BY referencia, id_registro
@@ -178,7 +208,7 @@ def _carregar_postgres(
             text(
                 """
             SELECT MIN(referencia) AS inicio, MAX(referencia) AS fim
-              FROM api_prontocardio.demonstrativo_conta_ipm
+              FROM api_prontocardio.demonstrativo_processos_ipm
             """
             )
         )
@@ -186,7 +216,6 @@ def _carregar_postgres(
         .one()
     )
     tabelas = (
-        'processos_ipm_saude_cogestao',
         'processos_ipm',
         'processos_nota_fiscal_ipm',
         'processos_empenho_ipm',
@@ -206,10 +235,70 @@ def _carregar_postgres(
     return resultado
 
 
+def _associar_demonstrativos_da_view(
+    demonstrativos: list[dict],
+) -> tuple[AssociacaoDemonstrativo, set[ChaveProcesso]]:
+    unicas: dict[str, ChaveProcesso] = {}
+    sem_processo = []
+    ambiguas = []
+    processos_historicos: set[ChaveProcesso] = set()
+
+    for linha in demonstrativos:
+        status = normalizar_texto(linha.get('status_associacao'))
+        if status.startswith('ASSOCIADO'):
+            competencia = normalizar_competencia(
+                linha.get('competencia_producao')
+            )
+            valor = linha.get('valor_protocolo_cogestao')
+            numero = normalizar_texto(linha.get('numero_processo'))
+            if competencia is None or valor is None or not numero:
+                sem_processo.append(linha)
+                continue
+            chave = ChaveProcesso(
+                numero_processo=numero,
+                competencia=competencia,
+                valor_protocolo=normalizar_dinheiro(valor),
+            )
+            unicas[str(linha['id_registro'])] = chave
+            processos_historicos.add(chave)
+            continue
+
+        if status == 'AMBIGUO':
+            candidatos = []
+            for candidato in linha.get('candidatos_associacao') or []:
+                competencia = normalizar_competencia(
+                    candidato.get('competencia_producao')
+                )
+                valor = candidato.get('valor_protocolo')
+                numero = normalizar_texto(candidato.get('numero_processo'))
+                if competencia is None or valor is None or not numero:
+                    continue
+                chave = ChaveProcesso(
+                    numero_processo=numero,
+                    competencia=competencia,
+                    valor_protocolo=normalizar_dinheiro(valor),
+                )
+                candidatos.append(chave)
+                processos_historicos.add(chave)
+            ambiguas.append((linha, tuple(sorted(set(candidatos)))))
+            continue
+
+        sem_processo.append(linha)
+
+    return (
+        AssociacaoDemonstrativo(
+            unicas=unicas,
+            sem_processo=tuple(sem_processo),
+            ambiguas=tuple(ambiguas),
+        ),
+        processos_historicos,
+    )
+
+
 def _carregar_remessas_oracle(
     session: Session,
     cnpjs: set[str],
-) -> tuple[dict[Decimal, set[int]], dict[int, dict]]:
+) -> tuple[dict[tuple[Decimal, str], set[int]], dict[int, dict]]:
     if not cnpjs:
         return {}, {}
     contas = (
@@ -218,14 +307,18 @@ def _carregar_remessas_oracle(
             ModelContaAtendimento.cd_convenio.label('cd_convenio'),
             ModelContaAtendimento.cnpj_convenio.label('cnpj_convenio'),
             ModelContaAtendimento.nm_convenio.label('convenio'),
-            ModelContaAtendimento.cd_reg.label('conta'),
-            ModelContaAtendimento.vl_total_registro.label('valor'),
-            func.min(ModelContaAtendimento.dt_competencia).label(
-                'competencia'
+            ModelContaAtendimento.dt_competencia.label('competencia'),
+            func.max(ModelContaAtendimento.vl_total_conta).label(
+                'valor_total_conta'
+            ),
+            func.max(ModelContaAtendimento.vl_total_registro).label(
+                'valor_total_registro'
             ),
         )
         .where(
             ModelContaAtendimento.cd_remessa.is_not(None),
+            ModelContaAtendimento.sn_pertence_pacote == 'N',
+            ModelContaAtendimento.cd_convenio == CONVENIO_IPM,
             func.regexp_replace(
                 ModelContaAtendimento.cnpj_convenio,
                 '[^0-9]',
@@ -237,8 +330,7 @@ def _carregar_remessas_oracle(
             ModelContaAtendimento.cd_convenio,
             ModelContaAtendimento.cnpj_convenio,
             ModelContaAtendimento.nm_convenio,
-            ModelContaAtendimento.cd_reg,
-            ModelContaAtendimento.vl_total_registro,
+            ModelContaAtendimento.dt_competencia,
         )
         .subquery()
     )
@@ -247,15 +339,18 @@ def _carregar_remessas_oracle(
         contas.c.cd_convenio,
         contas.c.cnpj_convenio,
         contas.c.convenio,
-        func.sum(func.coalesce(contas.c.valor, 0)).label('valor_total'),
+        func.sum(func.coalesce(contas.c.valor_total_conta, 0)).label(
+            'valor_total'
+        ),
         func.min(contas.c.competencia).label('competencia'),
     ).group_by(
         contas.c.cd_remessa,
         contas.c.cd_convenio,
         contas.c.cnpj_convenio,
         contas.c.convenio,
+        func.to_char(contas.c.competencia, 'MM/YYYY'),
     )
-    indice: dict[Decimal, set[int]] = defaultdict(set)
+    indice: dict[tuple[Decimal, str], set[int]] = defaultdict(set)
     dados = {}
     for linha in session.execute(query).mappings():
         item = dict(linha)
@@ -263,74 +358,111 @@ def _carregar_remessas_oracle(
         item['cd_remessa'] = codigo
         item['cnpj_convenio'] = normalizar_digitos(item['cnpj_convenio'])
         item['valor_total'] = normalizar_dinheiro(item['valor_total'])
-        indice[item['valor_total']].add(codigo)
+        competencia = item['competencia'].strftime('%m/%Y')
+        indice[(item['valor_total'], competencia)].add(codigo)
         dados[codigo] = item
     return dict(indice), dados
 
 
 def _carregar_itens_oracle(
     session: Session,
-    remessas: set[int],
-) -> tuple[dict[tuple, list[dict]], dict[tuple[int, int, int], dict]]:
-    por_chave: dict[tuple, list[dict]] = defaultdict(list)
+    cnpjs: set[str],
+    competencias: set[tuple[int, int]],
+) -> tuple[list[dict], dict[tuple[int, int, int], dict]]:
+    if not cnpjs or not competencias:
+        return [], {}
+    ano_inicial, mes_inicial = min(competencias)
+    ano_final, mes_final = max(competencias)
+    data_inicial = date(ano_inicial, mes_inicial, 1)
+    data_final_exclusiva = _primeiro_dia_mes_seguinte(
+        ano_final,
+        mes_final,
+    )
+    itens = []
     por_identidade = {}
-    codigos = sorted(remessas)
-    for offset in range(0, len(codigos), ORACLE_IN_CHUNK_SIZE):
-        chunk = codigos[offset : offset + ORACLE_IN_CHUNK_SIZE]
-        query = (
-            select(
-                ModelContaAtendimento.cd_remessa,
-                ModelContaAtendimento.cd_reg,
-                ModelContaAtendimento.cd_lancamento,
-                ModelContaAtendimento.cd_atendimento,
-                ModelContaAtendimento.cd_paciente,
-                ModelContaAtendimento.nm_paciente,
-                ModelContaAtendimento.cd_prestador,
-                ModelContaAtendimento.nm_prestador,
-                ModelContaAtendimento.cd_convenio,
-                ModelContaAtendimento.cnpj_convenio,
-                ModelContaAtendimento.nm_convenio,
-                ModelContaAtendimento.tp_atendimento,
-                ModelContaAtendimento.nr_guia,
-                ModelContaAtendimento.nr_carteira,
-                ModelContaAtendimento.cd_pro_fat,
-                ModelContaAtendimento.cd_tuss,
-                ModelContaAtendimento.descricao,
-                ModelContaAtendimento.dt_atendimento,
-                ModelContaAtendimento.dt_alta,
-                ModelContaAtendimento.dt_competencia,
-                ModelContaAtendimento.dt_lancamento,
-                ModelContaAtendimento.qt_lancamento,
-                ModelContaAtendimento.vl_total_conta,
-                ModelContaAtendimento.cd_gru_fat,
-                ModelContaAtendimento.ds_gru_fat,
-                ModelGruPro.cd_gru_pro,
-                ModelGruPro.ds_gru_pro,
-            )
-            .select_from(ModelContaAtendimento)
-            .outerjoin(
-                ModelProFat,
-                ModelProFat.cd_pro_fat == ModelContaAtendimento.cd_pro_fat,
-            )
-            .outerjoin(
-                ModelGruPro,
-                ModelGruPro.cd_gru_pro == ModelProFat.cd_gru_pro,
-            )
-            .where(ModelContaAtendimento.cd_remessa.in_(chunk))
+    query = (
+        select(
+            ModelContaAtendimento.cd_remessa,
+            ModelContaAtendimento.cd_reg,
+            ModelContaAtendimento.cd_lancamento,
+            ModelContaAtendimento.cd_atendimento,
+            ModelContaAtendimento.cd_paciente,
+            ModelContaAtendimento.nm_paciente,
+            ModelContaAtendimento.cd_prestador,
+            ModelContaAtendimento.nm_prestador,
+            ModelContaAtendimento.cd_convenio,
+            ModelContaAtendimento.cnpj_convenio,
+            ModelContaAtendimento.nm_convenio,
+            ModelContaAtendimento.tp_atendimento,
+            ModelContaAtendimento.nr_guia,
+            ModelContaAtendimento.nr_carteira,
+            ModelContaAtendimento.cd_pro_fat,
+            ModelContaAtendimento.cd_tuss,
+            ModelContaAtendimento.descricao,
+            ModelContaAtendimento.dt_atendimento,
+            ModelContaAtendimento.dt_alta,
+            ModelContaAtendimento.dt_competencia,
+            ModelContaAtendimento.dt_lancamento,
+            ModelContaAtendimento.qt_lancamento,
+            ModelContaAtendimento.vl_total_conta,
+            ModelContaAtendimento.cd_gru_fat,
+            ModelContaAtendimento.ds_gru_fat,
+            ModelGruPro.cd_gru_pro,
+            ModelGruPro.ds_gru_pro,
         )
-        for linha in session.execute(query).mappings():
-            item = dict(linha)
-            chave = chave_item_oracle(item)
-            identidade = (
-                int(item['cd_remessa']),
-                int(item['cd_reg']),
-                int(item['cd_lancamento']),
-            )
-            if identidade in por_identidade:
-                continue
-            por_identidade[identidade] = item
-            por_chave[chave].append(item)
-    return dict(por_chave), por_identidade
+        .select_from(ModelContaAtendimento)
+        .outerjoin(
+            ModelProFat,
+            ModelProFat.cd_pro_fat == ModelContaAtendimento.cd_pro_fat,
+        )
+        .outerjoin(
+            ModelGruPro,
+            ModelGruPro.cd_gru_pro == ModelProFat.cd_gru_pro,
+        )
+        .where(
+            ModelContaAtendimento.cd_remessa.is_not(None),
+            or_(
+                (
+                    ModelContaAtendimento.dt_competencia >= data_inicial
+                )
+                & (
+                    ModelContaAtendimento.dt_competencia
+                    < data_final_exclusiva
+                ),
+                (
+                    ModelContaAtendimento.dt_lancamento >= data_inicial
+                )
+                & (
+                    ModelContaAtendimento.dt_lancamento
+                    < data_final_exclusiva
+                ),
+                (
+                    ModelContaAtendimento.dt_atendimento >= data_inicial
+                )
+                & (
+                    ModelContaAtendimento.dt_atendimento
+                    < data_final_exclusiva
+                ),
+            ),
+            func.regexp_replace(
+                ModelContaAtendimento.cnpj_convenio,
+                '[^0-9]',
+                '',
+            ).in_(cnpjs),
+        )
+    )
+    for linha in session.execute(query).mappings():
+        item = dict(linha)
+        identidade = (
+            int(item['cd_remessa']),
+            int(item['cd_reg']),
+            int(item['cd_lancamento']),
+        )
+        if identidade in por_identidade:
+            continue
+        por_identidade[identidade] = item
+        itens.append(item)
+    return itens, por_identidade
 
 
 def _carregar_contas_oracle(
@@ -445,6 +577,7 @@ def _gerar_relatorios(  # noqa: PLR0913
         'data_realizacao',
         'numero_protocolo',
         'valor_protocolo',
+        'valor_processado',
         'numero_guia_senha',
         'codigo_servico',
         'codigo_beneficiario',
@@ -472,25 +605,56 @@ def _gerar_relatorios(  # noqa: PLR0913
                 'situacao': (
                     {
                         'competencia_guia_servico_carteira': (
-                            'competência (MM/AAAA), guia, serviço, carteira '
-                            'e remessa localizados'
-                        ),
-                        'competencia_servico_carteira': (
-                            'competência (MM/AAAA), serviço, carteira e '
-                            'remessa localizados; guia não localizada no '
+                            'competência (MM/AAAA), guia, CD_PRO_FAT e '
+                            'carteira localizados; remessa obtida do item '
                             'Oracle'
                         ),
+                        'competencia_servico_carteira': (
+                            'competência (MM/AAAA), CD_PRO_FAT e carteira '
+                            'localizados; remessa obtida do item Oracle; '
+                            'guia desconsiderada'
+                        ),
                         'competencia_tuss_carteira': (
-                            'competência (MM/AAAA), serviço TUSS, carteira '
-                            'e remessa localizados; guia e CD_PRO_FAT não '
-                            'localizados no Oracle'
+                            'competência (MM/AAAA), CD_TUSS, carteira e '
+                            'VL_TOTAL_CONTA/valor processado localizados; '
+                            'remessa obtida do item Oracle; guia e '
+                            'CD_PRO_FAT desconsiderados'
+                        ),
+                        'lancamento_coalesce_servico_carteira': (
+                            'data de realização/data de lançamento '
+                            '(MM/AAAA), COALESCE(CD_PRO_FAT, CD_TUSS) e '
+                            'carteira localizados; remessa obtida do item '
+                            'Oracle; guia e competência desconsideradas'
+                        ),
+                        'competencia_coalesce_servico_valor': (
+                            'competência (MM/AAAA), '
+                            'COALESCE(CD_TUSS, CD_PRO_FAT) e '
+                            'VL_TOTAL_CONTA/valor processado localizados; '
+                            'remessa obtida do item Oracle; guia e carteira '
+                            'desconsideradas'
+                        ),
+                        'atendimento_guia_coalesce_servico_valor': (
+                            'data de realização/data de atendimento '
+                            '(MM/AAAA), guia, '
+                            'COALESCE(CD_TUSS, CD_PRO_FAT) e '
+                            'VL_TOTAL_CONTA/valor processado localizados; '
+                            'remessa obtida do item Oracle; competência e '
+                            'carteira desconsideradas'
+                        ),
+                        'lancamento_pro_fat_carteira_valor': (
+                            'data de realização/data de lançamento '
+                            '(MM/AAAA), CD_PRO_FAT, carteira e '
+                            'VL_TOTAL_CONTA/valor processado localizados; '
+                            'remessa obtida do item Oracle; guia e '
+                            'competência desconsideradas'
                         ),
                     }[
                         classificacao_sem_processo_oracle.criterios[
                             str(item['id_registro'])
                         ]
                     ]
-                    + '; processo IPM não localizado por protocolo e valor'
+                    + '; processo IPM não localizado por protocolo, '
+                    'competência (MM/AAAA) e valor de desempate'
                 ),
             }
             for item in demonstrativos_sem_processo_iniciais
@@ -594,7 +758,7 @@ def _existentes_postgres(
         )
     )
     importados = set()
-    if inspect(session.bind).has_table(
+    if inspect(session.connection()).has_table(
         'registros_glosa_demonstrativo_ipm',
         schema='api_prontocardio',
     ):
@@ -604,57 +768,210 @@ def _existentes_postgres(
     return conciliadas, importados
 
 
+def _auditar_carga_substituivel(session: Session) -> dict[str, int]:
+    totais = {
+        'conciliacoes_faturamento': int(
+            session.scalar(select(func.count(ConciliacaoFaturamento.id))) or 0
+        ),
+        'conciliacoes_faturamento_remessas': int(
+            session.scalar(
+                select(func.count(ConciliacaoFaturamentoRemessa.id))
+            )
+            or 0
+        ),
+        'registros_glosa': int(
+            session.scalar(select(func.count(RegistroGlosa.id))) or 0
+        ),
+        'registros_glosa_triagem': int(
+            session.scalar(
+                select(func.count(RegistroGlosa.id)).where(
+                    RegistroGlosa.origem_registro == 'triagem'
+                )
+            )
+            or 0
+        ),
+        'registros_glosa_sem_vinculo': int(
+            session.scalar(
+                select(func.count(RegistroGlosa.id)).where(
+                    RegistroGlosa.conciliacao_remessa_id.is_(None)
+                )
+            )
+            or 0
+        ),
+        'recebimentos_remessas': int(
+            session.scalar(select(func.count(RecebimentoRemessa.id))) or 0
+        ),
+        'processos_conciliacao_remessa': int(
+            session.scalar(
+                select(func.count(ProcessoConciliacaoRemessa.id))
+            )
+            or 0
+        ),
+        'remessas_financeiras': int(
+            session.scalar(select(func.count(RemessaFinanceira.cd_remessa)))
+            or 0
+        ),
+    }
+    if (
+        totais['registros_glosa_triagem'] > 0
+        or totais['registros_glosa_sem_vinculo'] > 0
+    ):
+        raise RuntimeError(
+            'Substituição recusada: existem registros de glosa manuais ou '
+            'desvinculados da carga de conciliação.'
+        )
+    return totais
+
+
+def _garantir_tabela_rastreio_ipm(session: Session) -> None:
+    RegistroGlosaDemonstrativoIpm.__table__.create(
+        bind=session.connection(),
+        checkfirst=True,
+    )
+
+
+def _remover_carga_planilha_anterior(session: Session) -> dict[str, int]:
+    exclusoes = (
+        ('registros_glosa_demonstrativo_ipm', RegistroGlosaDemonstrativoIpm),
+        ('registros_glosa', RegistroGlosa),
+        ('recebimentos_remessas', RecebimentoRemessa),
+        (
+            'auditorias_conciliacao_faturamento',
+            AuditoriaConciliacaoFaturamento,
+        ),
+        ('conciliacoes_faturamento_remessas', ConciliacaoFaturamentoRemessa),
+        ('conciliacoes_faturamento', ConciliacaoFaturamento),
+        ('processos_conciliacao_remessa', ProcessoConciliacaoRemessa),
+        ('remessas_financeiras', RemessaFinanceira),
+    )
+    removidos = {}
+    for nome, modelo in exclusoes:
+        resultado = session.execute(delete(modelo))
+        removidos[nome] = int(resultado.rowcount or 0)
+    return removidos
+
+
+def _sincronizar_glosas_nao_vinculadas(
+    session: Session,
+    pendencias: list[dict],
+    ids_vinculados: set[str],
+) -> int:
+    ids_pendentes = {str(item['id_registro']) for item in pendencias}
+    ids_resolvidos = ids_vinculados - ids_pendentes
+    if ids_resolvidos:
+        session.execute(
+            delete(GlosaNaoVinculadaIpm).where(
+                GlosaNaoVinculadaIpm.id_registro.in_(ids_resolvidos)
+            )
+        )
+
+    agora = datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
+    for item in pendencias:
+        valores = {
+            'id_registro': str(item['id_registro']),
+            'numero_processo': str(item['numero_processo']),
+            'cd_remessa': int(item['cd_remessa']),
+            'motivo': str(item['motivo']),
+            'criterio_correspondencia': item.get(
+                'criterio_correspondencia'
+            ),
+            'remessas_candidatas': item.get('remessas_candidatas') or [],
+            'numero_protocolo': item.get('numero_protocolo'),
+            'data_realizacao': item.get('data_realizacao'),
+            'numero_guia_senha': item.get('numero_guia_senha'),
+            'codigo_servico': item.get('codigo_servico'),
+            'codigo_beneficiario': item.get('codigo_beneficiario'),
+            'codigo_glosa': item.get('codigo_glosa'),
+            'valor_processado': item.get('valor_processado'),
+            'valor_glosa': normalizar_dinheiro(item['valor_glosa']),
+            'data_ultima_tentativa': agora,
+        }
+        comando = pg_insert(GlosaNaoVinculadaIpm).values(**valores)
+        session.execute(
+            comando.on_conflict_do_update(
+                index_elements=[GlosaNaoVinculadaIpm.id_registro],
+                set_={
+                    chave: valor
+                    for chave, valor in valores.items()
+                    if chave != 'id_registro'
+                },
+            )
+        )
+    return len(pendencias)
+
+
 def _preparar_itens_glosa(  # noqa: PLR0913
     demonstrativos: list[dict],
     processos_demo: dict[str, ChaveProcesso],
     remessas_processos: dict[ChaveProcesso, int],
-    itens_por_chave: dict[tuple, list[dict]],
+    indices_itens_oracle: IndicesItensOracle,
     itens_por_identidade: dict[tuple[int, int, int], dict],
-) -> tuple[dict[int, tuple[ItemGlosaPlano, ...]], list[dict], set[int]]:
-    agrupados: dict[tuple[int, int, int | None], list[tuple[dict, tuple]]] = (
-        defaultdict(list)
-    )
+) -> tuple[dict[int, tuple[ItemGlosaPlano, ...]], list[dict], set[str]]:
+    agrupados: dict[
+        tuple[int, int, int | None, str | None],
+        list[tuple[dict, tuple, str | None]],
+    ] = defaultdict(list)
     sem_correspondencia = []
-    bloqueadas = set()
+    avaliados = set()
     for demonstrativo in demonstrativos:
         if normalizar_dinheiro(demonstrativo['valor_glosa']) <= 0:
             continue
         processo = processos_demo.get(str(demonstrativo['id_registro']))
         if processo is None:
             continue
-        cd_remessa = remessas_processos.get(processo)
-        if cd_remessa is None:
+        remessa_processo = remessas_processos.get(processo)
+        if remessa_processo is None:
             continue
-        candidatos = itens_por_chave.get(
-            chave_item_demonstrativo(demonstrativo, cd_remessa),
-            [],
+        avaliados.add(str(demonstrativo['id_registro']))
+        correspondencia = resolver_correspondencia_item_oracle(
+            demonstrativo,
+            indices_itens_oracle,
+            cd_remessa_esperada=remessa_processo,
         )
-        identidades = {
-            (int(item['cd_reg']), int(item['cd_lancamento']))
-            for item in candidatos
-        }
-        resolucao = resolver_item(identidades)
-        if resolucao.status in {'nao_encontrado', 'ambiguo'}:
-            bloqueadas.add(cd_remessa)
+        motivo = None
+        if correspondencia.status in {'nao_encontrado', 'ambiguo'}:
+            motivo = correspondencia.status
+        elif correspondencia.cd_remessa != remessa_processo:
+            motivo = 'remessa_divergente'
+        if motivo is not None:
             sem_correspondencia.append({
                 **demonstrativo,
                 'numero_processo': processo.numero_processo,
-                'cd_remessa': cd_remessa,
-                'motivo': resolucao.status,
+                'cd_remessa': remessa_processo,
+                'motivo': motivo,
+                'criterio_correspondencia': correspondencia.criterio,
+                'remessas_candidatas': list(
+                    correspondencia.remessas_candidatas
+                ),
             })
             continue
+        resolucao = correspondencia.resolucao
+        if resolucao is None:
+            raise RuntimeError('Correspondência Oracle sem resolução do item.')
         chave_grupo = (
-            cd_remessa,
+            remessa_processo,
             int(resolucao.conta),
             resolucao.cd_lancamento,
+            normalizar_texto(demonstrativo.get('codigo_glosa')) or None,
         )
-        agrupados[chave_grupo].append((demonstrativo, resolucao.candidatos))
+        agrupados[chave_grupo].append(
+            (
+                demonstrativo,
+                resolucao.candidatos,
+                correspondencia.criterio,
+            )
+        )
 
     por_remessa: dict[int, list[ItemGlosaPlano]] = defaultdict(list)
-    for (cd_remessa, conta, lancamento), linhas in agrupados.items():
+    for (
+        cd_remessa,
+        conta,
+        lancamento,
+        codigo_glosa,
+    ), linhas in agrupados.items():
         identidades = {
             (cd_remessa, conta, item_lancamento)
-            for _, candidatos in linhas
+            for _, candidatos, _ in linhas
             for item_conta, item_lancamento in candidatos
             if item_conta == conta
         }
@@ -667,8 +984,12 @@ def _preparar_itens_glosa(  # noqa: PLR0913
             ItemGlosaPlano(
                 conta=conta,
                 cd_lancamento=lancamento,
+                codigo_glosa=codigo_glosa,
                 demonstrativos=tuple(item[0] for item in linhas),
                 itens_oracle=itens_oracle,
+                criterios_correspondencia=tuple(
+                    item[2] for item in linhas
+                ),
             )
         )
     return (
@@ -676,13 +997,17 @@ def _preparar_itens_glosa(  # noqa: PLR0913
             remessa: tuple(
                 sorted(
                     itens,
-                    key=lambda item: (item.conta, item.cd_lancamento or -1),
+                    key=lambda item: (
+                        item.conta,
+                        item.cd_lancamento or -1,
+                        item.codigo_glosa or '',
+                    ),
                 )
             )
             for remessa, itens in por_remessa.items()
         },
         sem_correspondencia,
-        bloqueadas,
+        avaliados,
     )
 
 
@@ -690,7 +1015,7 @@ def _preparar_plano(  # noqa: PLR0912, PLR0913, PLR0915
     associacao_escopo,
     dados_remessas: dict[int, dict],
     itens_glosa: dict[int, tuple[ItemGlosaPlano, ...]],
-    remessas_bloqueadas: set[int],
+    glosas_nao_vinculadas: list[dict],
     processos: dict[str, dict],
     notas: dict[str, dict],
     contas_bancarias: dict[str, int],
@@ -698,12 +1023,17 @@ def _preparar_plano(  # noqa: PLR0912, PLR0913, PLR0915
 ) -> tuple[tuple[ProcessoPlano, ...], list[dict]]:
     remessas_por_processo: dict[str, list[RemessaPlano]] = defaultdict(list)
     exclusoes = []
+    glosa_nao_vinculada_por_remessa: dict[int, Decimal] = defaultdict(
+        lambda: Decimal('0.00')
+    )
+    for item in glosas_nao_vinculadas:
+        glosa_nao_vinculada_por_remessa[int(item['cd_remessa'])] += (
+            normalizar_dinheiro(item['valor_glosa'])
+        )
     for chave, cd_remessa in associacao_escopo.unicas.items():
         motivo = None
         processo = processos.get(chave.numero_processo)
-        if cd_remessa in remessas_bloqueadas:
-            motivo = 'item de glosa sem correspondência única no Oracle'
-        elif cd_remessa in remessas_conciliadas:
+        if cd_remessa in remessas_conciliadas:
             motivo = 'remessa já modelada ou conciliada'
         elif processo is None:
             motivo = 'processo não encontrado em processos_ipm'
@@ -725,6 +1055,9 @@ def _preparar_plano(  # noqa: PLR0912, PLR0913, PLR0915
                 cd_remessa=cd_remessa,
                 dados_oracle=dados_remessa,
                 itens_glosa=itens_glosa.get(cd_remessa, ()),
+                valor_glosa_nao_vinculada=normalizar_dinheiro(
+                    glosa_nao_vinculada_por_remessa[cd_remessa]
+                ),
             )
             if remessa.valor_glosado > remessa.valor_total:
                 motivo = 'valor glosado maior que o total da remessa'
@@ -774,6 +1107,36 @@ def _quantidade_item_oracle(item: ItemGlosaPlano) -> Decimal:
     return max(quantidade, Decimal('1.00'))
 
 
+def _resolver_nfse_row_hash(session: Session, nota_processo: dict) -> str:
+    numero_nfse = normalizar_texto(nota_processo.get('numero_nfse'))
+    cnpj_prestador = normalizar_digitos(
+        nota_processo.get('cnpj_cpf_nif_prestador')
+    )
+    if numero_nfse:
+        candidatas = session.scalars(
+            select(NfseXml).where(
+                or_(
+                    NfseXml.numero_nfse == numero_nfse,
+                    func.ltrim(NfseXml.numero_nfse, '0')
+                    == (numero_nfse.lstrip('0') or '0'),
+                )
+            )
+        ).all()
+        nfse = next(
+            (
+                candidata
+                for candidata in candidatas
+                if not cnpj_prestador
+                or normalizar_digitos(candidata.prestador_cnpj)
+                == cnpj_prestador
+            ),
+            candidatas[0] if len(candidatas) == 1 else None,
+        )
+        if nfse is not None:
+            return nfse.row_hash
+    return hash_nfse_ipm(nota_processo['id_registro'])
+
+
 def _criar_registro_glosa(  # noqa: PLR0913
     session: Session,
     plano: ProcessoPlano,
@@ -783,11 +1146,6 @@ def _criar_registro_glosa(  # noqa: PLR0913
     agora: datetime,
 ) -> None:
     origem = item.itens_oracle[0]
-    codigos = sorted({
-        normalizar_texto(linha['codigo_glosa'])
-        for linha in item.demonstrativos
-        if normalizar_texto(linha['codigo_glosa'])
-    })
     descricoes = sorted({
         str(linha['descricao_servico']).strip()
         for linha in item.demonstrativos
@@ -824,9 +1182,15 @@ def _criar_registro_glosa(  # noqa: PLR0913
         processo_recurso=None,
         data_glosa=max(datas_glosa),
         motivo_glosa=(
-            f'Glosa IPM - códigos {", ".join(codigos)}'
-            if codigos
-            else 'Glosa IPM sem código informado'
+            item.codigo_glosa
+            or next(
+                (
+                    normalizar_texto(linha.get('codigo_glosa'))
+                    for linha in item.demonstrativos
+                    if normalizar_texto(linha.get('codigo_glosa'))
+                ),
+                None,
+            )
         ),
         descricao_glosa=(
             f'{"; ".join(descricoes) or "Item do demonstrativo IPM"}. '
@@ -851,6 +1215,11 @@ def _criar_registro_glosa(  # noqa: PLR0913
         ds_gru_pro=origem['ds_gru_pro'] or 'Grupo não informado',
         cd_gru_fat=int(origem['cd_gru_fat'] or 0),
         ds_gru_fat=origem['ds_gru_fat'] or 'Grupo não informado',
+        cd_tuss=(
+            str(origem.get('cd_tuss')).strip()
+            if origem.get('cd_tuss')
+            else None
+        ),
         conciliacao_remessa_id=vinculo.id,
         origem_registro='conciliacao',
         sn_glosado='true',
@@ -859,10 +1228,18 @@ def _criar_registro_glosa(  # noqa: PLR0913
     registro.data_criacao = agora
     session.add(registro)
     session.flush()
-    for demonstrativo in item.demonstrativos:
+    criterios = item.criterios_correspondencia or tuple(
+        None for _ in item.demonstrativos
+    )
+    for demonstrativo, criterio in zip(
+        item.demonstrativos,
+        criterios,
+        strict=True,
+    ):
         rastreio = RegistroGlosaDemonstrativoIpm(
             id_registro=str(demonstrativo['id_registro']),
             registro_glosa_id=registro.id,
+            criterio_correspondencia=criterio,
         )
         rastreio.data_importacao = agora
         session.add(rastreio)
@@ -882,7 +1259,7 @@ def _aplicar_plano(
             == 'FINALIZADO'
         )
         conciliacao = ConciliacaoFaturamento(
-            nfse_row_hash=hash_nfse_ipm(processo.nota['id_registro']),
+            nfse_row_hash=_resolver_nfse_row_hash(session, processo.nota),
             numero_nfse=str(processo.nota['numero_nfse']).strip(),
             cnpj_convenio=processo.remessas[0].dados_oracle['cnpj_convenio'],
             convenio=processo.remessas[0].dados_oracle['convenio'],
@@ -1017,21 +1394,10 @@ def main() -> None:  # noqa: PLR0915
             args.data_inicial,
             fim_exclusivo,
         )
-        indice_processos, dados_cog = indexar_processos(
-            fontes['processos_ipm_saude_cogestao']
-        )
-        associacao_demo = associar_demonstrativos_a_processos(
-            fontes['demonstrativos'],
-            indice_processos,
+        associacao_demo, processos_historicos = (
+            _associar_demonstrativos_da_view(fontes['demonstrativos'])
         )
         processos_escopo = set(associacao_demo.unicas.values())
-        processos_historicos = {
-            chave
-            for chave in dados_cog
-            if fontes['inicio_fisico']
-            <= chave.competencia
-            <= fontes['fim_fisico']
-        }
         cnpjs = {
             normalizar_digitos(item['cnpj_operadora'])
             for item in fontes['demonstrativos']
@@ -1050,33 +1416,32 @@ def main() -> None:  # noqa: PLR0915
                 processos_historicos,
                 indice_remessas,
             )
-            remessas_para_itens = set(associacao_escopo.unicas.values())
-            for demonstrativo in associacao_demo.sem_processo:
-                remessas_para_itens.update(
-                    indice_remessas.get(
-                        normalizar_dinheiro(demonstrativo['valor_protocolo']),
-                        set(),
-                    )
-                )
-            itens_por_chave, itens_por_identidade = _carregar_itens_oracle(
+            competencias_demonstrativo = {
+                competencia
+                for item in fontes['demonstrativos']
+                if (competencia := normalizar_mes_ano(item['data_realizacao']))
+                is not None
+            }
+            itens_oracle, itens_por_identidade = _carregar_itens_oracle(
                 session_oracle,
-                remessas_para_itens,
+                cnpjs,
+                competencias_demonstrativo,
             )
+            indices_itens_oracle = indexar_itens_oracle(itens_oracle)
             classificacao_sem_processo_oracle = (
                 classificar_demonstrativos_sem_processo_por_oracle(
                     associacao_demo.sem_processo,
-                    indice_remessas,
-                    itens_por_chave,
+                    indices_itens_oracle,
                 )
             )
             contas_oracle = _carregar_contas_oracle(session_oracle)
 
-        itens_glosa, itens_sem_correspondencia, remessas_bloqueadas = (
+        itens_glosa, itens_sem_correspondencia, _ids_avaliados = (
             _preparar_itens_glosa(
                 fontes['demonstrativos'],
                 associacao_demo.unicas,
                 associacao_escopo.unicas,
-                itens_por_chave,
+                indices_itens_oracle,
                 itens_por_identidade,
             )
         )
@@ -1103,11 +1468,18 @@ def main() -> None:  # noqa: PLR0915
             session_postgres,
             set(associacao_escopo.unicas.values()),
         )
+        remessas_existentes = remessas_conciliadas
+        importados_existentes = importados
+        carga_anterior = None
+        if args.substituir_carga_planilha:
+            carga_anterior = _auditar_carga_substituivel(session_postgres)
+            remessas_conciliadas = set()
+            importados = set()
         plano, exclusoes = _preparar_plano(
             associacao_escopo,
             dados_remessas,
             itens_glosa,
-            remessas_bloqueadas,
+            itens_sem_correspondencia,
             processos,
             notas,
             contas,
@@ -1150,6 +1522,39 @@ def main() -> None:  # noqa: PLR0915
                     classificacao_sem_processo_oracle.criterios.values()
                 )
             ),
+            'linhas_localizadas_chave_lancamento_coalesce_servico_carteira': (
+                sum(
+                    criterio == 'lancamento_coalesce_servico_carteira'
+                    for criterio in (
+                        classificacao_sem_processo_oracle.criterios.values()
+                    )
+                )
+            ),
+            'linhas_localizadas_chave_competencia_coalesce_servico_valor': (
+                sum(
+                    criterio == 'competencia_coalesce_servico_valor'
+                    for criterio in (
+                        classificacao_sem_processo_oracle.criterios.values()
+                    )
+                )
+            ),
+            (
+                'linhas_localizadas_chave_atendimento_'
+                'guia_coalesce_servico_valor'
+            ): (
+                sum(
+                    criterio == 'atendimento_guia_coalesce_servico_valor'
+                    for criterio in (
+                        classificacao_sem_processo_oracle.criterios.values()
+                    )
+                )
+            ),
+            'linhas_localizadas_chave_lancamento_pro_fat_carteira_valor': sum(
+                criterio == 'lancamento_pro_fat_carteira_valor'
+                for criterio in (
+                    classificacao_sem_processo_oracle.criterios.values()
+                )
+            ),
             'linhas_correspondencia_oracle_ambigua': len(
                 classificacao_sem_processo_oracle.ambiguas
             ),
@@ -1169,7 +1574,10 @@ def main() -> None:  # noqa: PLR0915
                 associacao_historica.nao_encontradas
             ),
             'itens_sem_correspondencia': len(itens_sem_correspondencia),
-            'remessas_bloqueadas_por_item': len(remessas_bloqueadas),
+            'remessas_com_itens_nao_vinculados': len({
+                int(item['cd_remessa'])
+                for item in itens_sem_correspondencia
+            }),
             'notas_ambiguas': len(
                 set(notas_ambiguas) & numeros_processos_escopo
             ),
@@ -1182,8 +1590,10 @@ def main() -> None:  # noqa: PLR0915
             'contas_nao_encontradas': len(
                 contas_nao_encontradas & numeros_processos_escopo
             ),
-            'remessas_ja_modeladas_ou_conciliadas': len(remessas_conciliadas),
-            'linhas_ja_importadas': len(importados),
+            'remessas_ja_modeladas_ou_conciliadas': len(remessas_existentes),
+            'linhas_ja_importadas': len(importados_existentes),
+            'substituicao_carga_planilha': args.substituir_carga_planilha,
+            'carga_anterior_a_substituir': carga_anterior,
             'processos_planejados': len(plano),
             'remessas_planejadas': sum(len(item.remessas) for item in plano),
             'registros_glosa_planejados': sum(
@@ -1231,14 +1641,50 @@ def main() -> None:  # noqa: PLR0915
             raise RuntimeError('Informe --usuario-id para aplicar a carga.')
         if session_postgres.get(Usuario, args.usuario_id) is None:
             raise RuntimeError(f'Usuário {args.usuario_id} não encontrado.')
-        if not inspect(session_postgres.bind).has_table(
+        if args.substituir_carga_planilha:
+            if args.dump_seguranca is None:
+                raise RuntimeError(
+                    'Informe --dump-seguranca para aplicar a substituição.'
+                )
+            if not args.dump_seguranca.is_file():
+                raise RuntimeError(
+                    f'Dump de segurança não encontrado: {args.dump_seguranca}'
+                )
+            if not plano:
+                raise RuntimeError(
+                    'Substituição recusada porque o novo plano está vazio.'
+                )
+            _auditar_carga_substituivel(session_postgres)
+            _garantir_tabela_rastreio_ipm(session_postgres)
+            removidos = _remover_carga_planilha_anterior(session_postgres)
+            print(
+                'Carga anterior removida na transação: '
+                + ', '.join(
+                    f'{chave}={valor}' for chave, valor in removidos.items()
+                )
+            )
+        elif not inspect(session_postgres.connection()).has_table(
             'registros_glosa_demonstrativo_ipm',
             schema='api_prontocardio',
         ):
             raise RuntimeError(
                 'Execute as migrações antes de aplicar a importação.'
             )
+        ids_vinculados = set(importados)
+        ids_vinculados.update(
+            str(demonstrativo['id_registro'])
+            for processo in plano
+            for remessa in processo.remessas
+            for item in remessa.itens_glosa
+            for demonstrativo in item.demonstrativos
+        )
+        totais_pendentes = _sincronizar_glosas_nao_vinculadas(
+            session_postgres,
+            itens_sem_correspondencia,
+            ids_vinculados,
+        )
         totais = _aplicar_plano(session_postgres, plano, args.usuario_id)
+        totais['glosas_nao_vinculadas'] = totais_pendentes
         print(
             'Importação concluída: '
             + ', '.join(f'{chave}={valor}' for chave, valor in totais.items())
