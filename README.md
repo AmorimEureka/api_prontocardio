@@ -103,6 +103,228 @@ Exemplo de resposta:
 }
 ```
 
+## Ciclo da tela Conciliação (Faturamento X Fiscal)
+
+A tela foi invertida para representar o fluxo operacional correto: a
+**remessa MV** e o registro principal e as **NFS-e emitidas** sao alocadas
+dentro dela. O card permanece na lista enquanto houver valor nao conciliado,
+inclusive quando esse saldo estiver classificado como glosa pendente.
+
+```mermaid
+flowchart TD
+    A["Listar remessas da HPC_V_CONTA_ATENDIMENTO"] --> B["Exibir numero, competencia, convenio, valor, conciliado e nao conciliado"]
+    B --> C["Expandir a remessa"]
+    C --> D["Exibir processo unico e historico das NFS-e ja vinculadas"]
+    D --> E["Pesquisar NFS-e do mesmo CNPJ com saldo fiscal"]
+    E --> F{"Ha glosa anterior sem recurso?"}
+    F -- "Sim" --> FX["Bloquear nova NFS-e e orientar o tratamento/recurso"]
+    F -- "Nao" --> G["Adicionar uma ou mais NFS-e"]
+    G --> H["Informar valor utilizado, previsao e recebimento por NFS-e"]
+    H --> I{"Glosar nesta NFS-e?"}
+    I -- "Sim" --> J["Informar o valor glosado da remessa nesta nota"]
+    I -- "Nao" --> K["Valor glosado igual a zero"]
+    J --> L["Validar saldos da remessa, do recurso e da NFS-e"]
+    K --> L
+    L --> M["Gravar um vinculo fiscal por NFS-e e um processo por remessa"]
+    M --> N{"Data de recebimento informada?"}
+    N -- "Sim" --> O["Validar conta, data e lancamento; registrar recebimento"]
+    N -- "Nao" --> P["Manter a NFS-e dentro da remessa em Conciliações sem Recebimento"]
+    M --> Q{"Existe glosa?"}
+    Q -- "Sim" --> R["Criar itens em registros_glosa e notificar o setor de glosas"]
+    Q -- "Nao" --> S["Atualizar o saldo da remessa"]
+    R --> T{"Tratamento interno"}
+    T -- "Acatar" --> U["Reconhecer a perda e reduzir o saldo financeiro"]
+    T -- "Recursar" --> V["Liberar o valor recursado para uma futura NFS-e"]
+    V --> E
+    U --> W{"Remessa encerrada?"}
+    S --> W
+    O --> W
+    P --> W
+    W -- "Nao" --> B
+    W -- "Sim" --> X["Remover o card da listagem principal"]
+```
+
+### Persistencia e relacionamentos
+
+- `processos_conciliacao_remessa` guarda um unico
+  `processo_recebimento` por remessa. Todas as NFS-e adicionadas ao mesmo
+  card reutilizam esse processo.
+- `conciliacoes_faturamento` continua sendo o registro fiscal e bancario da
+  NFS-e. Por isso `data_previsao_recebimento`, `data_recebimento`, conta
+  bancaria, plano de contas, centro de custo e lancamento do extrato sao
+  independentes para cada nota.
+- `conciliacoes_faturamento_remessas` representa a alocacao entre uma NFS-e
+  e uma remessa. O campo `valor_alocado_nfse` informa quanto do saldo da nota
+  foi usado nesse vinculo.
+- A unicidade global de `nfse_row_hash` e `numero_nfse` foi removida. A
+  mesma NFS-e pode pagar remessas distintas, desde que a soma das alocacoes nao
+  ultrapasse o valor liquido da nota.
+- Os registros antigos sao preservados. A migracao calcula
+  `valor_alocado_nfse = valor_total - valor_glosado` e agrupa o historico
+  existente por remessa.
+- A origem dos itens em `registros_glosa` e classificada como `triagem` para
+  os registros historicos sem vinculo fiscal e como `conciliacao` para os
+  itens criados a partir de `conciliacoes_faturamento_remessas`. A restricao
+  de integridade impede que um item vinculado seja classificado como origem
+  da Triagem, sem apagar a procedencia quando o vinculo deixar de existir.
+- Para manter o contrato consumido pelos Indicadores, a API fornece
+  `status_tratativa` e `valor_indicador`. Registros historicos continuam
+  usando o valor recursado ou acatado; uma glosa ainda nao tratada da
+  conciliacao contabiliza apenas o saldo do vinculo, uma unica vez, mesmo
+  quando possui varios itens analiticos.
+
+### Saldos e validacoes
+
+O saldo fiscal da NFS-e e compartilhado entre todas as remessas:
+
+```text
+saldo_nfse = valor_liquido_nfse
+```
+
+A posicao exibida no card da remessa e calculada por:
+
+```text
+valor_total_remessa = SUM(vl_total_registro por cd_reg distinto)
+valor_conciliado = SUM(valor_alocado_nfse)
+saldo_base = MAX(valor_total_remessa
+                 - SUM(valor_alocado_nfse)
+                 - SUM(valor_glosado)
+                 - valor_acatado, 0)
+glosa_pendente = MAX(SUM(valor_glosado)
+                     - valor_recurso_consumido
+                     - valor_acatado, 0)
+valor_nao_conciliado = MAX(saldo_base, glosa_pendente)
+```
+
+O total financeiro da remessa usa `vl_total_registro`. Os itens analiticos
+de procedimentos, exames, materiais e medicamentos continuam usando
+`vl_total_conta`. Na inicializacao, os totais ja persistidos em
+`remessas_financeiras` sao sincronizados com a view e o estado de recebimento
+integral e recalculado sem alterar o historico de conciliacoes, glosas ou
+recebimentos.
+
+- O valor alocado deve ser maior que zero e menor ou igual ao saldo atual da
+  NFS-e.
+- A soma de `valor_alocado_nfse + valor_glosado` da operacao nao pode
+  ultrapassar o valor disponivel da remessa.
+- A glosa nao consome saldo da NFS-e, pois representa um valor contestado e
+  ainda nao recebido. Ela classifica uma parte do saldo nao conciliado e cria
+  itens analiticos no follow-up, mas nao e somada novamente ao saldo da
+  remessa.
+- Uma glosa ainda nao tratada permanece no valor nao conciliado, mas nao fica
+  disponivel para outra NFS-e ate possuir recurso. Eventual parcela livre
+  continua disponivel separadamente.
+- O acato reconhece a perda sem criar recebimento e reduz tanto a glosa
+  pendente quanto o saldo da remessa.
+- O recurso exige processo, data, quantidade e valor recursado em
+  `registros_glosa`. Somente o saldo recursado ativo, sem pagamento e ainda
+  nao consumido torna a parcela glosada disponivel para uma nova NFS-e, sem
+  soma-la novamente ao valor nao conciliado.
+- Quando uma conciliacao de recurso sofre nova glosa, a nova parcela volta ao
+  follow-up e somente podera receber outra NFS-e depois de novo recurso.
+
+### Reprocessamento controlado de planilhas
+
+O reprocessador preserva todas as linhas que compartilham a mesma NFS-e e o
+mesmo processo, criando um vinculo por remessa. A execucao e idempotente,
+limita as alocacoes ao saldo compartilhado da nota e reutiliza os servicos da
+tela de Conciliacao Manual para validar tambem o saldo de cada remessa.
+
+Por seguranca, o comando apenas audita por padrao:
+
+```bash
+poetry run python -m scripts.reprocessar_conciliacoes_planilha \
+  "DEMO CONVENIOS CONSOLIDADO.xlsx"
+```
+
+A gravacao exige confirmacao explicita do ambiente de desenvolvimento e
+mantem a autoria no historico:
+
+```bash
+poetry run python -m scripts.reprocessar_conciliacoes_planilha \
+  "DEMO CONVENIOS CONSOLIDADO.xlsx" \
+  --aplicar --confirmar-desenvolvimento --usuario-id 4
+```
+
+### Recebimento bancario por NFS-e
+
+- A data de previsao e obrigatoria em cada NFS-e adicionada.
+- A data de recebimento e opcional. Quando informada, a conta bancaria da
+  `DBAMV.HPC_V_CONTAS_BANCARIAS` torna-se obrigatoria; plano de contas,
+  centro de custo e lancamento do extrato continuam opcionais.
+- A data de recebimento nao pode ser futura.
+- O valor do recebimento e exatamente o `valor_alocado_nfse`. A glosa nao
+  integra o deposito bancario.
+- Um lancamento do extrato, quando selecionado, precisa pertencer a conta e a
+  data informadas e e marcado como conciliado na mesma transacao.
+
+### Follow-up Conciliações sem Recebimento
+
+O submenu apresenta um card por remessa e lista internamente cada NFS-e
+conciliada cuja `data_recebimento` ainda nao foi informada. Totais, paginacao
+e pesquisa tambem consideram remessas, sem duplicar o card quando houver mais
+de uma nota pendente. A fila usa o vinculo exato
+`conciliacao_id + cd_remessa` e permite preencher posteriormente data, conta
+bancaria, plano de contas, centro de custo e lancamento.
+
+Depois do registro, os dados bancarios sao atualizados em
+`conciliacoes_faturamento`, o recebimento e gravado em
+`recebimentos_remessas` e a NFS-e deixa o agrupamento. O card da remessa sai
+da fila quando nao restar nenhuma nota pendente de recebimento.
+
+Enquanto nao existir recebimento bancario, o follow-up tambem permite editar
+o processo, a previsao, o valor recebido e o valor glosado de cada remessa ou
+inativar a conciliacao. A alteracao dos valores respeita os saldos da remessa
+e da NFS-e e nao permite modificar glosas que ja tenham tratamento ou recurso.
+A inativacao e logica: libera os saldos da remessa e da NFS-e, preserva o
+registro original e inativa os itens de glosa vinculados.
+
+### Consulta e auditoria das conciliacoes
+
+O submenu **Consultar conciliacoes** pesquisa por NFS-e, remessa, convenio,
+CNPJ ou processo e permite filtrar conciliacoes recebidas, pendentes e
+inativas. Os cards sao agrupados por remessa e apresentam internamente todas
+as NFS-e vinculadas, seus valores, recebimentos bancarios e o historico de
+operacoes. A paginacao e os totais tambem consideram remessas, evitando que
+uma remessa com mais de uma nota seja contabilizada mais de uma vez.
+
+Criacao, edicao, registro de recebimento e inativacao mantem o usuario e a
+data da operacao. As alteracoes tambem sao registradas em
+`auditorias_conciliacao_faturamento`, com os estados anterior e posterior.
+Quando um vinculo entre a mesma NFS-e e remessa e inativado e posteriormente
+recriado, a consulta reune os eventos dos registros em uma unica linha do
+tempo e identifica os eventos originados no vinculo anterior.
+
+### Cache e paginacao
+
+As listagens financeiras usam o mesmo cache curto por rota e filtros da
+Triagem, compartilhado entre os workers do frontend e invalidado apos cada
+mutacao. A consulta de auditoria nao usa cache para refletir imediatamente as
+operacoes. A pagina principal consulta 25 remessas por vez. No Oracle, total
+e pagina sao obtidos na mesma varredura da `HPC_V_CONTA_ATENDIMENTO`. Apos
+uma conciliacao, a API devolve a posicao atualizada da remessa para o frontend
+atualizar o card e os totais ja carregados, evitando repetir imediatamente a
+consulta completa ao Oracle.
+
+### Endpoints do fluxo
+
+- `GET /app_glosas/financeiro/conciliacao-faturamento/remessas`: cards das
+  remessas ainda nao encerradas, com saldos e historico.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/remessas/{cd_remessa}/notas`:
+  NFS-e do mesmo convenio com saldo disponivel.
+- `POST /app_glosas/financeiro/conciliacao-faturamento/remessas/{cd_remessa}/conciliar`:
+  grava o processo unico e uma ou mais alocacoes de NFS-e.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/sem-recebimento`:
+  follow-up agrupado por remessa, com suas NFS-e sem recebimento bancario.
+- `POST /app_glosas/financeiro/conciliacao-faturamento/recebimentos-remessas`:
+  completa o recebimento da NFS-e pendente.
+- `GET /app_glosas/financeiro/conciliacao-faturamento/conciliacoes`:
+  pesquisa conciliacoes e retorna remessas, recebimentos, usuarios e auditoria.
+- `PUT /app_glosas/financeiro/conciliacao-faturamento/conciliacoes/{id}`:
+  edita uma conciliacao ainda sem recebimento.
+- `DELETE /app_glosas/financeiro/conciliacao-faturamento/conciliacoes/{id}`:
+  inativa logicamente uma conciliacao ainda sem recebimento.
+
 ## Contratos em schema.py e importancia da validacao
 
 O arquivo `app_prontocardio/schema.py` define os contratos de entrada/saida
@@ -139,8 +361,8 @@ O arquivo `app_prontocardio/settings.py` centraliza variaveis de ambiente com
 
 - `ORACLE_DATABASE_URL`: conexao com o Oracle/MV via `oracle+oracledb`.
 - `DATABASE_URL`: conexao com o PostgreSQL usado pela API.
-- `POSTGRES_SCHEMA`: schema PostgreSQL usado pelos models da aplicacao. As
-	migrations atuais criam e alteram o schema `api_prontocardio`.
+- `POSTGRES_SCHEMA`: schema PostgreSQL usado pelos models da aplicacao.
+- `RUN_MIGRATIONS_ON_STARTUP`: controla se migrations rodam ao iniciar a API.
 - `SECRET_KEY` e `ALGORITHM`: assinatura dos tokens JWT.
 - `FRONTEND_BASE_URL`: base do frontend usada como fallback de origem.
 - `FRONTEND_PASSWORD_RESET_URL`: URL da tela do frontend que recebe o token
@@ -157,12 +379,11 @@ ORACLE_DATABASE_URL=oracle+oracledb://usuario:senha@host:1521/?service_name=nome
 DATABASE_URL=postgresql+psycopg://usuario:senha@host:5432/banco
 POSTGRES_SCHEMA=api_prontocardio
 SECRET_KEY=gere_uma_chave_forte
-ALGORITHM=HS256
-FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha#token={token}
-CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
+ALGORITHM=HS25
+FRONTEND_BASE_URL=http://localhost:8080
+FRONTEND_PASSWORD_RESET_URL=http://localhost:8080/autenticacao/redefinir-senha#token={token}
+CORS_ALLOWED_ORIGINS=http://localhost:8080
 ```
-
 ## Testes e objetivos
 
 Os testes ficam em `tests/test_app.py` e os fixtures em `tests/conftest.py`.
@@ -303,22 +524,22 @@ poetry run task tests
 poetry run task pos_tests
 ```
 
-## Producao com Docker e Nginx
+## Producao com Docker
 
-Por padrao, o compose de producao sobe apenas a API internamente na porta 8000
-e conecta o container tambem a rede Docker `api-rede_default`, usada pelo Nginx
-existente do servidor. Esse Nginx deve encaminhar o dominio de producao para
-`api_prontocardio:8000`.
+O compose de producao sobe a API na porta `8000` por padrao, configuravel por
+`API_PORT`. O Nginx/proxy reverso do servidor deve ser configurado fora deste
+repositorio e encaminhar trafego para a API na porta publicada ou para
+`api_prontocardio:8000` na rede Docker configurada por `API_NETWORK_NAME`.
 
-Configure no `.env`:
+Configure no `.env` os valores do ambiente:
 
 ```env
-SERVER_NAME=apihpc.hospitalprontocardio.com.br
-FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha#token={token}
-CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
-SSL_CERTIFICATE=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/fullchain.pem
-SSL_CERTIFICATE_KEY=/etc/letsencrypt/live/apihpc.hospitalprontocardio.com.br/privkey.pem
+SERVER_NAME=api.exemplo.local
+API_PORT=8000
+API_NETWORK_NAME=api_prontocardio
+FRONTEND_BASE_URL=https://app.exemplo.local
+FRONTEND_PASSWORD_RESET_URL=https://app.exemplo.local/autenticacao/redefinir-senha#token={token}
+CORS_ALLOWED_ORIGINS=https://app.exemplo.local
 ```
 
 Build e execucao padrao:
@@ -327,12 +548,20 @@ Build e execucao padrao:
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-O servico `nginx` deste compose fica no profile `standalone` e so deve ser usado
-quando nao houver outro proxy ocupando as portas 80/443:
+Configuracoes locais de Nginx, certificados e ACME nao devem ser versionadas
+neste repositorio.
 
-```bash
-docker compose -f docker-compose.prod.yml --profile standalone up -d --build
-```
+## Emissao de NFS-e via Airflow
+
+As emissões individuais e em lote são registradas no PostgreSQL antes do
+disparo da DAG. A DAG recebe o identificador do lote, consulta somente os
+itens aprovados e sinalizados e grava o resultado da emissão nas tabelas
+relacionadas. A ausência ou falha da integração não remove solicitações da
+fila de emissão.
+
+O contrato de configuração, payload, consulta, atualização de status,
+rastreabilidade e idempotência está documentado em
+[`docs/airflow_emissao_nfse.md`](docs/airflow_emissao_nfse.md).
 
 ## Observacoes operacionais
 
@@ -352,14 +581,14 @@ senhas temporárias pela interface administrativa.
 Para habilitar o envio dos links de recuperação, configure na API:
 
 ```env
-FRONTEND_BASE_URL=https://apihpc.hospitalprontocardio.com.br
-FRONTEND_PASSWORD_RESET_URL=https://apihpc.hospitalprontocardio.com.br/autenticacao/redefinir-senha#token={token}
-CORS_ALLOWED_ORIGINS=https://apihpc.hospitalprontocardio.com.br
+FRONTEND_BASE_URL=http://localhost:8080
+FRONTEND_PASSWORD_RESET_URL=http://localhost:8080/autenticacao/redefinir-senha#token={token}
+CORS_ALLOWED_ORIGINS=http://localhost:8080
 SMTP_HOST=smtp.hostinger.com
 SMTP_PORT=465
-SMTP_USER=tihpc@hospitalprontocardio.com.br
+SMTP_USER=usuario_smtp@exemplo.local
 SMTP_PASSWORD=senha_do_email
-SMTP_FROM="TI Hospital Prontocardio <tihpc@hospitalprontocardio.com.br>"
+SMTP_FROM="TI Hospital Prontocardio <usuario_smtp@exemplo.local>"
 SMTP_USE_SSL=true
 SMTP_USE_TLS=false
 ```

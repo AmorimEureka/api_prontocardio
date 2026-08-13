@@ -99,6 +99,7 @@ def remessas_hpc(*_args, **_kwargs):
             'cd_convenio': 10,
             'convenio': 'Convenio Teste',
             'cnpj_convenio': '98765432000110',
+            'data_competencia': date(2026, 7, 1),
             'valor_total': '120.00',
         }
     ]
@@ -200,7 +201,7 @@ def criar_recurso_aberto(
         'processo_controle_fatura_gab': 'GAB-1',
         'processo_recurso': 'REC-1',
         'data_glosa': date(2026, 6, 2),
-        'motivo_glosa': 'Motivo',
+        'motivo_glosa': '1714',
         'descricao_glosa': 'Descricao',
         'qtd_recursado': Decimal('1.00'),
         'valor_recursado': Decimal(valor_recursado),
@@ -342,7 +343,7 @@ def payload_tratativa(registro, processo, valor):
         ),
         processo_recurso=processo,
         data_glosa=registro.data_glosa,
-        motivo_glosa='Glosa analisada',
+        motivo_glosa='1714',
         descricao_glosa='Item identificado pelo setor de glosas',
         qtd_registro=registro.qtd_registro,
         qtd_recursado=Decimal('1.00'),
@@ -452,7 +453,7 @@ def test_lista_apenas_nfse_nao_conciliada(
     }
 
 
-def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(  # noqa: PLR0915
+def test_follow_up_exibe_glosas_registradas_inclusive_tratadas(  # noqa: PLR0915
     session,
     usuario_teste,
     monkeypatch,
@@ -562,7 +563,8 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(  # noqa: PLR09
         limit=20,
         offset=0,
     )
-    assert follow_up['cards'] == []
+    assert len(follow_up['cards']) == 1
+    assert follow_up['cards'][0]['valor_glosa_pendente'] == Decimal('0.00')
 
     response = app_glosas.deletar_glosa(
         registros_glosa[0].id,
@@ -577,9 +579,7 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(  # noqa: PLR09
     assert registros_glosa[0].qtd_recursado is None
     assert registros_glosa[0].valor_recursado is None
     assert registros_glosa[0].dt_recurso is None
-    assert registros_glosa[0].motivo_glosa == (
-        'Glosa informada na conciliacao fiscal'
-    )
+    assert registros_glosa[0].motivo_glosa == '1714'
     assert 'Pendente de tratativa da NFS-e 12345' in (
         registros_glosa[0].descricao_glosa
     )
@@ -606,6 +606,160 @@ def test_follow_up_exibe_somente_glosas_pendentes_da_conciliacao(  # noqa: PLR09
         if item['registro_glosa'].id == registros_glosa[0].id
     )
     assert item_restaurado['registro_glosa'].status_tratativa == 'pendente'
+
+
+def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    primeira_remessa = criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+        cd_remessa=987,
+        valor_total='100.00',
+        valor_glosado='20.00',
+    )
+    segunda_remessa = ConciliacaoFaturamentoRemessa(
+        conciliacao_id=primeira_remessa.conciliacao_id,
+        cd_remessa=988,
+        convenio='Convenio Teste',
+        cnpj_convenio='98765432000110',
+        valor_total=Decimal('200.00'),
+        sn_glosado='true',
+        valor_glosado=Decimal('30.00'),
+        tp_conciliacao='faturamento',
+    )
+    session.add(segunda_remessa)
+    remessa_financeira = RemessaFinanceira(
+        cd_remessa=988,
+        convenio='Convenio Teste',
+        cnpj_convenio='98765432000110',
+        valor_total=Decimal('200.00'),
+        recebimento_integral=False,
+    )
+    remessa_financeira.data_registro = datetime(2026, 6, 10, 10, 0)
+    session.add(remessa_financeira)
+    session.commit()
+    monkeypatch.setattr(
+        financeiro,
+        '_sincronizar_itens_follow_up',
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        'sincronizar_totais_remessas_financeiras',
+        lambda *_args, **_kwargs: {},
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=1,
+        offset=0,
+        incluir_detalhes=False,
+        agrupar_por_processo=True,
+    )
+
+    assert follow_up['total'] == 1
+    assert follow_up['valor_total_glosado'] == Decimal('50.00')
+    assert {card['cd_remessa'] for card in follow_up['cards']} == {987, 988}
+    assert {
+        card['processo']['numero_processo'] for card in follow_up['cards']
+    } == {'PROC-ANTERIOR'}
+
+
+def test_follow_up_inclui_card_da_cogestao_sem_demonstrativo(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        financeiro,
+        '_sincronizar_itens_follow_up',
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_cogestao_follow_up',
+        lambda *_args, **_kwargs: [{
+            'conciliacao_remessa_id': None,
+            'cd_remessa': 19001,
+            'convenio': 'IPM',
+            'data_competencia': date(2026, 5, 1),
+            'data_entrega': None,
+            'numero_nfse': '',
+            'valor_remessa': Decimal('500.00'),
+            'valor_itens': Decimal('500.00'),
+            'valor_glosado': Decimal('37.50'),
+            'valor_glosa_pendente': Decimal('37.50'),
+            'valor_total_tratado': Decimal('0.00'),
+            'processo': {
+                'numero_processo': 'P249767/2026',
+                'data_abertura': date(2026, 6, 10),
+                'status_processo': 'TRAMITANDO',
+                'motivo_finalizacao': None,
+            },
+            'recebimentos': [],
+            'fiscal': {
+                'numero_nfse': '',
+                'valor_servicos': Decimal('0.00'),
+                'impostos': Decimal('0.00'),
+                'valor_liquido_nfse': Decimal('0.00'),
+                'data_emissao': None,
+            },
+            'pacientes': [],
+        }],
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+        incluir_detalhes=False,
+        agrupar_por_processo=True,
+    )
+
+    assert follow_up['total'] == 1
+    assert follow_up['valor_total_glosado'] == Decimal('37.50')
+    assert follow_up['valor_total_pendente'] == Decimal('37.50')
+    assert follow_up['cards'][0]['conciliacao_remessa_id'] is None
+    assert follow_up['cards'][0]['valor_itens'] == Decimal('500.00')
+    assert follow_up['cards'][0]['processo']['status_processo'] == 'TRAMITANDO'
+    assert follow_up['cards'][0]['pacientes'] == []
+
+
+def test_follow_up_nao_cria_itens_sem_demonstrativo(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+    )
+
+    def falhar_se_consultar_oracle(*_args, **_kwargs):
+        raise AssertionError(
+            'O Oracle não deve detalhar glosa sem demonstrativo'
+        )
+
+    monkeypatch.setattr(
+        financeiro,
+        '_carregar_itens_glosa_conciliacao',
+        falhar_se_consultar_oracle,
+    )
+
+    assert financeiro._sincronizar_itens_follow_up(
+        session,
+        object(),
+    ) == 0
+    assert session.scalar(select(RegistroGlosa.id)) is None
 
 
 def test_follow_up_usa_total_registro_no_card_e_total_conta_nos_itens(
@@ -639,12 +793,15 @@ def test_follow_up_usa_total_registro_no_card_e_total_conta_nos_itens(
     )
 
     card = follow_up['cards'][0]
-    assert card['valor_remessa'] == Decimal('135.00')
-    assert {
+    valores_itens = [
         item['vl_total_conta']
         for paciente in card['pacientes']
         for item in paciente['itens']
-    } == {Decimal('60.00')}
+    ]
+    assert card['valor_remessa'] == Decimal('135.00')
+    assert card['data_competencia'] == date(2026, 7, 1)
+    assert card['valor_itens'] == sum(valores_itens, Decimal('0.00'))
+    assert set(valores_itens) == {Decimal('60.00')}
 
 
 def test_follow_up_agrupa_recurso_e_acato_no_mesmo_item(
@@ -710,7 +867,7 @@ def test_follow_up_agrupa_recurso_e_acato_no_mesmo_item(
     assert follow_up['valor_total_pendente'] == Decimal('5.00')
 
 
-def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
+def test_follow_up_mantem_card_sem_criar_itens_fora_do_demonstrativo(
     session,
     usuario_teste,
     monkeypatch,
@@ -737,21 +894,13 @@ def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
 
     assert follow_up['total'] == 1
     assert follow_up['cards'][0]['cd_remessa'] == CD_REMESSA_TESTE
-    assert len(follow_up['cards'][0]['pacientes']) == ITENS_ANALITICOS_TESTE
+    assert follow_up['cards'][0]['pacientes'] == []
     registros = session.scalars(
         select(RegistroGlosa).where(
             RegistroGlosa.conciliacao_remessa_id == vinculo.id
         )
     ).all()
-    assert len(registros) == ITENS_ANALITICOS_TESTE
-    assert {registro.cd_gru_pro for registro in registros} == {
-        GRU_PRO_DIAGNOSTICO,
-        GRU_PRO_MEDICAMENTOS,
-    }
-    assert {registro.cd_gru_fat for registro in registros} == {
-        GRU_FAT_EXAMES,
-        GRU_FAT_MEDICAMENTOS,
-    }
+    assert registros == []
 
     financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
@@ -761,13 +910,11 @@ def test_follow_up_sincroniza_glosa_legada_sem_registros_analiticos(
         limit=20,
         offset=0,
     )
-    assert len(
-        session.scalars(
-            select(RegistroGlosa).where(
-                RegistroGlosa.conciliacao_remessa_id == vinculo.id
-            )
-        ).all()
-    ) == ITENS_ANALITICOS_TESTE
+    assert session.scalars(
+        select(RegistroGlosa).where(
+            RegistroGlosa.conciliacao_remessa_id == vinculo.id
+        )
+    ).all() == []
 
 
 def test_totaliza_valor_de_todas_nfses_independente_da_paginacao(
@@ -861,6 +1008,13 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
     assert remessa['valor_liquido'] == Decimal('100.00')
     assert remessa['valor_recebido'] == Decimal('0.00')
     assert remessa['valor_pendente'] == Decimal('100.00')
+    dias_em_atraso = max(
+        (
+            datetime.now(financeiro.ZoneInfo('America/Sao_Paulo')).date()
+            - date(2026, 8, 10)
+        ).days,
+        0,
+    )
     assert remessa['notas'] == [
         {
             'id': remessa['notas'][0]['id'],
@@ -876,8 +1030,8 @@ def test_lista_conciliacao_com_remessa_sem_recebimento(
             'valor_recebido': Decimal('0.00'),
             'valor_pendente': Decimal('100.00'),
             'situacao': 'sem_recebimento',
-            'em_atraso': False,
-            'dias_em_atraso': 0,
+            'em_atraso': dias_em_atraso > 0,
+            'dias_em_atraso': dias_em_atraso,
             'recebimentos': [],
         }
     ]

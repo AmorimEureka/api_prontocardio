@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -580,6 +581,7 @@ class RegistroGlosaCreate(BaseModel):
     cd_convenio: int
     tp_atendimento: TipoAtendimento
     procedimento: str
+    cd_tuss: str | None = None
     convenio: str
     guia: str
     prestador: str
@@ -614,24 +616,29 @@ class RegistroGlosaCreate(BaseModel):
         validation_alias=AliasChoices('valor_recursado', 'valor_glosado'),
     )
     dt_recurso: date
-    dt_pagamento: date
+    dt_pagamento: date | None = None
     dt_recebimento: date | None = None
     valor_recebido: Decimal | None = None
     qtd_recebida: Decimal | None = None
     observacao_recebimento: str | None = None
     sn_glosado: str = 'true'
 
-    @field_validator(
-        'processo_controle_fatura_gab',
-        'motivo_glosa',
-        mode='before',
-    )
+    @field_validator('processo_controle_fatura_gab', mode='before')
     @classmethod
     def validate_required_text(cls, value):
         text = str(value or '').strip()
         if not text:
             raise ValueError('campo obrigatorio')
         return text
+
+    @field_validator('motivo_glosa', mode='before')
+    @classmethod
+    def normalize_motivo_glosa(cls, value):
+        text = str(value or '').strip()
+        match = re.match(r'^(\d+)', text)
+        if match is None:
+            raise ValueError('informe somente o codigo numerico da glosa')
+        return match.group(1)
 
     @field_validator('processo_recurso', mode='before')
     @classmethod
@@ -646,7 +653,7 @@ class RegistroGlosaCreate(BaseModel):
             raise ValueError(
                 'A data da glosa nao pode ser maior que a data atual.'
             )
-        if self.dt_pagamento > today:
+        if self.dt_pagamento is not None and self.dt_pagamento > today:
             raise ValueError(
                 'A data do pagamento nao pode ser maior que a data atual.'
             )
@@ -654,14 +661,20 @@ class RegistroGlosaCreate(BaseModel):
             raise ValueError(
                 'A data do recurso nao pode ser maior que a data atual.'
             )
-        if self.data_glosa > self.dt_pagamento:
+        if (
+            self.dt_pagamento is not None
+            and self.data_glosa > self.dt_pagamento
+        ):
             raise ValueError(
                 'A data da glosa deve ser igual ou anterior '
                 'a data do pagamento.'
             )
         if (
             self.dt_recurso < self.data_glosa
-            or self.dt_recurso < self.dt_pagamento
+            or (
+                self.dt_pagamento is not None
+                and self.dt_recurso < self.dt_pagamento
+            )
         ):
             raise ValueError(
                 'A data do recurso nao pode ser anterior as datas '
@@ -721,6 +734,7 @@ class RegistroGlosaPublic(BaseModel):
     cd_convenio: int
     tp_atendimento: TipoAtendimento
     procedimento: str
+    cd_tuss: str | None = None
     convenio: str
     guia: str
     prestador: str
@@ -729,7 +743,7 @@ class RegistroGlosaPublic(BaseModel):
     processo_controle_fatura_gab: str
     processo_recurso: str | None = None
     data_glosa: date
-    motivo_glosa: str
+    motivo_glosa: str | None
     descricao_glosa: str
     qtd_registro: Decimal | None = None
     descricao_item: str | None = None
@@ -1476,6 +1490,8 @@ class ItemFollowUpGlosaPublic(BaseModel):
     nm_convenio: str
     tp_atendimento: TipoAtendimento
     cd_pro_fat: str
+    cd_tuss: str | None = None
+    codigo_servico: str
     cd_gru_pro: int | None = None
     ds_gru_pro: str | None = None
     cd_gru_fat: int | None = None
@@ -1487,7 +1503,19 @@ class ItemFollowUpGlosaPublic(BaseModel):
     dt_lancamento: datetime | None = None
     qt_lancamento: Decimal
     vl_total_conta: Decimal
-    registro_glosa: RegistroGlosaPublic
+    valor_processado: Decimal
+    valor_glosa: Decimal
+    valor_liberado: Decimal
+    valor_total_tratado: Decimal
+    valor_pendente: Decimal
+    motivo_glosa_codigo: str | None = None
+    motivo_glosa_descricao: str
+    criterios_correspondencia: list[str] = Field(default_factory=list)
+    data_glosa: date | None = None
+    dt_pagamento: date | None = None
+    valor_limite_tratativa: Decimal | None = None
+    tratativa_disponivel: bool = True
+    registro_glosa: RegistroGlosaPublic | None = None
     registro_recusa: RegistroGlosaPublic | None = None
     registro_acato: RegistroGlosaPublic | None = None
 
@@ -1495,25 +1523,58 @@ class ItemFollowUpGlosaPublic(BaseModel):
 class PacienteFollowUpGlosaPublic(BaseModel):
     codigo_paciente: int
     nm_paciente: str
+    valor_itens: Decimal
+    valor_glosado: Decimal
+    valor_total_tratado: Decimal
     itens: list[ItemFollowUpGlosaPublic]
 
 
+class ProcessoFollowUpGlosaPublic(BaseModel):
+    numero_processo: str
+    data_abertura: date | None = None
+    status_processo: str | None = None
+    motivo_finalizacao: str | None = None
+
+
+class RecebimentoFollowUpGlosaPublic(BaseModel):
+    banco: str | None = None
+    conta: str | None = None
+    codigo_agencia: str | None = None
+    empenho: str | None = None
+
+
+class FiscalFollowUpGlosaPublic(BaseModel):
+    numero_nfse: str
+    valor_servicos: Decimal
+    impostos: Decimal
+    valor_liquido_nfse: Decimal
+    data_emissao: date | None = None
+
+
 class CardFollowUpGlosaPublic(BaseModel):
-    conciliacao_remessa_id: int
+    conciliacao_remessa_id: int | None = None
     cd_remessa: int
     convenio: str
-    data_entrega: date
+    data_competencia: date | None = None
+    data_entrega: date | None = None
     numero_nfse: str
     valor_remessa: Decimal
+    valor_itens: Decimal
     valor_glosado: Decimal
     valor_glosa_pendente: Decimal
     valor_total_tratado: Decimal
+    processo: ProcessoFollowUpGlosaPublic
+    recebimentos: list[RecebimentoFollowUpGlosaPublic] = Field(
+        default_factory=list
+    )
+    fiscal: FiscalFollowUpGlosaPublic
     pacientes: list[PacienteFollowUpGlosaPublic]
 
 
 class FollowUpGlosasList(BaseModel):
     cards: list[CardFollowUpGlosaPublic]
     total: int
+    quantidade_glosas: int
     valor_total_glosado: Decimal
     valor_total_pendente: Decimal
     valor_total_tratado: Decimal

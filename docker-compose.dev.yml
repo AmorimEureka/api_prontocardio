@@ -1,18 +1,4 @@
 services:
-  prontocardio_database:
-    image: postgres
-    env_file:
-      - .env
-    volumes:
-      - pgdata:/var/lib/postgresql
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   api_prontocardio:
     image: api_prontocardio
     build: .
@@ -20,9 +6,5 @@ services:
       - .env
     ports:
       - "8000:8000"
-    depends_on:
-      prontocardio_database:
-        condition: service_healthy
-
-volumes:
-  pgdata:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
