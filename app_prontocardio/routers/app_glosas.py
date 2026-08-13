@@ -171,6 +171,12 @@ def _registros_do_mesmo_item(
             RegistroGlosa.conciliacao_remessa_id
             == registro_origem.conciliacao_remessa_id
         )
+    if registro_origem.motivo_glosa is None:
+        filtros.append(RegistroGlosa.motivo_glosa.is_(None))
+    else:
+        filtros.append(
+            RegistroGlosa.motivo_glosa == registro_origem.motivo_glosa
+        )
     return session.scalars(
         select(RegistroGlosa)
         .where(*filtros)
@@ -306,7 +312,6 @@ def _desfazer_tratativa_glosa_conciliada(
     registro_glosa.dt_pagamento = (
         conciliacao.data_recebimento if conciliacao is not None else None
     )
-    registro_glosa.motivo_glosa = 'Glosa informada na conciliacao fiscal'
     registro_glosa.descricao_glosa = (
         f'{descricao_item}. Pendente de tratativa da NFS-e '
         f'{conciliacao.numero_nfse if conciliacao is not None else "-"}.'

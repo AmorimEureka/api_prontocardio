@@ -179,7 +179,6 @@ O saldo fiscal da NFS-e e compartilhado entre todas as remessas:
 
 ```text
 saldo_nfse = valor_liquido_nfse
-             - SUM(valor_alocado_nfse em todas as remessas)
 ```
 
 A posicao exibida no card da remessa e calculada por:

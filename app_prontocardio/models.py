@@ -131,6 +131,7 @@ class RegistroGlosa:
             'conciliacao_remessa_id',
             'conta',
             'cd_lancamento',
+            'motivo_glosa',
             'sn_glosado',
             name='uq_registro_glosa_conciliacao_item',
         ),
@@ -158,7 +159,7 @@ class RegistroGlosa:
         nullable=True,
     )
     data_glosa: Mapped[date] = mapped_column(Date)
-    motivo_glosa: Mapped[str] = mapped_column(String)
+    motivo_glosa: Mapped[str | None] = mapped_column(String, nullable=True)
     descricao_glosa: Mapped[str] = mapped_column(String)
     qtd_recursado: Mapped[Decimal | None] = mapped_column(
         Numeric(12, 2),
@@ -210,6 +211,7 @@ class RegistroGlosa:
         String,
         default=None,
     )
+    cd_tuss: Mapped[str | None] = mapped_column(String, default=None)
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento_remessas.id',
@@ -325,7 +327,56 @@ class RegistroGlosaDemonstrativoIpm:
             ondelete='CASCADE',
         )
     )
+    criterio_correspondencia: Mapped[str | None] = mapped_column(
+        String(80),
+        default=None,
+    )
     data_importacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+
+
+@table_registry.mapped_as_dataclass
+class GlosaNaoVinculadaIpm:
+    __tablename__ = 'glossas_nao_vinculadas_ipm'
+    __table_args__ = (
+        Index('ix_glossas_nao_vinculadas_ipm_remessa', 'cd_remessa'),
+        Index('ix_glossas_nao_vinculadas_ipm_processo', 'numero_processo'),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id_registro: Mapped[str] = mapped_column(String, primary_key=True)
+    numero_processo: Mapped[str | None] = mapped_column(String, nullable=True)
+    cd_remessa: Mapped[int | None] = mapped_column(nullable=True)
+    motivo: Mapped[str] = mapped_column(String(40))
+    valor_glosa: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    criterio_correspondencia: Mapped[str | None] = mapped_column(
+        String(80), default=None
+    )
+    remessas_candidatas: Mapped[list[int]] = mapped_column(
+        JSON, default_factory=list
+    )
+    numero_protocolo: Mapped[str | None] = mapped_column(
+        String, default=None
+    )
+    data_realizacao: Mapped[date | None] = mapped_column(Date, default=None)
+    numero_guia_senha: Mapped[str | None] = mapped_column(
+        String, default=None
+    )
+    codigo_servico: Mapped[str | None] = mapped_column(String, default=None)
+    codigo_beneficiario: Mapped[str | None] = mapped_column(
+        String, default=None
+    )
+    codigo_glosa: Mapped[str | None] = mapped_column(String, default=None)
+    valor_processado: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2), default=None
+    )
+    data_primeira_ocorrencia: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    data_ultima_tentativa: Mapped[datetime] = mapped_column(
         init=False,
         server_default=text("timezone('America/Sao_Paulo', now())"),
     )
