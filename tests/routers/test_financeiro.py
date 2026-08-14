@@ -747,6 +747,75 @@ def test_follow_up_inclui_card_da_cogestao_sem_demonstrativo(
     assert follow_up['cards'][0]['pacientes'] == []
 
 
+def test_follow_up_pagina_processos_por_competencia_mais_recente(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        financeiro,
+        '_sincronizar_itens_follow_up',
+        lambda *_args, **_kwargs: 0,
+    )
+
+    def card(numero_processo, cd_remessa, competencia):
+        return {
+            'conciliacao_remessa_id': None,
+            'cd_remessa': cd_remessa,
+            'convenio': 'IPM',
+            'data_competencia': competencia,
+            'data_entrega': None,
+            'numero_nfse': '',
+            'valor_remessa': Decimal('500.00'),
+            'valor_itens': Decimal('500.00'),
+            'valor_glosado': Decimal('10.00'),
+            'valor_glosa_pendente': Decimal('10.00'),
+            'valor_total_tratado': Decimal('0.00'),
+            'processo': {
+                'numero_processo': numero_processo,
+                'data_abertura': None,
+                'status_processo': 'FINALIZADO',
+                'motivo_finalizacao': None,
+            },
+            'recebimentos': [],
+            'fiscal': {
+                'numero_nfse': '',
+                'valor_servicos': Decimal('0.00'),
+                'impostos': Decimal('0.00'),
+                'valor_liquido_nfse': Decimal('0.00'),
+                'data_emissao': None,
+            },
+            'pacientes': [],
+        }
+
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_cogestao_follow_up',
+        lambda *_args, **_kwargs: [
+            card('P-ANTIGO', 19001, date(2026, 4, 1)),
+            card('P-RECENTE', 19002, date(2026, 7, 1)),
+        ],
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=1,
+        offset=0,
+        incluir_detalhes=False,
+        agrupar_por_processo=True,
+    )
+
+    assert follow_up['total'] == len({'P-ANTIGO', 'P-RECENTE'})
+    assert len(follow_up['cards']) == 1
+    assert (
+        follow_up['cards'][0]['processo']['numero_processo']
+        == 'P-RECENTE'
+    )
+
+
 def test_follow_up_nao_cria_itens_sem_demonstrativo(
     session,
     usuario_teste,
