@@ -4633,6 +4633,210 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     return cards
 
 
+def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
+    session: Session,
+    remessas_excluidas: set[int],
+    *,
+    q: str | None,
+    cd_remessa: int | None,
+    convenio: str | None,
+    processo_original: str | None,
+    paciente: str | None,
+    cd_atendimento: int | None,
+    tipo_atendimento: str | None,
+) -> list[dict]:
+    if (
+        not _tabela_ipm_existe(session, 'processos_relatorios_tramitando_ipm')
+        or not _tabela_ipm_existe(session, 'processos_ipm')
+    ):
+        return []
+    rows = session.execute(
+        text(
+            """
+            SELECT rel.numero_processo,
+                   rel.cd_remessa,
+                   rel.nome_paciente,
+                   rel.numero_guia,
+                   rel.numero_conta,
+                   rel.cd_atendimento,
+                   rel.competencia,
+                   rel.valor,
+                   proc.data_abertura,
+                   proc.status_processo,
+                   proc.motivo_finalizacao
+              FROM api_prontocardio.processos_relatorios_tramitando_ipm rel
+              JOIN api_prontocardio.processos_ipm proc
+                ON UPPER(BTRIM(proc.numero_processo))
+                 = UPPER(BTRIM(rel.numero_processo))
+             WHERE UPPER(BTRIM(proc.status_processo)) = 'TRAMITANDO'
+               AND split_part(rel.numero_processo, '/', 2) ~ '^[0-9]{4}$'
+               AND split_part(rel.numero_processo, '/', 2)::integer >= 2025
+             ORDER BY rel.competencia DESC,
+                      rel.numero_processo,
+                      rel.cd_remessa,
+                      rel.nome_paciente,
+                      rel.cd_atendimento
+            """
+        )
+    ).mappings().all()
+    termo_geral = str(q or '').strip().casefold()
+    termo_processo = str(processo_original or '').strip().casefold()
+    termo_convenio = str(convenio or '').strip().casefold()
+    termo_paciente = str(paciente or '').strip().casefold()
+    termo_tipo = str(tipo_atendimento or '').strip().casefold()
+    if termo_convenio and termo_convenio not in 'ipm':
+        return []
+    if (
+        termo_tipo
+        and termo_tipo not in TipoAtendimento.EXTERNO.value.casefold()
+    ):
+        return []
+
+    cards_map: dict[tuple[str, int], dict] = {}
+    pacientes_map: dict[tuple[str, int], dict[tuple[str, int], dict]] = (
+        defaultdict(dict)
+    )
+    for row in rows:
+        codigo_remessa = int(row['cd_remessa'])
+        numero_processo = str(row['numero_processo'] or '').strip()
+        nome_paciente = str(
+            row['nome_paciente'] or 'Paciente não informado'
+        ).strip()
+        atendimento = int(row['cd_atendimento'] or 0)
+        if codigo_remessa in remessas_excluidas:
+            continue
+        if cd_remessa is not None and codigo_remessa != cd_remessa:
+            continue
+        if termo_processo and termo_processo not in numero_processo.casefold():
+            continue
+        if termo_paciente and termo_paciente not in nome_paciente.casefold():
+            continue
+        if cd_atendimento is not None and atendimento != cd_atendimento:
+            continue
+        if termo_geral and not any(
+            termo_geral in value.casefold()
+            for value in (
+                numero_processo,
+                str(codigo_remessa),
+                nome_paciente,
+                str(row['numero_guia'] or ''),
+                str(row['numero_conta'] or ''),
+                str(atendimento),
+            )
+        ):
+            continue
+
+        competencia = row['competencia']
+        valor = _money(row['valor'])
+        numero_conta = str(row['numero_conta'] or '').strip()
+        conta_digits = ''.join(
+            character
+            for character in numero_conta
+            if character.isdigit()
+        )
+        item = {
+            'cd_paciente': 0,
+            'nm_paciente': nome_paciente,
+            'cd_remessa': codigo_remessa,
+            'cd_atendimento': atendimento,
+            'cd_reg': int(conta_digits) if conta_digits else 0,
+            'cd_lancamento': None,
+            'cd_prestador': 0,
+            'nm_prestador': 'Prestador não informado',
+            'cd_convenio': 10,
+            'nm_convenio': 'IPM',
+            'tp_atendimento': TipoAtendimento.EXTERNO.value,
+            'cd_pro_fat': '-',
+            'cd_tuss': None,
+            'codigo_servico': '-',
+            'cd_gru_pro': None,
+            'ds_gru_pro': 'Relatório de conta em tramitação',
+            'cd_gru_fat': None,
+            'ds_gru_fat': None,
+            'descricao': (
+                f"Guia {row['numero_guia'] or '-'} · "
+                f"Conta {numero_conta or '-'}"
+            ),
+            'nr_guia': str(row['numero_guia'] or '-'),
+            'dt_atendimento': datetime.combine(
+                competencia,
+                datetime.min.time(),
+            ),
+            'dt_alta': None,
+            'dt_lancamento': None,
+            'qt_lancamento': Decimal('1.00'),
+            'vl_total_conta': valor,
+            'valor_processado': valor,
+            'valor_glosa': Decimal('0.00'),
+            'valor_liberado': valor,
+            'valor_total_tratado': Decimal('0.00'),
+            'valor_pendente': Decimal('0.00'),
+            'motivo_glosa_codigo': None,
+            'motivo_glosa_descricao': (
+                'Processo em tramitação; glosa ainda não disponibilizada.'
+            ),
+            'criterios_correspondencia': ['relatorio_tramitando_spu'],
+            'data_glosa': None,
+            'dt_pagamento': None,
+            'valor_limite_tratativa': Decimal('0.00'),
+            'tratativa_disponivel': False,
+            'registro_glosa': None,
+            'registro_recusa': None,
+            'registro_acato': None,
+        }
+        chave_card = (numero_processo.casefold(), codigo_remessa)
+        card = cards_map.setdefault(
+            chave_card,
+            {
+                'conciliacao_remessa_id': None,
+                'cd_remessa': codigo_remessa,
+                'convenio': 'IPM',
+                'data_competencia': competencia,
+                'data_entrega': row.get('data_abertura'),
+                'numero_nfse': '',
+                'valor_remessa': Decimal('0.00'),
+                'valor_itens': Decimal('0.00'),
+                'valor_glosado': Decimal('0.00'),
+                'valor_glosa_pendente': Decimal('0.00'),
+                'valor_total_tratado': Decimal('0.00'),
+                'processo': {
+                    'numero_processo': numero_processo,
+                    'data_abertura': row.get('data_abertura'),
+                    'status_processo': row.get('status_processo'),
+                    'motivo_finalizacao': row.get('motivo_finalizacao'),
+                },
+                'recebimentos': [],
+                'fiscal': {
+                    'numero_nfse': '',
+                    'valor_servicos': Decimal('0.00'),
+                    'impostos': Decimal('0.00'),
+                    'valor_liquido_nfse': Decimal('0.00'),
+                    'data_emissao': None,
+                },
+                'pacientes': [],
+            },
+        )
+        card['valor_remessa'] += valor
+        card['valor_itens'] += valor
+        paciente_card = pacientes_map[chave_card].setdefault(
+            (nome_paciente.casefold(), atendimento),
+            {
+                'codigo_paciente': 0,
+                'nm_paciente': nome_paciente,
+                'valor_itens': Decimal('0.00'),
+                'valor_glosado': Decimal('0.00'),
+                'valor_total_tratado': Decimal('0.00'),
+                'itens': [],
+            },
+        )
+        paciente_card['valor_itens'] += valor
+        paciente_card['itens'].append(item)
+
+    for chave, card in cards_map.items():
+        card['pacientes'] = list(pacientes_map[chave].values())
+    return list(cards_map.values())
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
     session: Session,
     session_oracle: Session,
@@ -4860,8 +5064,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
             },
             'pacientes': [],
         })
-    cards.extend(
-        _cards_demonstrativo_processos_abertos(
+    cards_demonstrativo = _cards_demonstrativo_processos_abertos(
             session,
             session_oracle,
             remessas_modeladas,
@@ -4873,8 +5076,28 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
             cd_atendimento=cd_atendimento,
             tipo_atendimento=tipo_atendimento,
         )
+    remessas_demonstrativo = {
+        int(card['cd_remessa']) for card in cards_demonstrativo
+    }
+    cards_relatorios = _cards_relatorios_tramitando_follow_up(
+        session,
+        remessas_modeladas | remessas_demonstrativo,
+        q=q,
+        cd_remessa=cd_remessa,
+        convenio=convenio,
+        processo_original=processo_original,
+        paciente=paciente,
+        cd_atendimento=cd_atendimento,
+        tipo_atendimento=tipo_atendimento,
     )
-    return cards
+    remessas_relatorios = {
+        int(card['cd_remessa']) for card in cards_relatorios
+    }
+    cards = [
+        card for card in cards
+        if int(card['cd_remessa']) not in remessas_relatorios
+    ]
+    return cards + cards_relatorios + cards_demonstrativo
 
 
 def _dados_fiscais_follow_up(
