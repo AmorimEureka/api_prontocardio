@@ -105,6 +105,12 @@ def remessas_hpc(*_args, **_kwargs):
     ]
 
 
+def test_normaliza_chave_da_associacao_manual_por_processo_competencia_e_nr():
+    assert financeiro._normalizar_chave_associacao_manual(
+        ' p123/2026 ', '05/2026', ' nr-10 '
+    ) == ('P123/2026', '05/2026', 'NR-10')
+
+
 def cards_remessas_hpc(*_args, **kwargs):
     codigo = int(kwargs.get('q') or CD_REMESSA_TESTE)
     return (
@@ -666,6 +672,13 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
     assert follow_up['total'] == 1
     assert follow_up['valor_total_glosado'] == Decimal('50.00')
     assert {card['cd_remessa'] for card in follow_up['cards']} == {987, 988}
+    assert {
+        card['cd_remessa']: card['valor_itens']
+        for card in follow_up['cards']
+    } == {
+        987: Decimal('100.00'),
+        988: Decimal('200.00'),
+    }
     assert {
         card['processo']['numero_processo'] for card in follow_up['cards']
     } == {'PROC-ANTERIOR'}

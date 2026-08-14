@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
+    AssociacaoRemessaIpmManual,
     AuditoriaConciliacaoFaturamento,
     ConciliacaoFaturamento,
     ConciliacaoFaturamentoRemessa,
@@ -43,6 +44,8 @@ from app_prontocardio.models import (
     Usuario,
 )
 from app_prontocardio.schema import (
+    AssociacaoRemessaIpmManualCreate,
+    AssociacaoRemessaIpmManualUpdate,
     ConciliacaoAlteracaoPublic,
     ConciliacaoFaturamentoCreate,
     ConciliacaoFaturamentoPublic,
@@ -3022,6 +3025,440 @@ def _tabela_ipm_existe(session: Session, nome: str) -> bool:
     )
 
 
+def _tabela_schema_existe(session: Session, schema: str, nome: str) -> bool:
+    if session.get_bind().dialect.name != 'postgresql':
+        return False
+    return inspect(session.connection()).has_table(nome, schema=schema)
+
+
+def _normalizar_chave_associacao_manual(
+    numero_processo: str,
+    competencia_producao: str,
+    nr: str,
+) -> tuple[str, str, str]:
+    return (
+        str(numero_processo or '').strip().upper(),
+        str(competencia_producao or '').strip(),
+        str(nr or '').strip().upper(),
+    )
+
+
+def _validar_remessa_associacao_manual(  # noqa: PLR0913
+    session: Session,
+    *,
+    numero_processo: str,
+    competencia_producao: str,
+    nr: str,
+    cd_remessa: int,
+    associacao_id: int | None = None,
+) -> tuple[str, str, str]:
+    processo, competencia, protocolo = _normalizar_chave_associacao_manual(
+        numero_processo, competencia_producao, nr
+    )
+    origem_existe = session.scalar(
+        text(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                  FROM api_prontocardio.glossas_nao_vinculadas_ipm AS glosa
+                 WHERE glosa.motivo = 'remessa_nao_encontrada_ou_ambigua'
+                   AND UPPER(BTRIM(glosa.numero_processo)) = :processo
+                   AND TO_CHAR(glosa.data_realizacao, 'MM/YYYY') = :competencia
+                   AND UPPER(BTRIM(glosa.numero_protocolo)) = :nr
+                UNION ALL
+                SELECT 1
+                  FROM api_prontocardio.
+                       associacoes_remessas_ipm_manuais AS assoc
+                 WHERE UPPER(BTRIM(assoc.numero_processo)) = :processo
+                   AND assoc.competencia_producao = :competencia
+                   AND UPPER(BTRIM(assoc.nr)) = :nr
+            )
+            """
+        ),
+        {
+            'processo': processo,
+            'competencia': competencia,
+            'nr': protocolo,
+        },
+    )
+    if not origem_existe:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail='O processo informado não está pendente de associação.',
+        )
+
+    remessa = session.execute(
+        text(
+            """
+            SELECT cd_remessa, competencia, nm_convenio, valor_total
+              FROM api_prontocardio_staging.ipm_remessas_oracle
+             WHERE cd_remessa = :cd_remessa
+            """
+        ),
+        {'cd_remessa': cd_remessa},
+    ).mappings().first()
+    if remessa is None or remessa['competencia'] != competencia:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'A remessa precisa existir no Oracle e possuir a mesma '
+                'competência de produção.'
+            ),
+        )
+
+    ocupada = session.scalar(
+        select(AssociacaoRemessaIpmManual.id).where(
+            AssociacaoRemessaIpmManual.cd_remessa == cd_remessa,
+            *(
+                (AssociacaoRemessaIpmManual.id != associacao_id,)
+                if associacao_id is not None
+                else ()
+            ),
+        )
+    )
+    if ocupada is not None:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A remessa já possui uma associação manual.',
+        )
+
+    if _tabela_schema_existe(
+        session, 'api_prontocardio_intermediate',
+        'int_ipm_processos_remessas',
+    ):
+        automatica = session.scalar(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM api_prontocardio_intermediate.
+                           int_ipm_processos_remessas AS vinculo
+                     WHERE vinculo.cd_remessa = :cd_remessa
+                       AND NOT EXISTS (
+                           SELECT 1
+                            FROM api_prontocardio.
+                                  associacoes_remessas_ipm_manuais AS manual
+                            WHERE manual.cd_remessa = vinculo.cd_remessa
+                       )
+                )
+                """
+            ),
+            {'cd_remessa': cd_remessa},
+        )
+        if automatica:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail='A remessa já está vinculada automaticamente.',
+            )
+    return processo, competencia, protocolo
+
+
+@router.get('/associacoes-remessas-ipm')
+def consultar_associacoes_remessas_ipm(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    competencia: Annotated[str | None, Query(max_length=7)] = None,
+    numero_processo: Annotated[str | None, Query(max_length=100)] = None,
+):
+    tabelas_obrigatorias = (
+        'glossas_nao_vinculadas_ipm',
+        'processos_ipm_saude_cogestao',
+        'processos_ipm',
+        'associacoes_remessas_ipm_manuais',
+    )
+    if any(
+        not _tabela_ipm_existe(session, tabela)
+        for tabela in tabelas_obrigatorias
+    ) or not _tabela_schema_existe(
+        session, 'api_prontocardio_staging', 'ipm_remessas_oracle'
+    ):
+        return {'processos': [], 'total': 0}
+
+    filtros = []
+    parametros = {}
+    if competencia:
+        filtros.append('chave.competencia_producao = :competencia')
+        parametros['competencia'] = competencia.strip()
+    if numero_processo:
+        filtros.append(
+            'chave.numero_processo_normalizado LIKE :numero_processo'
+        )
+        parametros['numero_processo'] = (
+            f"%{numero_processo.strip().upper()}%"
+        )
+    clausula_filtros = (
+        f"WHERE {' AND '.join(filtros)}" if filtros else ''
+    )
+    processos_rows = session.execute(
+        text(
+            f"""
+            WITH chaves_pendentes AS (
+                SELECT DISTINCT
+                       UPPER(BTRIM(numero_processo))
+                           AS numero_processo_normalizado,
+                       TO_CHAR(data_realizacao, 'MM/YYYY')
+                           AS competencia_producao,
+                       UPPER(BTRIM(numero_protocolo)) AS nr
+                  FROM api_prontocardio.glossas_nao_vinculadas_ipm
+                 WHERE motivo = 'remessa_nao_encontrada_ou_ambigua'
+                   AND NULLIF(BTRIM(numero_processo), '') IS NOT NULL
+                   AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+                UNION
+                SELECT UPPER(BTRIM(numero_processo)), competencia_producao,
+                       UPPER(BTRIM(nr))
+                  FROM api_prontocardio.associacoes_remessas_ipm_manuais
+            ), chaves AS (
+                SELECT * FROM chaves_pendentes AS chave
+                {clausula_filtros}
+            ), cogestao AS (
+                SELECT chave.numero_processo_normalizado,
+                       chave.competencia_producao,
+                       chave.nr,
+                       MAX(BTRIM(cog.numero_processo)) AS numero_processo,
+                       MAX(cog.valor_informado) AS valor_informado,
+                       MAX(cog.valor_aprovado_producao)
+                           AS valor_aprovado_producao,
+                       MAX(cog.valor_glosado_producao)
+                           AS valor_glosado_producao
+                  FROM chaves AS chave
+                  JOIN api_prontocardio.processos_ipm_saude_cogestao AS cog
+                    ON UPPER(BTRIM(cog.numero_processo))
+                     = chave.numero_processo_normalizado
+                   AND BTRIM(cog.competencia_producao)
+                     = chave.competencia_producao
+                 GROUP BY chave.numero_processo_normalizado,
+                          chave.competencia_producao, chave.nr
+            ), valores_nr AS (
+                SELECT chave.numero_processo_normalizado,
+                       chave.competencia_producao,
+                       chave.nr,
+                       MAX(demo.valor_protocolo) AS valor_protocolado_nr,
+                       MAX(
+                           COALESCE(demo.valor_protocolo, 0)
+                           - COALESCE(demo.valor_glosa_protocolo, 0)
+                       ) AS valor_aprovado_nr,
+                       MAX(demo.valor_glosa_protocolo) AS valor_glosado_nr
+                  FROM chaves AS chave
+                  LEFT JOIN api_prontocardio.demonstrativo_processos_ipm
+                            AS demo
+                    ON UPPER(BTRIM(demo.numero_processo))
+                     = chave.numero_processo_normalizado
+                   AND BTRIM(demo.competencia_producao)
+                     = chave.competencia_producao
+                   AND UPPER(BTRIM(demo.numero_protocolo)) = chave.nr
+                 GROUP BY chave.numero_processo_normalizado,
+                          chave.competencia_producao, chave.nr
+            )
+            SELECT cog.*, valores_nr.valor_protocolado_nr,
+                   valores_nr.valor_aprovado_nr,
+                   valores_nr.valor_glosado_nr,
+                   proc.data_abertura, proc.status_processo
+              FROM cogestao AS cog
+              JOIN valores_nr
+                ON valores_nr.numero_processo_normalizado
+                 = cog.numero_processo_normalizado
+               AND valores_nr.competencia_producao
+                 = cog.competencia_producao
+               AND valores_nr.nr = cog.nr
+              LEFT JOIN api_prontocardio.processos_ipm AS proc
+                ON UPPER(BTRIM(proc.numero_processo))
+                 = cog.numero_processo_normalizado
+             ORDER BY cog.competencia_producao DESC, proc.data_abertura DESC,
+                      cog.numero_processo, cog.nr
+            """
+        ),
+        parametros,
+    ).mappings().all()
+
+    competencias = sorted(
+        {row['competencia_producao'] for row in processos_rows}
+    )
+    remessas_por_competencia: dict[str, list[dict]] = defaultdict(list)
+    if competencias:
+        remessas = session.execute(
+            text(
+                """
+                SELECT rem.cd_remessa, rem.competencia, rem.nm_convenio,
+                       rem.valor_total,
+                       manual.id AS associacao_id,
+                       manual.numero_processo AS processo_associado,
+                       manual.competencia_producao
+                           AS competencia_associada,
+                       manual.nr AS nr_associado,
+                       EXISTS (
+                           SELECT 1
+                             FROM api_prontocardio_intermediate.
+                                  int_ipm_processos_remessas AS vinculo
+                            WHERE vinculo.cd_remessa = rem.cd_remessa
+                              AND manual.id IS NULL
+                       ) AS vinculada_automaticamente
+                  FROM api_prontocardio_staging.ipm_remessas_oracle AS rem
+                  LEFT JOIN api_prontocardio.
+                            associacoes_remessas_ipm_manuais AS manual
+                    ON manual.cd_remessa = rem.cd_remessa
+                 WHERE rem.competencia = ANY(:competencias)
+                 ORDER BY rem.competencia DESC, rem.cd_remessa
+                """
+            ),
+            {'competencias': competencias},
+        ).mappings().all()
+        for remessa in remessas:
+            remessas_por_competencia[remessa['competencia']].append(
+                dict(remessa)
+            )
+
+    processos_por_chave: dict[tuple[str, str], dict] = {}
+    for row in processos_rows:
+        associacoes = []
+        candidatas = []
+        for remessa in remessas_por_competencia[
+            row['competencia_producao']
+        ]:
+            pertence_ao_processo = (
+                str(remessa['processo_associado'] or '').strip().upper()
+                == row['numero_processo_normalizado']
+                and remessa['competencia_associada']
+                == row['competencia_producao']
+                and str(remessa['nr_associado'] or '').strip().upper()
+                == row['nr']
+            )
+            if remessa['vinculada_automaticamente']:
+                continue
+            if (
+                remessa['associacao_id'] is not None
+                and not pertence_ao_processo
+            ):
+                continue
+            candidatas.append(remessa)
+            if pertence_ao_processo:
+                associacoes.append(
+                    {
+                        'id': remessa['associacao_id'],
+                        'cd_remessa': remessa['cd_remessa'],
+                    }
+                )
+        chave_processo = (
+            row['numero_processo_normalizado'],
+            row['competencia_producao'],
+        )
+        processo = processos_por_chave.setdefault(
+            chave_processo,
+            {
+                'numero_processo': row['numero_processo'],
+                'competencia_producao': row['competencia_producao'],
+                'data_abertura': row['data_abertura'],
+                'convenio': 'IPM',
+                'status': row['status_processo'],
+                'valor_protocolado': _money(row['valor_informado']),
+                'valor_aprovado': _money(row['valor_aprovado_producao']),
+                'valor_glosado': _money(row['valor_glosado_producao']),
+                'nrs': [],
+            },
+        )
+        processo['nrs'].append(
+            {
+                'nr': row['nr'],
+                'valor_protocolado': _money(row['valor_protocolado_nr']),
+                'valor_aprovado': _money(row['valor_aprovado_nr']),
+                'valor_glosado': _money(row['valor_glosado_nr']),
+                'associacoes': associacoes,
+                'remessas': candidatas,
+            }
+        )
+    processos = list(processos_por_chave.values())
+    return {'processos': processos, 'total': len(processos)}
+
+
+@router.post(
+    '/associacoes-remessas-ipm', status_code=HTTPStatus.CREATED
+)
+def criar_associacao_remessa_ipm(
+    payload: AssociacaoRemessaIpmManualCreate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    processo, competencia, nr = _validar_remessa_associacao_manual(
+        session,
+        numero_processo=payload.numero_processo,
+        competencia_producao=payload.competencia_producao,
+        nr=payload.nr,
+        cd_remessa=payload.cd_remessa,
+    )
+    associacao = AssociacaoRemessaIpmManual(
+        numero_processo=processo,
+        competencia_producao=competencia,
+        nr=nr,
+        cd_remessa=payload.cd_remessa,
+        usuario_id=usuario_atual.id,
+    )
+    session.add(associacao)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A remessa já possui associação com um processo.',
+        ) from exc
+    session.refresh(associacao)
+    return associacao
+
+
+@router.put('/associacoes-remessas-ipm/{associacao_id}')
+def editar_associacao_remessa_ipm(
+    associacao_id: int,
+    payload: AssociacaoRemessaIpmManualUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    associacao = session.get(AssociacaoRemessaIpmManual, associacao_id)
+    if associacao is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Associação manual não encontrada.',
+        )
+    _validar_remessa_associacao_manual(
+        session,
+        numero_processo=associacao.numero_processo,
+        competencia_producao=associacao.competencia_producao,
+        nr=associacao.nr,
+        cd_remessa=payload.cd_remessa,
+        associacao_id=associacao.id,
+    )
+    associacao.cd_remessa = payload.cd_remessa
+    associacao.usuario_id = usuario_atual.id
+    associacao.data_atualizacao = datetime.now(ZoneInfo('America/Fortaleza'))
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='A remessa já possui outra associação.',
+        ) from exc
+    session.refresh(associacao)
+    return associacao
+
+
+@router.delete(
+    '/associacoes-remessas-ipm/{associacao_id}',
+    status_code=HTTPStatus.NO_CONTENT,
+)
+def excluir_associacao_remessa_ipm(
+    associacao_id: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    associacao = session.get(AssociacaoRemessaIpmManual, associacao_id)
+    if associacao is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Associação manual não encontrada.',
+        )
+    session.delete(associacao)
+    session.commit()
+
+
 def _dados_demonstrativo_follow_up(
     session: Session,
     ids_vinculos: set[int],
@@ -5106,6 +5543,18 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             dados_demonstrativo,
             descricoes_tiss,
         )
+        valor_itens_demonstrativo = sum(
+            (
+                paciente['valor_itens']
+                for paciente in pacientes
+            ),
+            Decimal('0.00'),
+        )
+        valor_itens = (
+            valor_itens_demonstrativo
+            if pacientes
+            else _money(vinculo.valor_total)
+        )
         cards.append(
             {
                 'conciliacao_remessa_id': vinculo.id,
@@ -5128,13 +5577,10 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                         ),
                     )
                 ),
-                'valor_itens': sum(
-                    (
-                        paciente['valor_itens']
-                        for paciente in pacientes
-                    ),
-                    Decimal('0.00'),
-                ),
+                # O detalhamento do demonstrativo tem prioridade. Quando a
+                # remessa ainda não possui itens materializados, preserva o
+                # total do protocolo COGESTÃO gravado no vínculo.
+                'valor_itens': valor_itens,
                 'valor_glosado': _money(vinculo.valor_glosado),
                 'valor_glosa_pendente': max(
                     _money(pendente),
