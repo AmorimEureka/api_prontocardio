@@ -115,6 +115,44 @@ class TokenRedefinicaoSenha:
 
 
 @table_registry.mapped_as_dataclass
+class AssociacaoRemessaIpmManual:
+    __tablename__ = 'associacoes_remessas_ipm_manuais'
+    __table_args__ = (
+        UniqueConstraint(
+            'numero_processo',
+            'competencia_producao',
+            'nr',
+            name='uq_assoc_remessa_ipm_manual_processo_nr',
+        ),
+        UniqueConstraint(
+            'cd_remessa', name='uq_assoc_remessa_ipm_manual_remessa'
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, init=False)
+    numero_processo: Mapped[str] = mapped_column(String)
+    competencia_producao: Mapped[str] = mapped_column(String(7))
+    nr: Mapped[str] = mapped_column(String)
+    cd_remessa: Mapped[int] = mapped_column(BigInteger)
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.usuarios_api.id',
+            ondelete='RESTRICT',
+        )
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
 class RegistroGlosa:
     __tablename__ = 'registros_glosa'
     __table_args__ = (
