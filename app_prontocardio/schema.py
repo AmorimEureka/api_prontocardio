@@ -1580,3 +1580,16 @@ class FollowUpGlosasList(BaseModel):
     valor_total_tratado: Decimal
     limit: int
     offset: int
+
+
+class AssociacaoRemessaIpmManualCreate(BaseModel):
+    numero_processo: str = Field(min_length=1, max_length=100)
+    competencia_producao: str = Field(
+        pattern=r'^(0[1-9]|1[0-2])/\d{4}$'
+    )
+    nr: str = Field(min_length=1, max_length=100)
+    cd_remessa: int = Field(ge=1)
+
+
+class AssociacaoRemessaIpmManualUpdate(BaseModel):
+    cd_remessa: int = Field(ge=1)
