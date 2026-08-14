@@ -3154,11 +3154,13 @@ def _validar_remessa_associacao_manual(  # noqa: PLR0913
 
 
 @router.get('/associacoes-remessas-ipm')
-def consultar_associacoes_remessas_ipm(
+def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
     competencia: Annotated[str | None, Query(max_length=7)] = None,
     numero_processo: Annotated[str | None, Query(max_length=100)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 10,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ):
     tabelas_obrigatorias = (
         'glossas_nao_vinculadas_ipm',
@@ -3172,7 +3174,18 @@ def consultar_associacoes_remessas_ipm(
     ) or not _tabela_schema_existe(
         session, 'api_prontocardio_staging', 'ipm_remessas_oracle'
     ):
-        return {'processos': [], 'total': 0}
+        return {
+            'processos': [],
+            'total': 0,
+            'limit': limit,
+            'offset': offset,
+            'resumo': {
+                'processos_pendentes': 0,
+                'nrs_pendentes': 0,
+                'associacoes_realizadas': 0,
+                'remessas_disponiveis': 0,
+            },
+        }
 
     filtros = []
     parametros = {}
@@ -3366,7 +3379,33 @@ def consultar_associacoes_remessas_ipm(
             }
         )
     processos = list(processos_por_chave.values())
-    return {'processos': processos, 'total': len(processos)}
+    resumo = {
+        'processos_pendentes': len(processos),
+        'nrs_pendentes': sum(
+            len(processo['nrs']) for processo in processos
+        ),
+        'associacoes_realizadas': sum(
+            len(nr['associacoes'])
+            for processo in processos
+            for nr in processo['nrs']
+        ),
+        'remessas_disponiveis': len(
+            {
+                remessa['cd_remessa']
+                for processo in processos
+                for nr in processo['nrs']
+                for remessa in nr['remessas']
+                if remessa['associacao_id'] is None
+            }
+        ),
+    }
+    return {
+        'processos': processos[offset : offset + limit],
+        'total': len(processos),
+        'limit': limit,
+        'offset': offset,
+        'resumo': resumo,
+    }
 
 
 @router.post(
