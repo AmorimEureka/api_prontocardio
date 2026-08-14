@@ -44,6 +44,9 @@ GRU_PRO_DIAGNOSTICO = 10
 GRU_PRO_MEDICAMENTOS = 20
 GRU_FAT_EXAMES = 1
 GRU_FAT_MEDICAMENTOS = 2
+REMESSA_RELATORIO_TRAMITANDO = 19218
+CONTA_RELATORIO_TRAMITANDO = 123456
+ATENDIMENTO_RELATORIO_TRAMITANDO = 314159
 
 
 def criar_nfse(
@@ -745,6 +748,59 @@ def test_follow_up_inclui_card_da_cogestao_sem_demonstrativo(
     assert follow_up['cards'][0]['valor_itens'] == Decimal('500.00')
     assert follow_up['cards'][0]['processo']['status_processo'] == 'TRAMITANDO'
     assert follow_up['cards'][0]['pacientes'] == []
+
+
+def test_relatorio_tramitando_monta_remessa_paciente_e_item(monkeypatch):
+    class Resultado:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{
+                'numero_processo': 'P335842/2026',
+                'cd_remessa': REMESSA_RELATORIO_TRAMITANDO,
+                'nome_paciente': 'MARIA DA SILVA',
+                'numero_guia': '778899',
+                'numero_conta': str(CONTA_RELATORIO_TRAMITANDO),
+                'cd_atendimento': ATENDIMENTO_RELATORIO_TRAMITANDO,
+                'competencia': date(2026, 5, 1),
+                'valor': Decimal('1234.56'),
+                'data_abertura': date(2026, 8, 5),
+                'status_processo': 'TRAMITANDO',
+                'motivo_finalizacao': None,
+            }]
+
+    class Sessao:
+        def execute(self, _query):
+            return Resultado()
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda *_args: True,
+    )
+
+    cards = financeiro._cards_relatorios_tramitando_follow_up(
+        Sessao(),
+        set(),
+        q=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+    )
+
+    assert len(cards) == 1
+    assert cards[0]['cd_remessa'] == REMESSA_RELATORIO_TRAMITANDO
+    assert cards[0]['valor_itens'] == Decimal('1234.56')
+    assert cards[0]['processo']['status_processo'] == 'TRAMITANDO'
+    item = cards[0]['pacientes'][0]['itens'][0]
+    assert item['nr_guia'] == '778899'
+    assert item['cd_reg'] == CONTA_RELATORIO_TRAMITANDO
+    assert item['cd_atendimento'] == ATENDIMENTO_RELATORIO_TRAMITANDO
+    assert item['tratativa_disponivel'] is False
 
 
 def test_follow_up_pagina_processos_por_competencia_mais_recente(
