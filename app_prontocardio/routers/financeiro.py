@@ -5468,6 +5468,43 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             ):
                 chaves_ordenadas.append(chave)
             cards_cogestao_por_processo[chave].append(card)
+
+        codigos_remessas_ordenacao = {
+            row[0].cd_remessa for row in todas_rows
+        }
+        competencias_remessas = {
+            codigo: competencia
+            for codigo, competencia in session.execute(
+                select(
+                    RemessaFinanceira.cd_remessa,
+                    RemessaFinanceira.data_competencia,
+                ).where(
+                    RemessaFinanceira.cd_remessa.in_(
+                        codigos_remessas_ordenacao
+                    )
+                )
+            )
+        }
+
+        def competencia_chave(chave):
+            competencias = [
+                competencias_remessas.get(row[0].cd_remessa)
+                for row in rows_por_processo[chave]
+            ]
+            competencias.extend(
+                card.get('data_competencia')
+                for card in cards_cogestao_por_processo[chave]
+            )
+            return max(
+                (
+                    competencia
+                    for competencia in competencias
+                    if competencia is not None
+                ),
+                default=date.min,
+            )
+
+        chaves_ordenadas.sort(key=competencia_chave, reverse=True)
         chaves_pagina = chaves_ordenadas[offset : offset + limit]
         rows = [
             row
