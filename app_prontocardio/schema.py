@@ -1492,6 +1492,11 @@ class ItemFollowUpGlosaPublic(BaseModel):
     cd_pro_fat: str
     cd_tuss: str | None = None
     codigo_servico: str
+    numero_protocolo: str | None = None
+    codigo_beneficiario: str | None = None
+    referencia: date | None = None
+    valor_protocolo: Decimal | None = None
+    valor_glosa_protocolo: Decimal | None = None
     cd_gru_pro: int | None = None
     ds_gru_pro: str | None = None
     cd_gru_fat: int | None = None

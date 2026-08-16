@@ -4240,6 +4240,13 @@ def _item_demonstrativo_follow_up(
             or demonstrativo.get('codigo_servico')
             or '-'
         ),
+        'numero_protocolo': demonstrativo.get('numero_protocolo'),
+        'codigo_beneficiario': demonstrativo.get('codigo_beneficiario'),
+        'referencia': demonstrativo.get('referencia'),
+        'valor_protocolo': demonstrativo.get('valor_protocolo'),
+        'valor_glosa_protocolo': demonstrativo.get(
+            'valor_glosa_protocolo'
+        ),
         'cd_gru_pro': item_oracle.get('cd_gru_pro'),
         'ds_gru_pro': item_oracle.get('ds_gru_pro'),
         'cd_gru_fat': item_oracle.get('cd_gru_fat'),
@@ -4633,7 +4640,7 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     return cards
 
 
-def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
+def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     remessas_excluidas: set[int],
     *,
@@ -4646,36 +4653,77 @@ def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
     tipo_atendimento: str | None,
 ) -> list[dict]:
     if (
-        not _tabela_ipm_existe(session, 'processos_relatorios_tramitando_ipm')
+        not _tabela_ipm_existe(session, 'processos_relatorios_itens_ipm')
         or not _tabela_ipm_existe(session, 'processos_ipm')
     ):
         return []
     rows = session.execute(
         text(
             """
-            SELECT rel.numero_processo,
-                   rel.cd_remessa,
-                   rel.nome_paciente,
-                   rel.numero_guia,
-                   rel.numero_conta,
-                   rel.cd_atendimento,
-                   rel.competencia,
-                   rel.valor,
+            SELECT item.id_item_relatorio,
+                   item.numero_processo,
+                   item.cd_remessa,
+                   item.competencia,
+                   item.valor_conta_relatorio,
+                   item.criterio_conta,
+                   item.conta,
+                   item.cd_lancamento,
+                   item.cd_atendimento,
+                   item.cd_paciente,
+                   item.nm_paciente,
+                   item.cd_prestador,
+                   item.nm_prestador,
+                   item.cd_convenio,
+                   item.nm_convenio,
+                   item.tp_atendimento,
+                   item.nr_guia,
+                   item.cd_pro_fat,
+                   item.cd_tuss,
+                   item.descricao,
+                   item.dt_atendimento,
+                   item.dt_alta,
+                   item.dt_lancamento,
+                   item.qt_lancamento,
+                   item.valor_item,
+                   item.cd_gru_fat,
+                   item.ds_gru_fat,
+                   item.cd_gru_pro,
+                   item.ds_gru_pro,
+                   item.numero_protocolo,
+                   item.codigo_servico,
+                   item.codigo_glosa,
+                   item.codigo_beneficiario,
+                   item.referencia,
+                   item.valor_protocolo,
+                   item.valor_glosa_protocolo,
+                   item.valor_processado,
+                   item.valor_liberado,
+                   item.valor_glosa,
+                   item.data_realizacao,
+                   item.criterio_demonstrativo,
+                   tiss.termo AS descricao_glosa,
                    proc.data_abertura,
                    proc.status_processo,
                    proc.motivo_finalizacao
-              FROM api_prontocardio.processos_relatorios_tramitando_ipm rel
+              FROM api_prontocardio.processos_relatorios_itens_ipm item
               JOIN api_prontocardio.processos_ipm proc
                 ON UPPER(BTRIM(proc.numero_processo))
-                 = UPPER(BTRIM(rel.numero_processo))
-             WHERE UPPER(BTRIM(proc.status_processo)) = 'TRAMITANDO'
-               AND split_part(rel.numero_processo, '/', 2) ~ '^[0-9]{4}$'
-               AND split_part(rel.numero_processo, '/', 2)::integer >= 2025
-             ORDER BY rel.competencia DESC,
-                      rel.numero_processo,
-                      rel.cd_remessa,
-                      rel.nome_paciente,
-                      rel.cd_atendimento
+                 = UPPER(BTRIM(item.numero_processo))
+              LEFT JOIN api_prontocardio.tiss
+                ON tiss.codigo_termo = item.codigo_glosa
+             WHERE UPPER(BTRIM(proc.status_processo))
+                   IN ('FINALIZADO', 'TRAMITANDO')
+               AND split_part(item.numero_processo, '/', 2)
+                   ~ '^[0-9]{4}$'
+               AND split_part(item.numero_processo, '/', 2)::integer >= 2024
+               AND COALESCE(item.valor_glosa, 0) > 0
+             ORDER BY item.competencia DESC,
+                      item.numero_processo,
+                      item.cd_remessa,
+                      item.nm_paciente,
+                      item.cd_atendimento,
+                      item.conta,
+                      item.cd_lancamento
             """
         )
     ).mappings().all()
@@ -4684,25 +4732,32 @@ def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
     termo_convenio = str(convenio or '').strip().casefold()
     termo_paciente = str(paciente or '').strip().casefold()
     termo_tipo = str(tipo_atendimento or '').strip().casefold()
-    if termo_convenio and termo_convenio not in 'ipm':
-        return []
-    if (
-        termo_tipo
-        and termo_tipo not in TipoAtendimento.EXTERNO.value.casefold()
-    ):
-        return []
 
     cards_map: dict[tuple[str, int], dict] = {}
-    pacientes_map: dict[tuple[str, int], dict[tuple[str, int], dict]] = (
+    pacientes_map: dict[tuple[str, int], dict[tuple[int, str], dict]] = (
         defaultdict(dict)
+    )
+    contas_totalizadas: dict[tuple[str, int], set[int]] = defaultdict(set)
+    itens_totalizados: dict[tuple[str, int], set[str]] = defaultdict(set)
+    itens_pacientes_totalizados: dict[
+        tuple[str, int, int, str], set[str]
+    ] = defaultdict(set)
+    tratativas_por_item = _tratativas_demonstrativo_por_item(
+        session,
+        {int(row['cd_remessa']) for row in rows},
     )
     for row in rows:
         codigo_remessa = int(row['cd_remessa'])
         numero_processo = str(row['numero_processo'] or '').strip()
         nome_paciente = str(
-            row['nome_paciente'] or 'Paciente não informado'
+            row['nm_paciente'] or 'Paciente não informado'
         ).strip()
         atendimento = int(row['cd_atendimento'] or 0)
+        nome_convenio = str(row['nm_convenio'] or 'IPM').strip()
+        tipo = str(
+            row['tp_atendimento'] or TipoAtendimento.EXTERNO.value
+        ).strip()
+        conta = int(row['conta'])
         if codigo_remessa in remessas_excluidas:
             continue
         if cd_remessa is not None and codigo_remessa != cd_remessa:
@@ -4713,84 +4768,146 @@ def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
             continue
         if cd_atendimento is not None and atendimento != cd_atendimento:
             continue
+        if termo_convenio and termo_convenio not in nome_convenio.casefold():
+            continue
+        if termo_tipo and termo_tipo not in tipo.casefold():
+            continue
         if termo_geral and not any(
             termo_geral in value.casefold()
             for value in (
                 numero_processo,
                 str(codigo_remessa),
                 nome_paciente,
-                str(row['numero_guia'] or ''),
-                str(row['numero_conta'] or ''),
+                str(row['nr_guia'] or ''),
+                str(conta),
                 str(atendimento),
+                str(row['cd_pro_fat'] or ''),
+                str(row['cd_tuss'] or ''),
             )
         ):
             continue
 
         competencia = row['competencia']
-        valor = _money(row['valor'])
-        numero_conta = str(row['numero_conta'] or '').strip()
-        conta_digits = ''.join(
-            character
-            for character in numero_conta
-            if character.isdigit()
+        valor_item = _money(row['valor_item'])
+        valor_processado = _money(
+            row['valor_processado']
+            if row['valor_processado'] is not None
+            else valor_item
         )
+        valor_glosa = _money(row['valor_glosa'])
+        # O mart preserva todos os cruzamentos relatório/HPC/demonstrativo,
+        # mas o Follow-Up deve apresentar somente itens efetivamente glosados.
+        if valor_glosa <= 0:
+            continue
+        valor_liberado = _money(
+            row['valor_liberado']
+            if row['valor_liberado'] is not None
+            else valor_item
+        )
+        codigo_glosa = str(row['codigo_glosa'] or '').strip()
+        criterios = [
+            str(criterio)
+            for criterio in (
+                row['criterio_conta'],
+                row['criterio_demonstrativo'],
+            )
+            if str(criterio or '').strip()
+        ]
+        referencia = row['referencia']
+        if isinstance(referencia, datetime):
+            referencia = referencia.date()
+        data_glosa = referencia or row['data_realizacao']
+        if isinstance(data_glosa, datetime):
+            data_glosa = data_glosa.date()
         item = {
-            'cd_paciente': 0,
+            'cd_paciente': int(row['cd_paciente'] or 0),
             'nm_paciente': nome_paciente,
             'cd_remessa': codigo_remessa,
             'cd_atendimento': atendimento,
-            'cd_reg': int(conta_digits) if conta_digits else 0,
-            'cd_lancamento': None,
-            'cd_prestador': 0,
-            'nm_prestador': 'Prestador não informado',
-            'cd_convenio': 10,
-            'nm_convenio': 'IPM',
-            'tp_atendimento': TipoAtendimento.EXTERNO.value,
-            'cd_pro_fat': '-',
-            'cd_tuss': None,
-            'codigo_servico': '-',
-            'cd_gru_pro': None,
-            'ds_gru_pro': 'Relatório de conta em tramitação',
-            'cd_gru_fat': None,
-            'ds_gru_fat': None,
-            'descricao': (
-                f"Guia {row['numero_guia'] or '-'} · "
-                f"Conta {numero_conta or '-'}"
+            'cd_reg': conta,
+            'cd_lancamento': row['cd_lancamento'],
+            'cd_prestador': int(row['cd_prestador'] or 0),
+            'nm_prestador': (
+                row['nm_prestador'] or 'Prestador não informado'
             ),
-            'nr_guia': str(row['numero_guia'] or '-'),
-            'dt_atendimento': datetime.combine(
-                competencia,
-                datetime.min.time(),
+            'cd_convenio': int(row['cd_convenio'] or 10),
+            'nm_convenio': nome_convenio,
+            'tp_atendimento': tipo,
+            'cd_pro_fat': str(row['cd_pro_fat'] or '-'),
+            'cd_tuss': (
+                str(row['cd_tuss']) if row['cd_tuss'] else None
             ),
-            'dt_alta': None,
-            'dt_lancamento': None,
-            'qt_lancamento': Decimal('1.00'),
-            'vl_total_conta': valor,
-            'valor_processado': valor,
-            'valor_glosa': Decimal('0.00'),
-            'valor_liberado': valor,
+            'codigo_servico': str(
+                row['codigo_servico']
+                or row['cd_tuss']
+                or row['cd_pro_fat']
+                or '-'
+            ),
+            'numero_protocolo': row['numero_protocolo'],
+            'codigo_beneficiario': row['codigo_beneficiario'],
+            'referencia': referencia,
+            'valor_protocolo': row['valor_protocolo'],
+            'valor_glosa_protocolo': row['valor_glosa_protocolo'],
+            'cd_gru_pro': row['cd_gru_pro'],
+            'ds_gru_pro': row['ds_gru_pro'],
+            'cd_gru_fat': row['cd_gru_fat'],
+            'ds_gru_fat': row['ds_gru_fat'],
+            'descricao': row['descricao'],
+            'nr_guia': str(row['nr_guia'] or '-'),
+            'dt_atendimento': (
+                row['dt_atendimento']
+                or row['dt_lancamento']
+                or datetime.combine(competencia, datetime.min.time())
+            ),
+            'dt_alta': row['dt_alta'],
+            'dt_lancamento': row['dt_lancamento'],
+            'qt_lancamento': _money(row['qt_lancamento'] or 1),
+            'vl_total_conta': valor_item,
+            'valor_processado': valor_processado,
+            'valor_glosa': valor_glosa,
+            'valor_liberado': valor_liberado,
             'valor_total_tratado': Decimal('0.00'),
-            'valor_pendente': Decimal('0.00'),
-            'motivo_glosa_codigo': None,
+            'valor_pendente': valor_glosa,
+            'motivo_glosa_codigo': codigo_glosa or None,
             'motivo_glosa_descricao': (
-                'Processo em tramitação; glosa ainda não disponibilizada.'
+                row['descricao_glosa']
+                or (
+                    f'Código {codigo_glosa} sem descrição cadastrada na TISS'
+                    if codigo_glosa
+                    else 'Glosa ainda não disponibilizada no demonstrativo.'
+                )
             ),
-            'criterios_correspondencia': ['relatorio_tramitando_spu'],
-            'data_glosa': None,
+            'criterios_correspondencia': criterios,
+            'data_glosa': data_glosa,
             'dt_pagamento': None,
-            'valor_limite_tratativa': Decimal('0.00'),
-            'tratativa_disponivel': False,
+            'valor_limite_tratativa': valor_glosa,
+            'tratativa_disponivel': valor_glosa > 0,
             'registro_glosa': None,
             'registro_recusa': None,
             'registro_acato': None,
         }
+        chave_tratativa = (
+            numero_processo.casefold(),
+            codigo_remessa,
+            atendimento,
+            conta,
+            row['cd_lancamento'],
+        )
+        registros_item = tratativas_por_item.get(chave_tratativa, [])
+        if codigo_glosa:
+            registros_item = [
+                registro
+                for registro in registros_item
+                if registro.motivo_glosa == codigo_glosa
+            ]
+        _aplicar_tratativas_item_demonstrativo(item, registros_item)
         chave_card = (numero_processo.casefold(), codigo_remessa)
         card = cards_map.setdefault(
             chave_card,
             {
                 'conciliacao_remessa_id': None,
                 'cd_remessa': codigo_remessa,
-                'convenio': 'IPM',
+                'convenio': nome_convenio,
                 'data_competencia': competencia,
                 'data_entrega': row.get('data_abertura'),
                 'numero_nfse': '',
@@ -4816,12 +4933,23 @@ def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
                 'pacientes': [],
             },
         )
-        card['valor_remessa'] += valor
-        card['valor_itens'] += valor
+        if conta not in contas_totalizadas[chave_card]:
+            card['valor_remessa'] += _money(
+                row['valor_conta_relatorio']
+            )
+            contas_totalizadas[chave_card].add(conta)
+        id_item_relatorio = str(row['id_item_relatorio'])
+        if id_item_relatorio not in itens_totalizados[chave_card]:
+            card['valor_itens'] += valor_item
+            itens_totalizados[chave_card].add(id_item_relatorio)
+        card['valor_glosado'] += valor_glosa
+        card['valor_total_tratado'] += item['valor_total_tratado']
+        card['valor_glosa_pendente'] += item['valor_pendente']
+        codigo_paciente = int(row['cd_paciente'] or 0)
         paciente_card = pacientes_map[chave_card].setdefault(
-            (nome_paciente.casefold(), atendimento),
+            (codigo_paciente, nome_paciente.casefold()),
             {
-                'codigo_paciente': 0,
+                'codigo_paciente': codigo_paciente,
                 'nm_paciente': nome_paciente,
                 'valor_itens': Decimal('0.00'),
                 'valor_glosado': Decimal('0.00'),
@@ -4829,7 +4957,24 @@ def _cards_relatorios_tramitando_follow_up(  # noqa: PLR0912, PLR0913
                 'itens': [],
             },
         )
-        paciente_card['valor_itens'] += valor
+        chave_paciente = (
+            chave_card[0],
+            chave_card[1],
+            codigo_paciente,
+            nome_paciente.casefold(),
+        )
+        if (
+            id_item_relatorio
+            not in itens_pacientes_totalizados[chave_paciente]
+        ):
+            paciente_card['valor_itens'] += valor_item
+            itens_pacientes_totalizados[chave_paciente].add(
+                id_item_relatorio
+            )
+        paciente_card['valor_glosado'] += valor_glosa
+        paciente_card['valor_total_tratado'] += item[
+            'valor_total_tratado'
+        ]
         paciente_card['itens'].append(item)
 
     for chave, card in cards_map.items():
@@ -5079,7 +5224,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
     remessas_demonstrativo = {
         int(card['cd_remessa']) for card in cards_demonstrativo
     }
-    cards_relatorios = _cards_relatorios_tramitando_follow_up(
+    cards_relatorios = _cards_relatorios_follow_up(
         session,
         remessas_modeladas | remessas_demonstrativo,
         q=q,
@@ -5433,11 +5578,18 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         .correlate(ConciliacaoFaturamentoRemessa)
         .scalar_subquery()
     )
-    valor_pendente = (
-        ConciliacaoFaturamentoRemessa.valor_glosado
-        - func.coalesce(valores_alocados.c.valor_alocado, 0)
+    valor_alocado = func.coalesce(valores_alocados.c.valor_alocado, 0)
+    valor_tratado = case(
+        (valor_alocado <= 0, 0),
+        (
+            valor_alocado >= ConciliacaoFaturamentoRemessa.valor_glosado,
+            ConciliacaoFaturamentoRemessa.valor_glosado,
+        ),
+        else_=valor_alocado,
     )
-    valor_tratado = func.coalesce(valores_alocados.c.valor_alocado, 0)
+    valor_pendente = (
+        ConciliacaoFaturamentoRemessa.valor_glosado - valor_tratado
+    )
     filtros = [
         ConciliacaoFaturamento.ativo.is_(True),
         ConciliacaoFaturamentoRemessa.sn_glosado == 'true',
@@ -5660,6 +5812,10 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             (card['valor_glosa_pendente'] for card in cards_cogestao),
             Decimal('0.00'),
         )
+        valor_total_tratado = _money(valor_total_tratado) + sum(
+            (card['valor_total_tratado'] for card in cards_cogestao),
+            Decimal('0.00'),
+        )
         chaves_ordenadas = []
         rows_por_processo = defaultdict(list)
         for row in todas_rows:
@@ -5728,6 +5884,18 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             )
 
         chaves_ordenadas.sort(key=competencia_chave, reverse=True)
+        for chave in chaves_ordenadas:
+            rows_por_processo[chave].sort(
+                key=lambda row: (
+                    competencias_remessas.get(row[0].cd_remessa)
+                    or date.min
+                ),
+                reverse=True,
+            )
+            cards_cogestao_por_processo[chave].sort(
+                key=lambda card: card.get('data_competencia') or date.min,
+                reverse=True,
+            )
         chaves_pagina = chaves_ordenadas[offset : offset + limit]
         rows = [
             row
