@@ -687,6 +687,39 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
     } == {'PROC-ANTERIOR'}
 
 
+def test_follow_up_limita_totalizadores_ao_valor_glosado(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_nfse(session)
+    configurar_oracle_fake(monkeypatch)
+    financeiro.conciliar_faturamento(
+        payload=ConciliacaoFaturamentoCreate(**payload_conciliacao()),
+        usuario_atual=usuario_teste,
+        session_postgres=session,
+        session_oracle=object(),
+    )
+    registro = session.scalar(
+        select(RegistroGlosa).order_by(RegistroGlosa.id)
+    )
+    registro.valor_recursado = Decimal('50.00')
+    session.commit()
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+
+    assert follow_up['valor_total_glosado'] == Decimal('20.00')
+    assert follow_up['valor_total_tratado'] == Decimal('20.00')
+    assert follow_up['valor_total_pendente'] == Decimal('0.00')
+
+
 def test_follow_up_inclui_card_da_cogestao_sem_demonstrativo(
     session,
     usuario_teste,
@@ -750,28 +783,96 @@ def test_follow_up_inclui_card_da_cogestao_sem_demonstrativo(
     assert follow_up['cards'][0]['pacientes'] == []
 
 
-def test_relatorio_tramitando_monta_remessa_paciente_e_item(monkeypatch):
+def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
+    monkeypatch,
+):
+    queries = []
+
     class Resultado:
         def mappings(self):
             return self
 
         def all(self):
-            return [{
+            base = {
                 'numero_processo': 'P335842/2026',
                 'cd_remessa': REMESSA_RELATORIO_TRAMITANDO,
-                'nome_paciente': 'MARIA DA SILVA',
-                'numero_guia': '778899',
-                'numero_conta': str(CONTA_RELATORIO_TRAMITANDO),
-                'cd_atendimento': ATENDIMENTO_RELATORIO_TRAMITANDO,
                 'competencia': date(2026, 5, 1),
-                'valor': Decimal('1234.56'),
+                'valor_conta_relatorio': Decimal('1234.56'),
+                'criterio_conta': 'remessa_conta_atendimento',
+                'conta': CONTA_RELATORIO_TRAMITANDO,
+                'cd_atendimento': ATENDIMENTO_RELATORIO_TRAMITANDO,
+                'cd_paciente': 42,
+                'nm_paciente': 'MARIA DA SILVA',
+                'cd_prestador': 99,
+                'nm_prestador': 'HOSPITAL PRONTOCARDIO',
+                'cd_convenio': 10,
+                'nm_convenio': 'IPM',
+                'tp_atendimento': 'Internação',
+                'nr_guia': '778899',
+                'dt_atendimento': datetime(2026, 5, 10, 8, 0),
+                'dt_alta': datetime(2026, 5, 11, 10, 0),
+                'dt_lancamento': datetime(2026, 5, 10, 9, 0),
+                'qt_lancamento': Decimal('1.00'),
+                'cd_gru_fat': 1,
+                'ds_gru_fat': 'DIÁRIAS',
+                'cd_gru_pro': 2,
+                'ds_gru_pro': 'INTERNAÇÃO',
                 'data_abertura': date(2026, 8, 5),
                 'status_processo': 'TRAMITANDO',
                 'motivo_finalizacao': None,
-            }]
+            }
+            return [
+                {
+                    **base,
+                    'id_item_relatorio': 'item-1',
+                    'cd_lancamento': 101,
+                    'cd_pro_fat': 'PROC-1',
+                    'cd_tuss': 'TUSS-1',
+                    'descricao': 'Diária hospitalar',
+                    'valor_item': Decimal('300.00'),
+                    'numero_protocolo': 'PROTOCOLO-1',
+                    'codigo_servico': 'TUSS-1',
+                    'codigo_glosa': '1305',
+                    'codigo_beneficiario': '00042',
+                    'referencia': date(2026, 6, 1),
+                    'valor_protocolo': Decimal('1234.56'),
+                    'valor_glosa_protocolo': Decimal('55.00'),
+                    'valor_processado': Decimal('300.00'),
+                    'valor_liberado': Decimal('245.00'),
+                    'valor_glosa': Decimal('55.00'),
+                    'data_realizacao': date(2026, 5, 10),
+                    'criterio_demonstrativo': (
+                        'relatorio_hpc_conta_guia_servico'
+                    ),
+                    'descricao_glosa': 'Conta sem assinatura',
+                },
+                {
+                    **base,
+                    'id_item_relatorio': 'item-2',
+                    'cd_lancamento': 102,
+                    'cd_pro_fat': 'PROC-2',
+                    'cd_tuss': None,
+                    'descricao': 'Material hospitalar',
+                    'valor_item': Decimal('934.56'),
+                    'numero_protocolo': None,
+                    'codigo_servico': None,
+                    'codigo_glosa': None,
+                    'codigo_beneficiario': None,
+                    'referencia': None,
+                    'valor_protocolo': None,
+                    'valor_glosa_protocolo': None,
+                    'valor_processado': None,
+                    'valor_liberado': None,
+                    'valor_glosa': None,
+                    'data_realizacao': None,
+                    'criterio_demonstrativo': None,
+                    'descricao_glosa': None,
+                },
+            ]
 
     class Sessao:
-        def execute(self, _query):
+        def execute(self, query):
+            queries.append(str(query))
             return Resultado()
 
     monkeypatch.setattr(
@@ -779,8 +880,13 @@ def test_relatorio_tramitando_monta_remessa_paciente_e_item(monkeypatch):
         '_tabela_ipm_existe',
         lambda *_args: True,
     )
+    monkeypatch.setattr(
+        financeiro,
+        '_tratativas_demonstrativo_por_item',
+        lambda *_args: {},
+    )
 
-    cards = financeiro._cards_relatorios_tramitando_follow_up(
+    cards = financeiro._cards_relatorios_follow_up(
         Sessao(),
         set(),
         q=None,
@@ -794,13 +900,25 @@ def test_relatorio_tramitando_monta_remessa_paciente_e_item(monkeypatch):
 
     assert len(cards) == 1
     assert cards[0]['cd_remessa'] == REMESSA_RELATORIO_TRAMITANDO
-    assert cards[0]['valor_itens'] == Decimal('1234.56')
+    assert cards[0]['valor_itens'] == Decimal('300.00')
+    assert cards[0]['valor_remessa'] == Decimal('1234.56')
+    assert cards[0]['valor_glosado'] == Decimal('55.00')
     assert cards[0]['processo']['status_processo'] == 'TRAMITANDO'
-    item = cards[0]['pacientes'][0]['itens'][0]
+    itens = cards[0]['pacientes'][0]['itens']
+    assert len(itens) == 1
+    item = itens[0]
     assert item['nr_guia'] == '778899'
     assert item['cd_reg'] == CONTA_RELATORIO_TRAMITANDO
     assert item['cd_atendimento'] == ATENDIMENTO_RELATORIO_TRAMITANDO
-    assert item['tratativa_disponivel'] is False
+    assert item['cd_lancamento'] == 101
+    assert item['descricao'] == 'Diária hospitalar'
+    assert item['numero_protocolo'] == 'PROTOCOLO-1'
+    assert item['codigo_beneficiario'] == '00042'
+    assert item['valor_glosa'] == Decimal('55.00')
+    assert item['tratativa_disponivel'] is True
+    assert "IN ('FINALIZADO', 'TRAMITANDO')" in queries[0]
+    assert '::integer >= 2024' in queries[0]
+    assert 'COALESCE(item.valor_glosa, 0) > 0' in queries[0]
 
 
 def test_follow_up_pagina_processos_por_competencia_mais_recente(
@@ -825,8 +943,8 @@ def test_follow_up_pagina_processos_por_competencia_mais_recente(
             'valor_remessa': Decimal('500.00'),
             'valor_itens': Decimal('500.00'),
             'valor_glosado': Decimal('10.00'),
-            'valor_glosa_pendente': Decimal('10.00'),
-            'valor_total_tratado': Decimal('0.00'),
+            'valor_glosa_pendente': Decimal('6.00'),
+            'valor_total_tratado': Decimal('4.00'),
             'processo': {
                 'numero_processo': numero_processo,
                 'data_abertura': None,
@@ -865,6 +983,9 @@ def test_follow_up_pagina_processos_por_competencia_mais_recente(
     )
 
     assert follow_up['total'] == len({'P-ANTIGO', 'P-RECENTE'})
+    assert follow_up['valor_total_glosado'] == Decimal('20.00')
+    assert follow_up['valor_total_pendente'] == Decimal('12.00')
+    assert follow_up['valor_total_tratado'] == Decimal('8.00')
     assert len(follow_up['cards']) == 1
     assert (
         follow_up['cards'][0]['processo']['numero_processo']
