@@ -1559,7 +1559,7 @@ class FiscalFollowUpGlosaPublic(BaseModel):
 class CardFollowUpGlosaPublic(BaseModel):
     conciliacao_remessa_id: int | None = None
     cd_remessa: int
-    numero_lote: str | None = None
+    numero_protocolo: str | None = None
     convenio: str
     data_competencia: date | None = None
     data_entrega: date | None = None
