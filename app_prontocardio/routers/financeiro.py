@@ -4912,7 +4912,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 'data_competencia': competencia,
                 'data_entrega': row.get('data_abertura'),
                 'numero_nfse': '',
-                'numeros_lote': [],
+                'numeros_protocolo': [],
                 'valor_remessa': Decimal('0.00'),
                 'valor_itens': Decimal('0.00'),
                 'valor_glosado': Decimal('0.00'),
@@ -4935,9 +4935,12 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 'pacientes': [],
             },
         )
-        numero_lote = str(row['numero_lote'] or '').strip()
-        if numero_lote and numero_lote not in card['numeros_lote']:
-            card['numeros_lote'].append(numero_lote)
+        numero_protocolo = str(row['numero_protocolo'] or '').strip()
+        if (
+            numero_protocolo
+            and numero_protocolo not in card['numeros_protocolo']
+        ):
+            card['numeros_protocolo'].append(numero_protocolo)
         if conta not in contas_totalizadas[chave_card]:
             card['valor_remessa'] += _money(
                 row['valor_conta_relatorio']
@@ -4983,12 +4986,14 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         paciente_card['itens'].append(item)
 
     for chave, card in cards_map.items():
-        card['numero_lote'] = ', '.join(card.pop('numeros_lote')) or None
+        card['numero_protocolo'] = ', '.join(
+            card.pop('numeros_protocolo')
+        ) or None
         card['pacientes'] = list(pacientes_map[chave].values())
     return list(cards_map.values())
 
 
-def _numeros_lote_por_remessa_follow_up(
+def _numeros_protocolo_por_remessa_follow_up(
     session: Session,
     codigos_remessa: set[int],
 ) -> dict[int, str]:
@@ -5002,12 +5007,12 @@ def _numeros_lote_por_remessa_follow_up(
             """
             SELECT cd_remessa,
                    string_agg(
-                       DISTINCT btrim(numero_lote), ', '
-                       ORDER BY btrim(numero_lote)
-                   ) AS numero_lote
+                       DISTINCT btrim(numero_protocolo), ', '
+                       ORDER BY btrim(numero_protocolo)
+                   ) AS numero_protocolo
               FROM api_prontocardio.processos_relatorios_itens_ipm
              WHERE cd_remessa = ANY(CAST(:codigos_remessa AS BIGINT[]))
-               AND nullif(btrim(numero_lote), '') IS NOT NULL
+               AND nullif(btrim(numero_protocolo), '') IS NOT NULL
                AND coalesce(valor_glosa, 0) > 0
              GROUP BY cd_remessa
             """
@@ -5015,9 +5020,9 @@ def _numeros_lote_por_remessa_follow_up(
         {'codigos_remessa': sorted(codigos_remessa)},
     ).mappings().all()
     return {
-        int(row['cd_remessa']): str(row['numero_lote'])
+        int(row['cd_remessa']): str(row['numero_protocolo'])
         for row in rows
-        if row['numero_lote']
+        if row['numero_protocolo']
     }
 
 
@@ -5952,7 +5957,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             consulta_ordenada.offset(offset).limit(limit)
         ).all()
     codigos_remessa = {row[0].cd_remessa for row in rows}
-    numeros_lote_por_remessa = _numeros_lote_por_remessa_follow_up(
+    numeros_protocolo_por_remessa = _numeros_protocolo_por_remessa_follow_up(
         session,
         codigos_remessa,
     )
@@ -6069,7 +6074,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             {
                 'conciliacao_remessa_id': vinculo.id,
                 'cd_remessa': vinculo.cd_remessa,
-                'numero_lote': numeros_lote_por_remessa.get(
+                'numero_protocolo': numeros_protocolo_por_remessa.get(
                     vinculo.cd_remessa
                 ),
                 'convenio': vinculo.convenio,
