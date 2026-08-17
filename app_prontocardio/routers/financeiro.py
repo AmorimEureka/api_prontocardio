@@ -4988,6 +4988,39 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     return list(cards_map.values())
 
 
+def _numeros_lote_por_remessa_follow_up(
+    session: Session,
+    codigos_remessa: set[int],
+) -> dict[int, str]:
+    if (
+        not codigos_remessa
+        or not _tabela_ipm_existe(session, 'processos_relatorios_itens_ipm')
+    ):
+        return {}
+    rows = session.execute(
+        text(
+            """
+            SELECT cd_remessa,
+                   string_agg(
+                       DISTINCT btrim(numero_lote), ', '
+                       ORDER BY btrim(numero_lote)
+                   ) AS numero_lote
+              FROM api_prontocardio.processos_relatorios_itens_ipm
+             WHERE cd_remessa = ANY(CAST(:codigos_remessa AS BIGINT[]))
+               AND nullif(btrim(numero_lote), '') IS NOT NULL
+               AND coalesce(valor_glosa, 0) > 0
+             GROUP BY cd_remessa
+            """
+        ),
+        {'codigos_remessa': sorted(codigos_remessa)},
+    ).mappings().all()
+    return {
+        int(row['cd_remessa']): str(row['numero_lote'])
+        for row in rows
+        if row['numero_lote']
+    }
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
     session: Session,
     session_oracle: Session,
@@ -5919,6 +5952,10 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             consulta_ordenada.offset(offset).limit(limit)
         ).all()
     codigos_remessa = {row[0].cd_remessa for row in rows}
+    numeros_lote_por_remessa = _numeros_lote_por_remessa_follow_up(
+        session,
+        codigos_remessa,
+    )
     totais_remessas_hpc = {}
     try:
         totais_remessas_hpc = sincronizar_totais_remessas_financeiras(
@@ -6032,6 +6069,9 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             {
                 'conciliacao_remessa_id': vinculo.id,
                 'cd_remessa': vinculo.cd_remessa,
+                'numero_lote': numeros_lote_por_remessa.get(
+                    vinculo.cd_remessa
+                ),
                 'convenio': vinculo.convenio,
                 'data_competencia': (
                     remessa_financeira.data_competencia
