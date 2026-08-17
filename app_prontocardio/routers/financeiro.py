@@ -4690,6 +4690,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                    item.cd_gru_pro,
                    item.ds_gru_pro,
                    item.numero_protocolo,
+                   item.numero_lote,
                    item.codigo_servico,
                    item.codigo_glosa,
                    item.codigo_beneficiario,
@@ -4911,6 +4912,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 'data_competencia': competencia,
                 'data_entrega': row.get('data_abertura'),
                 'numero_nfse': '',
+                'numeros_lote': [],
                 'valor_remessa': Decimal('0.00'),
                 'valor_itens': Decimal('0.00'),
                 'valor_glosado': Decimal('0.00'),
@@ -4933,6 +4935,9 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 'pacientes': [],
             },
         )
+        numero_lote = str(row['numero_lote'] or '').strip()
+        if numero_lote and numero_lote not in card['numeros_lote']:
+            card['numeros_lote'].append(numero_lote)
         if conta not in contas_totalizadas[chave_card]:
             card['valor_remessa'] += _money(
                 row['valor_conta_relatorio']
@@ -4978,6 +4983,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         paciente_card['itens'].append(item)
 
     for chave, card in cards_map.items():
+        card['numero_lote'] = ', '.join(card.pop('numeros_lote')) or None
         card['pacientes'] = list(pacientes_map[chave].values())
     return list(cards_map.values())
 
