@@ -662,10 +662,10 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
     )
     monkeypatch.setattr(
         financeiro,
-        '_numeros_lote_por_remessa_follow_up',
+        '_numeros_protocolo_por_remessa_follow_up',
         lambda *_args, **_kwargs: {
-            987: 'TISS_0000039_4490',
-            988: 'TISS_0000039_4525, TISS_0000039_4565',
+            987: '6094970',
+            988: '6094971, 6094972',
         },
     )
 
@@ -694,11 +694,11 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
         card['processo']['numero_processo'] for card in follow_up['cards']
     } == {'PROC-ANTERIOR'}
     assert {
-        card['cd_remessa']: card['numero_lote']
+        card['cd_remessa']: card['numero_protocolo']
         for card in follow_up['cards']
     } == {
-        987: 'TISS_0000039_4490',
-        988: 'TISS_0000039_4525, TISS_0000039_4565',
+        987: '6094970',
+        988: '6094971, 6094972',
     }
 
 
@@ -825,6 +825,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
                 'tp_atendimento': 'Internação',
                 'nr_guia': '778899',
                 'numero_lote': 'TISS_0000123_4207',
+                'numero_protocolo': 'PROTOCOLO-1',
                 'dt_atendimento': datetime(2026, 5, 10, 8, 0),
                 'dt_alta': datetime(2026, 5, 11, 10, 0),
                 'dt_lancamento': datetime(2026, 5, 10, 9, 0),
@@ -919,7 +920,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert cards[0]['valor_itens'] == Decimal('300.00')
     assert cards[0]['valor_remessa'] == Decimal('1234.56')
     assert cards[0]['valor_glosado'] == Decimal('55.00')
-    assert cards[0]['numero_lote'] == 'TISS_0000123_4207'
+    assert cards[0]['numero_protocolo'] == 'PROTOCOLO-1'
     assert cards[0]['processo']['status_processo'] == 'TRAMITANDO'
     itens = cards[0]['pacientes'][0]['itens']
     assert len(itens) == 1
