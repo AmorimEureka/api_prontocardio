@@ -660,6 +660,14 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
         'sincronizar_totais_remessas_financeiras',
         lambda *_args, **_kwargs: {},
     )
+    monkeypatch.setattr(
+        financeiro,
+        '_numeros_lote_por_remessa_follow_up',
+        lambda *_args, **_kwargs: {
+            987: 'TISS_0000039_4490',
+            988: 'TISS_0000039_4525, TISS_0000039_4565',
+        },
+    )
 
     follow_up = financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
@@ -685,6 +693,13 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
     assert {
         card['processo']['numero_processo'] for card in follow_up['cards']
     } == {'PROC-ANTERIOR'}
+    assert {
+        card['cd_remessa']: card['numero_lote']
+        for card in follow_up['cards']
+    } == {
+        987: 'TISS_0000039_4490',
+        988: 'TISS_0000039_4525, TISS_0000039_4565',
+    }
 
 
 def test_follow_up_limita_totalizadores_ao_valor_glosado(
