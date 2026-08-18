@@ -739,8 +739,6 @@ def _valores_acatados_por_remessa(
         .where(
             RegistroGlosa.sn_ativo == 'true',
             RegistroGlosa.sn_glosado == 'not',
-            RegistroGlosa.processo_recurso.is_not(None),
-            func.trim(RegistroGlosa.processo_recurso) != '',
             RegistroGlosa.dt_recurso.is_not(None),
         )
         .group_by(RegistroGlosa.cd_remessa)
@@ -968,8 +966,6 @@ def _recursos_abertos_por_remessa(
         .where(
             RegistroGlosa.sn_ativo == 'true',
             RegistroGlosa.sn_glosado == 'true',
-            RegistroGlosa.processo_recurso.is_not(None),
-            func.trim(RegistroGlosa.processo_recurso) != '',
             RegistroGlosa.dt_recurso.is_not(None),
         )
         .group_by(RegistroGlosa.cd_remessa)
