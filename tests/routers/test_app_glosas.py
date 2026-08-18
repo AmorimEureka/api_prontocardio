@@ -339,14 +339,29 @@ def test_acato_aceita_campos_exclusivos_do_recurso_vazios(
     assert registro.valor_recursado is None
 
 
-def test_recurso_continua_exigindo_processo_quantidade_e_valor():
+def test_recurso_aceita_processo_vazio(session, usuario_teste):
     payload = registro_glosa_payload(
         processo_recurso=None,
-        qtd_glosada=None,
-        valor_glosado=None,
     )
 
-    with pytest.raises(ValueError, match='Informe processo'):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(**payload),
+        usuario_teste,
+        session,
+    )
+
+    assert registro.processo_recurso is None
+    assert registro.status_tratativa == 'recurso'
+
+
+@pytest.mark.parametrize('campo', ['qtd_glosada', 'valor_glosado'])
+def test_recurso_continua_exigindo_quantidade_e_valor(campo):
+    payload = registro_glosa_payload(
+        processo_recurso=None,
+        **{campo: None},
+    )
+
+    with pytest.raises(ValueError, match='Informe quantidade e valor'):
         RegistroGlosaCreate(**payload)
 
 
