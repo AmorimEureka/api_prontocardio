@@ -3351,7 +3351,7 @@ def test_acato_integral_encerra_saldo_sem_marcar_recebimento_integral(
     criar_recurso_aberto(
         session,
         sn_glosado='not',
-        processo_recurso='ACATO-20',
+        processo_recurso=None,
     )
     configurar_oracle_fake(monkeypatch)
 
@@ -3493,7 +3493,6 @@ def test_acato_parcial_reduz_saldo_e_recurso_quita_parte_recursada(
 @pytest.mark.parametrize(
     'overrides',
     [
-        {'processo_recurso': None},
         {'dt_recurso': None},
         {'sn_glosado': 'not'},
         {'sn_ativo': 'not'},
@@ -3509,6 +3508,15 @@ def test_registro_sem_recurso_ativo_nao_e_considerado_em_aberto(
         session,
         {CD_REMESSA_TESTE},
     ) == {}
+
+
+def test_recurso_sem_numero_de_processo_e_considerado_em_aberto(session):
+    criar_recurso_aberto(session, processo_recurso=None)
+
+    assert financeiro._recursos_abertos_por_remessa(
+        session,
+        {CD_REMESSA_TESTE},
+    ) == {CD_REMESSA_TESTE: Decimal('20.00')}
 
 
 def test_recebimentos_por_remessa_quitam_em_nfses_distintas(
