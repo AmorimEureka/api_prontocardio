@@ -681,12 +681,10 @@ class RegistroGlosaCreate(BaseModel):
                 'da glosa ou do pagamento.'
             )
         if self.sn_glosado == 'true' and (
-            self.processo_recurso is None
-            or self.qtd_recursado is None
-            or self.valor_recursado is None
+            self.qtd_recursado is None or self.valor_recursado is None
         ):
             raise ValueError(
-                'Informe processo, quantidade e valor para registrar recurso.'
+                'Informe quantidade e valor para registrar recurso.'
             )
         if (
             self.qtd_recursado is not None

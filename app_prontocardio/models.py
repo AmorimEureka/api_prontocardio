@@ -322,9 +322,7 @@ class RegistroGlosa:
 
     @property
     def status_tratativa(self) -> str:
-        if self.dt_recurso is not None and (
-            self.sn_glosado == 'not' or self.processo_recurso is not None
-        ):
+        if self.dt_recurso is not None:
             return 'acato' if self.sn_glosado == 'not' else 'recurso'
         return 'pendente'
 
