@@ -3732,6 +3732,148 @@ def _pacientes_follow_up_glosa(
     return resultado
 
 
+def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912
+    session: Session,
+    session_oracle: Session,
+    vinculo: ConciliacaoFaturamentoRemessa,
+    numero_processo: str,
+) -> list[dict]:
+    tabelas = (
+        'demonstrativo_conta_ipm',
+        'processos_ipm_saude_cogestao',
+    )
+    if any(not _tabela_ipm_existe(session, tabela) for tabela in tabelas):
+        return []
+    protocolos = session.execute(
+        text(
+            """
+            SELECT DISTINCT BTRIM(nr) AS numero_protocolo
+              FROM api_prontocardio.processos_ipm_saude_cogestao
+             WHERE UPPER(BTRIM(numero_processo))
+                   = UPPER(BTRIM(:numero_processo))
+               AND ROUND(valor_protocolo, 2) = :valor_protocolo
+               AND ROUND(valor_glosado_protocolo, 2) = :valor_glosado
+               AND NULLIF(BTRIM(nr), '') IS NOT NULL
+            """
+        ),
+        {
+            'numero_processo': numero_processo,
+            'valor_protocolo': _money(vinculo.valor_total),
+            'valor_glosado': _money(vinculo.valor_glosado),
+        },
+    ).scalars().all()
+    if len(protocolos) != 1:
+        return []
+
+    try:
+        remessas, itens_por_remessa = _itens_oracle_remessas_ipm(
+            session_oracle,
+            {int(vinculo.cd_remessa)},
+        )
+    except SQLAlchemyError:
+        return []
+    remessa = remessas.get(int(vinculo.cd_remessa))
+    itens_oracle = itens_por_remessa.get(int(vinculo.cd_remessa), [])
+    if remessa is None or not itens_oracle:
+        return []
+    demonstrativos = session.execute(
+        text(
+            """
+            SELECT *
+              FROM api_prontocardio.demonstrativo_conta_ipm
+             WHERE BTRIM(numero_protocolo) = :numero_protocolo
+               AND ROUND(valor_protocolo, 2) = :valor_protocolo
+               AND COALESCE(valor_glosa, 0) > 0
+             ORDER BY referencia, id_registro
+            """
+        ),
+        {
+            'numero_protocolo': protocolos[0],
+            'valor_protocolo': _money(vinculo.valor_total),
+        },
+    ).mappings().all()
+    if not demonstrativos:
+        return []
+
+    indice = indexar_itens_oracle(itens_oracle)
+    correspondencias = []
+    for demonstrativo in demonstrativos:
+        correspondencia = resolver_correspondencia_item_oracle(
+            demonstrativo,
+            indice,
+            cd_remessa_esperada=int(vinculo.cd_remessa),
+        )
+        if correspondencia.cd_remessa == int(vinculo.cd_remessa):
+            correspondencias.append((demonstrativo, correspondencia))
+    if not correspondencias:
+        return []
+
+    codigos_tiss = {
+        str(item.get('codigo_glosa') or '').strip()
+        for item, _ in correspondencias
+        if str(item.get('codigo_glosa') or '').strip()
+    }
+    descricoes_tiss = {
+        item.codigo_termo: item.termo
+        for item in session.scalars(
+            select(Tiss).where(Tiss.codigo_termo.in_(codigos_tiss))
+        )
+    } if codigos_tiss else {}
+    tratativas = _tratativas_demonstrativo_por_item(
+        session,
+        {int(vinculo.cd_remessa)},
+    )
+    itens = []
+    for demonstrativo, correspondencia in correspondencias:
+        origem = correspondencia.itens[0]
+        codigo_glosa = str(
+            demonstrativo.get('codigo_glosa') or ''
+        ).strip()
+        item = _item_demonstrativo_follow_up(
+            demonstrativo,
+            origem,
+            correspondencia.criterio,
+            descricoes_tiss.get(codigo_glosa),
+        )
+        chave = (
+            numero_processo.strip().casefold(),
+            int(vinculo.cd_remessa),
+            item['cd_atendimento'],
+            item['cd_reg'],
+            item['cd_lancamento'],
+        )
+        registros_item = tratativas.get(chave, [])
+        if codigo_glosa:
+            registros_item = [
+                registro
+                for registro in registros_item
+                if registro.motivo_glosa == codigo_glosa
+            ]
+        _aplicar_tratativas_item_demonstrativo(item, registros_item)
+        itens.append(item)
+
+    pacientes: dict[tuple[int, str], dict] = {}
+    for item in itens:
+        nome = str(item['nm_paciente'] or 'Paciente não informado')
+        chave = (item['cd_paciente'], nome)
+        paciente = pacientes.setdefault(
+            chave,
+            {
+                'codigo_paciente': item['cd_paciente'],
+                'nm_paciente': nome,
+                'valor_itens': Decimal('0.00'),
+                'valor_glosado': Decimal('0.00'),
+                'valor_total_tratado': Decimal('0.00'),
+                'itens': [],
+            },
+        )
+        paciente['itens'].append(item)
+        paciente['valor_itens'] += item['vl_total_conta']
+        paciente['valor_glosado'] += item['valor_glosa']
+        paciente['valor_total_tratado'] += item['valor_total_tratado']
+    return list(pacientes.values())
+
+
 def _contexto_processo_follow_up(
     session: Session,
     numero_processo: str,
@@ -6054,6 +6196,14 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             dados_demonstrativo,
             descricoes_tiss,
         )
+        pacientes_materializados = bool(pacientes)
+        if incluir_detalhes and not pacientes:
+            pacientes = _pacientes_demonstrativo_conciliado(
+                session,
+                session_oracle,
+                vinculo,
+                numero_processo,
+            )
         valor_itens_demonstrativo = sum(
             (
                 paciente['valor_itens']
@@ -6063,7 +6213,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         )
         valor_itens = (
             valor_itens_demonstrativo
-            if pacientes
+            if pacientes_materializados
             else _money(vinculo.valor_total)
         )
         cards.append(

@@ -1194,6 +1194,49 @@ def test_follow_up_mantem_card_sem_criar_itens_fora_do_demonstrativo(
     ).all() == []
 
 
+def test_follow_up_exibe_demonstrativo_conciliado_sem_materializar(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    configurar_oracle_fake(monkeypatch)
+    vinculo = criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+    )
+    paciente_demonstrativo = {
+        'codigo_paciente': 1,
+        'nm_paciente': 'Paciente Demonstrativo',
+        'valor_itens': Decimal('60.00'),
+        'valor_glosado': Decimal('20.00'),
+        'valor_total_tratado': Decimal('0.00'),
+        'itens': [],
+    }
+    monkeypatch.setattr(
+        financeiro,
+        '_pacientes_demonstrativo_conciliado',
+        lambda *_args: [paciente_demonstrativo],
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+    )
+
+    card = follow_up['cards'][0]
+    assert card['pacientes'] == [paciente_demonstrativo]
+    assert card['valor_itens'] == Decimal('120.00')
+    assert session.scalars(
+        select(RegistroGlosa).where(
+            RegistroGlosa.conciliacao_remessa_id == vinculo.id
+        )
+    ).all() == []
+
+
 def test_totaliza_valor_de_todas_nfses_independente_da_paginacao(
     session,
     usuario_teste,
