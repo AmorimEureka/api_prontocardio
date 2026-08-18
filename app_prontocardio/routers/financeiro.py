@@ -4275,7 +4275,7 @@ def _itens_oracle_remessas_ipm(
             'nr_guia': conta.nr_guia,
             'nr_carteira': conta.nr_carteira,
             'cd_pro_fat': conta.cd_pro_fat,
-            'cd_tuss': conta.cd_tuss,
+            'cd_tuss': getattr(conta, 'cd_tuss', None),
             'descricao': conta.descricao,
             'dt_atendimento': conta.dt_atendimento,
             'dt_alta': conta.dt_alta,
