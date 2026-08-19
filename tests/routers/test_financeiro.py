@@ -971,6 +971,8 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     )
 
     assert cards[0]['pacientes'] == [paciente_demonstrativo]
+    assert cards[0]['valor_glosado'] == Decimal('70.00')
+    assert cards[0]['valor_glosa_pendente'] == Decimal('70.00')
     assert chamadas_demonstrativo[0][2:] == (
         REMESSA_RELATORIO_TRAMITANDO,
         'P335842/2026',
