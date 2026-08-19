@@ -22,6 +22,8 @@ from app_prontocardio.services.importacao_glosas_ipm import (
     chave_item_demonstrativo,
     chave_item_lancamento_coalesce_demonstrativo,
     chave_item_lancamento_coalesce_oracle,
+    chave_item_lancamento_dia_coalesce_demonstrativo,
+    chave_item_lancamento_dia_coalesce_oracle,
     chave_item_lancamento_pro_fat_valor_demonstrativo,
     chave_item_lancamento_pro_fat_valor_oracle,
     chave_item_oracle,
@@ -349,6 +351,53 @@ def test_quarta_chave_usa_lancamento_coalesce_servico_e_carteira():
         **oracle,
         'nr_carteira': '009999999999',
     })
+
+
+def test_data_exata_refina_itens_ambiguos_no_mes():
+    linha = demonstrativo(
+        id_registro='resolvida-pelo-dia',
+        numero_guia_senha='GUIA-DEMONSTRATIVO',
+        codigo_servico='TUSS-4',
+        data_realizacao=date(2025, 12, 10),
+    )
+    item_base = {
+        'cd_remessa': 10,
+        'nr_guia': 'OUTRA-GUIA',
+        'cd_pro_fat': None,
+        'cd_tuss': 'TUSS-4',
+        'nr_carteira': '001234567890',
+        'vl_total_conta': Decimal('100.00'),
+        'dt_competencia': date(2025, 12, 1),
+        'cd_lancamento': 1,
+    }
+    itens_oracle = [
+        {
+            **item_base,
+            'cd_reg': 100,
+            'dt_lancamento': date(2025, 12, 10),
+        },
+        {
+            **item_base,
+            'cd_reg': 101,
+            'dt_lancamento': date(2025, 12, 12),
+        },
+    ]
+
+    assert chave_item_lancamento_dia_coalesce_demonstrativo(
+        linha,
+    ) == chave_item_lancamento_dia_coalesce_oracle(itens_oracle[0])
+    classificacao = classificar_demonstrativos_sem_processo_por_oracle(
+        [linha],
+        indexar_itens_oracle(itens_oracle),
+    )
+
+    assert classificacao.identificadas == {'resolvida-pelo-dia': 10}
+    assert classificacao.criterios == {
+        'resolvida-pelo-dia': (
+            'lancamento_dia_coalesce_servico_carteira'
+        ),
+    }
+    assert classificacao.ambiguas == ()
 
 
 def test_quinta_chave_usa_competencia_coalesce_servico_e_valor():
