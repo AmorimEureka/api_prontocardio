@@ -4786,6 +4786,33 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     return cards
 
 
+def _protocolos_demonstrativo_por_paciente(
+    session: Session,
+    paciente: str | None,
+) -> set[str]:
+    termo = str(paciente or '').strip()
+    if (
+        not termo
+        or not _tabela_ipm_existe(session, 'demonstrativo_conta_ipm')
+    ):
+        return set()
+    return {
+        str(numero or '').strip()
+        for numero in session.execute(
+            text(
+                """
+                SELECT DISTINCT BTRIM(numero_protocolo)
+                  FROM api_prontocardio.demonstrativo_conta_ipm
+                 WHERE nome_beneficiario ILIKE :paciente
+                   AND COALESCE(valor_glosa, 0) > 0
+                   AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+                """
+            ),
+            {'paciente': f'%{termo}%'},
+        ).scalars()
+    }
+
+
 def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     remessas_excluidas: set[int],
@@ -4880,27 +4907,11 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     termo_convenio = str(convenio or '').strip().casefold()
     termo_paciente = str(paciente or '').strip().casefold()
     termo_tipo = str(tipo_atendimento or '').strip().casefold()
-    protocolos_paciente = set()
-    if (
-        termo_paciente
-        and session_oracle is not None
-        and _tabela_ipm_existe(session, 'demonstrativo_conta_ipm')
-    ):
-        protocolos_paciente = {
-            str(numero or '').strip()
-            for numero in session.execute(
-                text(
-                    """
-                    SELECT DISTINCT BTRIM(numero_protocolo)
-                      FROM api_prontocardio.demonstrativo_conta_ipm
-                     WHERE nome_beneficiario ILIKE :paciente
-                       AND COALESCE(valor_glosa, 0) > 0
-                       AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
-                    """
-                ),
-                {'paciente': f'%{str(paciente or "").strip()}%'},
-            ).scalars()
-        }
+    protocolos_paciente = (
+        _protocolos_demonstrativo_por_paciente(session, paciente)
+        if session_oracle is not None
+        else set()
+    )
 
     cards_map: dict[tuple[str, int], dict] = {}
     pacientes_map: dict[tuple[str, int], dict[tuple[int, str], dict]] = (
@@ -5318,7 +5329,7 @@ def _numeros_protocolo_cogestao_follow_up(
     }
 
 
-def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
+def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
     remessas_modeladas: set[int],
@@ -5474,6 +5485,12 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
 
     termo_geral = str(q or '').strip().casefold()
     termo_convenio = str(convenio or '').strip().casefold()
+    termo_paciente = str(paciente or '').strip().casefold()
+    protocolos_paciente = (
+        _protocolos_demonstrativo_por_paciente(session, paciente)
+        if incluir_detalhes and termo_paciente
+        else set()
+    )
     cards = []
     for row in rows:
         valor_protocolo = _money(row['valor_protocolo'])
@@ -5500,19 +5517,60 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
             )
         ):
             continue
-        if any(
+        numero_protocolo = str(row['nr'] or '').strip()
+        pacientes_demonstrativo = []
+        if termo_paciente:
+            if numero_protocolo not in protocolos_paciente:
+                continue
+            pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
+                session,
+                session_oracle,
+                codigo_remessa,
+                numero_processo,
+                valor_protocolo,
+                _money(row['valor_glosado_protocolo']),
+                numero_protocolo,
+            )
+            pacientes_demonstrativo = [
+                paciente_demonstrativo
+                for paciente_demonstrativo in pacientes_demonstrativo
+                if termo_paciente
+                in str(
+                    paciente_demonstrativo['nm_paciente'] or ''
+                ).casefold()
+            ]
+            if not pacientes_demonstrativo:
+                continue
+        elif any(
             (
-                str(paciente or '').strip(),
                 cd_atendimento,
                 str(tipo_atendimento or '').strip(),
             )
         ):
             continue
 
-        valor_glosado = _money(row['valor_glosado_protocolo'])
+        valor_glosado = (
+            sum(
+                (
+                    _money(paciente['valor_glosado'])
+                    for paciente in pacientes_demonstrativo
+                ),
+                Decimal('0.00'),
+            )
+            if pacientes_demonstrativo
+            else _money(row['valor_glosado_protocolo'])
+        )
+        valor_tratado = sum(
+            (
+                _money(paciente['valor_total_tratado'])
+                for paciente in pacientes_demonstrativo
+            ),
+            Decimal('0.00'),
+        )
         cards.append({
             'conciliacao_remessa_id': None,
             'cd_remessa': codigo_remessa,
+            'numero_protocolo': numero_protocolo or None,
             'convenio': nome_convenio,
             'data_competencia': (
                 remessa.get('data_competencia') or competencia
@@ -5526,10 +5584,23 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
             # COGESTÃO é o fallback até o nível da remessa. Nesse cenário o
             # valor do protocolo ocupa o total; remessas com detalhamento
             # ficam no fluxo modelado e usam a soma dos valores dos itens.
-            'valor_itens': valor_protocolo,
+            'valor_itens': (
+                sum(
+                    (
+                        _money(paciente['valor_itens'])
+                        for paciente in pacientes_demonstrativo
+                    ),
+                    Decimal('0.00'),
+                )
+                if pacientes_demonstrativo
+                else valor_protocolo
+            ),
             'valor_glosado': valor_glosado,
-            'valor_glosa_pendente': valor_glosado,
-            'valor_total_tratado': Decimal('0.00'),
+            'valor_glosa_pendente': max(
+                valor_glosado - valor_tratado,
+                Decimal('0.00'),
+            ),
+            'valor_total_tratado': valor_tratado,
             'processo': {
                 'numero_processo': numero_processo,
                 'data_abertura': row.get('data_abertura'),
@@ -5544,7 +5615,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
                 'valor_liquido_nfse': Decimal('0.00'),
                 'data_emissao': None,
             },
-            'pacientes': [],
+            'pacientes': pacientes_demonstrativo,
         })
     cards_demonstrativo = _cards_demonstrativo_processos_abertos(
             session,
