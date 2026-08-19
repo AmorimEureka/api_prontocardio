@@ -5164,6 +5164,75 @@ def _numeros_protocolo_por_remessa_follow_up(
     }
 
 
+def _numeros_protocolo_cogestao_follow_up(
+    session: Session,
+    rows: list[tuple[ConciliacaoFaturamentoRemessa, ConciliacaoFaturamento]],
+) -> dict[int, str]:
+    if (
+        not rows
+        or not _tabela_ipm_existe(
+            session,
+            'processos_ipm_saude_cogestao',
+        )
+    ):
+        return {}
+    parametros = {}
+    valores = []
+    for indice, (vinculo, conciliacao) in enumerate(rows):
+        nomes = {
+            'remessa': f'remessa_{indice}',
+            'processo': f'processo_{indice}',
+            'total': f'total_{indice}',
+            'glosa': f'glosa_{indice}',
+        }
+        parametros[nomes['remessa']] = int(vinculo.cd_remessa)
+        parametros[nomes['processo']] = str(
+            conciliacao.processo_recebimento or ''
+        ).strip()
+        parametros[nomes['total']] = _money(vinculo.valor_total)
+        parametros[nomes['glosa']] = _money(vinculo.valor_glosado)
+        valores.append(
+            '('
+            f"CAST(:{nomes['remessa']} AS BIGINT), "
+            f"CAST(:{nomes['processo']} AS TEXT), "
+            f"CAST(:{nomes['total']} AS NUMERIC), "
+            f"CAST(:{nomes['glosa']} AS NUMERIC)"
+            ')'
+        )
+    rows_protocolo = session.execute(
+        text(
+            f"""
+            WITH vinculos(
+                cd_remessa, numero_processo, valor_protocolo, valor_glosado
+            ) AS (
+                VALUES {', '.join(valores)}
+            )
+            SELECT vinculos.cd_remessa,
+                   string_agg(
+                       DISTINCT BTRIM(cog.nr), ', '
+                       ORDER BY BTRIM(cog.nr)
+                   ) AS numero_protocolo
+              FROM vinculos
+              JOIN api_prontocardio.processos_ipm_saude_cogestao AS cog
+                ON UPPER(BTRIM(cog.numero_processo))
+                 = UPPER(BTRIM(vinculos.numero_processo))
+               AND ROUND(cog.valor_protocolo, 2)
+                 = ROUND(vinculos.valor_protocolo, 2)
+               AND ROUND(cog.valor_glosado_protocolo, 2)
+                 = ROUND(vinculos.valor_glosado, 2)
+             WHERE NULLIF(BTRIM(cog.nr), '') IS NOT NULL
+             GROUP BY vinculos.cd_remessa
+            """
+        ),
+        parametros,
+    ).mappings().all()
+    return {
+        int(row['cd_remessa']): str(row['numero_protocolo'])
+        for row in rows_protocolo
+        if row['numero_protocolo']
+    }
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
     session: Session,
     session_oracle: Session,
@@ -6098,6 +6167,16 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     numeros_protocolo_por_remessa = _numeros_protocolo_por_remessa_follow_up(
         session,
         codigos_remessa,
+    )
+    vinculos_conciliados = [
+        (vinculo, conciliacao)
+        for vinculo, conciliacao, *_ in rows
+    ]
+    numeros_protocolo_por_remessa.update(
+        _numeros_protocolo_cogestao_follow_up(
+            session,
+            vinculos_conciliados,
+        )
     )
     totais_remessas_hpc = {}
     try:
