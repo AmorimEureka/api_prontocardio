@@ -5821,13 +5821,14 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     incluir_detalhes: bool = True,
     agrupar_por_processo: bool = False,
 ):
-    detalhamento_demonstrativo = incluir_detalhes and any((
+    consulta_direcionada = any((
         conciliacao_remessa_id,
         cd_remessa,
         str(processo_original or '').strip(),
         str(paciente or '').strip(),
         cd_atendimento,
     ))
+    detalhamento_demonstrativo = incluir_detalhes and consulta_direcionada
     # A listagem resumida não pode varrer e bloquear todas as conciliações.
     # A complementação legada é feita somente ao abrir uma remessa específica.
     if incluir_detalhes and conciliacao_remessa_id is not None:
@@ -6071,7 +6072,11 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             session,
             session_oracle,
             remessas_modeladas,
-            incluir_detalhes=detalhamento_demonstrativo,
+            # O frontend expande localmente os processos e mantém
+            # incluir_detalhes=false. Em consultas direcionadas, completa
+            # somente os cards parciais do relatório; a listagem genérica
+            # continua sem consultas Oracle por card.
+            incluir_detalhes=consulta_direcionada,
             q=q,
             numero_nfse=numero_nfse,
             cd_remessa=cd_remessa,
