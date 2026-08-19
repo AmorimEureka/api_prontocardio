@@ -938,6 +938,47 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert '::integer >= 2024' in queries[0]
     assert 'COALESCE(item.valor_glosa, 0) > 0' in queries[0]
 
+    paciente_demonstrativo = {
+        'codigo_paciente': 42,
+        'nm_paciente': 'MARIA DA SILVA',
+        'valor_itens': Decimal('600.00'),
+        'valor_glosado': Decimal('70.00'),
+        'valor_total_tratado': Decimal('0.00'),
+        'itens': [{'descricao': 'Item ausente no relatório'}],
+    }
+    chamadas_demonstrativo = []
+
+    def pacientes_demonstrativo(*args):
+        chamadas_demonstrativo.append(args)
+        return [paciente_demonstrativo]
+
+    monkeypatch.setattr(
+        financeiro,
+        '_pacientes_demonstrativo_conciliado',
+        pacientes_demonstrativo,
+    )
+    cards = financeiro._cards_relatorios_follow_up(
+        Sessao(),
+        set(),
+        session_oracle=object(),
+        q=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+    )
+
+    assert cards[0]['pacientes'] == [paciente_demonstrativo]
+    assert chamadas_demonstrativo[0][2:] == (
+        REMESSA_RELATORIO_TRAMITANDO,
+        'P335842/2026',
+        Decimal('1234.56'),
+        Decimal('55.00'),
+        'PROTOCOLO-1',
+    )
+
 
 def test_follow_up_pagina_processos_por_competencia_mais_recente(
     session,
