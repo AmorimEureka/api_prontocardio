@@ -3732,48 +3732,57 @@ def _pacientes_follow_up_glosa(
     return resultado
 
 
-def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912
+def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
     session: Session,
     session_oracle: Session,
-    vinculo: ConciliacaoFaturamentoRemessa,
+    cd_remessa: int,
     numero_processo: str,
+    valor_protocolo: Decimal,
+    valor_glosado: Decimal,
+    numero_protocolo: str | None = None,
 ) -> list[dict]:
-    tabelas = (
-        'demonstrativo_conta_ipm',
-        'processos_ipm_saude_cogestao',
-    )
-    if any(not _tabela_ipm_existe(session, tabela) for tabela in tabelas):
+    if not _tabela_ipm_existe(session, 'demonstrativo_conta_ipm'):
         return []
-    protocolos = session.execute(
-        text(
-            """
-            SELECT DISTINCT BTRIM(nr) AS numero_protocolo
-              FROM api_prontocardio.processos_ipm_saude_cogestao
-             WHERE UPPER(BTRIM(numero_processo))
-                   = UPPER(BTRIM(:numero_processo))
-               AND ROUND(valor_protocolo, 2) = :valor_protocolo
-               AND ROUND(valor_glosado_protocolo, 2) = :valor_glosado
-               AND NULLIF(BTRIM(nr), '') IS NOT NULL
-            """
-        ),
-        {
-            'numero_processo': numero_processo,
-            'valor_protocolo': _money(vinculo.valor_total),
-            'valor_glosado': _money(vinculo.valor_glosado),
-        },
-    ).scalars().all()
-    if len(protocolos) != 1:
+    protocolos_informados = [
+        item.strip()
+        for item in str(numero_protocolo or '').split(',')
+        if item.strip()
+    ]
+    protocolos = protocolos_informados
+    if (
+        not protocolos
+        and _tabela_ipm_existe(session, 'processos_ipm_saude_cogestao')
+    ):
+        protocolos = session.execute(
+            text(
+                """
+                SELECT DISTINCT BTRIM(nr) AS numero_protocolo
+                  FROM api_prontocardio.processos_ipm_saude_cogestao
+                 WHERE UPPER(BTRIM(numero_processo))
+                       = UPPER(BTRIM(:numero_processo))
+                   AND ROUND(valor_protocolo, 2) = :valor_protocolo
+                   AND ROUND(valor_glosado_protocolo, 2) = :valor_glosado
+                   AND NULLIF(BTRIM(nr), '') IS NOT NULL
+                """
+            ),
+            {
+                'numero_processo': numero_processo,
+                'valor_protocolo': _money(valor_protocolo),
+                'valor_glosado': _money(valor_glosado),
+            },
+        ).scalars().all()
+    if not protocolos or (not protocolos_informados and len(protocolos) != 1):
         return []
 
     try:
         remessas, itens_por_remessa = _itens_oracle_remessas_ipm(
             session_oracle,
-            {int(vinculo.cd_remessa)},
+            {int(cd_remessa)},
         )
     except SQLAlchemyError:
         return []
-    remessa = remessas.get(int(vinculo.cd_remessa))
-    itens_oracle = itens_por_remessa.get(int(vinculo.cd_remessa), [])
+    remessa = remessas.get(int(cd_remessa))
+    itens_oracle = itens_por_remessa.get(int(cd_remessa), [])
     if remessa is None or not itens_oracle:
         return []
     demonstrativos = session.execute(
@@ -3781,15 +3790,14 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912
             """
             SELECT *
               FROM api_prontocardio.demonstrativo_conta_ipm
-             WHERE BTRIM(numero_protocolo) = :numero_protocolo
-               AND ROUND(valor_protocolo, 2) = :valor_protocolo
+             WHERE BTRIM(numero_protocolo)
+                   = ANY(CAST(:numeros_protocolo AS TEXT[]))
                AND COALESCE(valor_glosa, 0) > 0
              ORDER BY referencia, id_registro
             """
         ),
         {
-            'numero_protocolo': protocolos[0],
-            'valor_protocolo': _money(vinculo.valor_total),
+            'numeros_protocolo': protocolos,
         },
     ).mappings().all()
     if not demonstrativos:
@@ -3801,9 +3809,9 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912
         correspondencia = resolver_correspondencia_item_oracle(
             demonstrativo,
             indice,
-            cd_remessa_esperada=int(vinculo.cd_remessa),
+            cd_remessa_esperada=int(cd_remessa),
         )
-        if correspondencia.cd_remessa == int(vinculo.cd_remessa):
+        if correspondencia.cd_remessa == int(cd_remessa):
             correspondencias.append((demonstrativo, correspondencia))
     if not correspondencias:
         return []
@@ -3821,7 +3829,7 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912
     } if codigos_tiss else {}
     tratativas = _tratativas_demonstrativo_por_item(
         session,
-        {int(vinculo.cd_remessa)},
+        {int(cd_remessa)},
     )
     itens = []
     for demonstrativo, correspondencia in correspondencias:
@@ -3837,7 +3845,7 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912
         )
         chave = (
             numero_processo.strip().casefold(),
-            int(vinculo.cd_remessa),
+            int(cd_remessa),
             item['cd_atendimento'],
             item['cd_reg'],
             item['cd_lancamento'],
@@ -4782,6 +4790,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     remessas_excluidas: set[int],
     *,
+    session_oracle: Session | None = None,
     q: str | None,
     cd_remessa: int | None,
     convenio: str | None,
@@ -5128,6 +5137,19 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             card.pop('numeros_protocolo')
         ) or None
         card['pacientes'] = list(pacientes_map[chave].values())
+        if session_oracle is None:
+            continue
+        pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
+            session,
+            session_oracle,
+            int(card['cd_remessa']),
+            str(card['processo']['numero_processo']),
+            _money(card['valor_remessa']),
+            _money(card['valor_glosado']),
+            card['numero_protocolo'],
+        )
+        if pacientes_demonstrativo:
+            card['pacientes'] = pacientes_demonstrativo
     return list(cards_map.values())
 
 
@@ -5478,6 +5500,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913
     cards_relatorios = _cards_relatorios_follow_up(
         session,
         remessas_modeladas | remessas_demonstrativo,
+        session_oracle=session_oracle,
         q=q,
         cd_remessa=cd_remessa,
         convenio=convenio,
@@ -6276,13 +6299,18 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             descricoes_tiss,
         )
         pacientes_materializados = bool(pacientes)
-        if incluir_detalhes and not pacientes:
-            pacientes = _pacientes_demonstrativo_conciliado(
+        if incluir_detalhes:
+            pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
                 session,
                 session_oracle,
-                vinculo,
+                int(vinculo.cd_remessa),
                 numero_processo,
+                _money(vinculo.valor_total),
+                _money(vinculo.valor_glosado),
+                numeros_protocolo_por_remessa.get(vinculo.cd_remessa),
             )
+            if pacientes_demonstrativo:
+                pacientes = pacientes_demonstrativo
         valor_itens_demonstrativo = sum(
             (
                 paciente['valor_itens']
