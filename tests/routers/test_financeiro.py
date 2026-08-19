@@ -1237,6 +1237,40 @@ def test_follow_up_exibe_demonstrativo_conciliado_sem_materializar(
     ).all() == []
 
 
+def test_follow_up_exibe_protocolo_cogestao_no_card_conciliado(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    configurar_oracle_fake(monkeypatch)
+    criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_numeros_protocolo_por_remessa_follow_up',
+        lambda *_args: {CD_REMESSA_TESTE: 'PROTOCOLO-AMBIGUO'},
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_numeros_protocolo_cogestao_follow_up',
+        lambda *_args: {CD_REMESSA_TESTE: '5584772'},
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+        incluir_detalhes=False,
+    )
+
+    assert follow_up['cards'][0]['numero_protocolo'] == '5584772'
+
+
 def test_totaliza_valor_de_todas_nfses_independente_da_paginacao(
     session,
     usuario_teste,
