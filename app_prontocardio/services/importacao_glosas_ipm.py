@@ -53,6 +53,10 @@ class IndicesItensOracle:
         tuple,
         tuple[Mapping, ...],
     ]
+    lancamento_dia_coalesce_servico_carteira: Mapping[
+        tuple,
+        tuple[Mapping, ...],
+    ]
     competencia_servico_carteira: Mapping[tuple, tuple[Mapping, ...]]
     competencia_tuss_carteira: Mapping[tuple, tuple[Mapping, ...]]
     lancamento_coalesce_servico_carteira: Mapping[
@@ -106,6 +110,21 @@ def normalizar_mes_ano(valor) -> tuple[int, int] | None:
         try:
             resultado = datetime.strptime(bruto[:10], formato)
             return resultado.year, resultado.month
+        except ValueError:
+            continue
+    return None
+
+
+def normalizar_data(valor) -> date | None:
+    if isinstance(valor, datetime):
+        return valor.date()
+    if isinstance(valor, date):
+        return valor
+
+    bruto = str(valor or '').strip()
+    for formato in ('%Y-%m-%d', '%d/%m/%Y'):
+        try:
+            return datetime.strptime(bruto[:10], formato).date()
         except ValueError:
             continue
     return None
@@ -309,12 +328,33 @@ def chave_item_lancamento_coalesce_demonstrativo(linha: Mapping) -> tuple:
     )
 
 
+def chave_item_lancamento_dia_coalesce_demonstrativo(
+    linha: Mapping,
+) -> tuple:
+    return (
+        normalizar_data(linha['data_realizacao']),
+        normalizar_texto(linha['codigo_servico']),
+        normalizar_carteira(linha['codigo_beneficiario']),
+    )
+
+
 def chave_item_lancamento_coalesce_oracle(linha: Mapping) -> tuple:
     codigo_servico = linha.get('cd_pro_fat')
     if codigo_servico is None:
         codigo_servico = linha.get('cd_tuss')
     return (
         normalizar_mes_ano(linha['dt_lancamento']),
+        normalizar_texto(codigo_servico),
+        normalizar_carteira(linha['nr_carteira']),
+    )
+
+
+def chave_item_lancamento_dia_coalesce_oracle(linha: Mapping) -> tuple:
+    codigo_servico = linha.get('cd_pro_fat')
+    if codigo_servico is None:
+        codigo_servico = linha.get('cd_tuss')
+    return (
+        normalizar_data(linha['dt_lancamento']),
         normalizar_texto(codigo_servico),
         normalizar_carteira(linha['nr_carteira']),
     )
@@ -415,6 +455,7 @@ def indexar_itens_oracle(
     itens: Iterable[Mapping],
 ) -> IndicesItensOracle:
     por_guia: dict[tuple, list[Mapping]] = defaultdict(list)
+    por_lancamento_dia: dict[tuple, list[Mapping]] = defaultdict(list)
     por_servico: dict[tuple, list[Mapping]] = defaultdict(list)
     por_tuss: dict[tuple, list[Mapping]] = defaultdict(list)
     por_lancamento: dict[tuple, list[Mapping]] = defaultdict(list)
@@ -431,6 +472,17 @@ def indexar_itens_oracle(
             por_servico[chave_item_sem_guia_oracle(item)].append(item)
             if normalizar_texto(item.get('cd_tuss')):
                 por_tuss[chave_item_sem_guia_tuss_oracle(item)].append(item)
+        if (
+            normalizar_data(item.get('dt_lancamento')) is not None
+            and normalizar_texto(
+                item.get('cd_pro_fat')
+                if item.get('cd_pro_fat') is not None
+                else item.get('cd_tuss')
+            )
+        ):
+            por_lancamento_dia[
+                chave_item_lancamento_dia_coalesce_oracle(item)
+            ].append(item)
         codigo_coalesce_competencia = item.get('cd_tuss')
         if codigo_coalesce_competencia is None:
             codigo_coalesce_competencia = item.get('cd_pro_fat')
@@ -469,6 +521,10 @@ def indexar_itens_oracle(
     return IndicesItensOracle(
         competencia_guia_servico_carteira={
             chave: tuple(linhas) for chave, linhas in por_guia.items()
+        },
+        lancamento_dia_coalesce_servico_carteira={
+            chave: tuple(linhas)
+            for chave, linhas in por_lancamento_dia.items()
         },
         competencia_servico_carteira={
             chave: tuple(linhas) for chave, linhas in por_servico.items()
@@ -511,6 +567,11 @@ def resolver_correspondencia_item_oracle(
             'competencia_guia_servico_carteira',
             indices.competencia_guia_servico_carteira,
             chave_item_demonstrativo,
+        ),
+        (
+            'lancamento_dia_coalesce_servico_carteira',
+            indices.lancamento_dia_coalesce_servico_carteira,
+            chave_item_lancamento_dia_coalesce_demonstrativo,
         ),
         (
             'competencia_servico_carteira',
