@@ -5821,6 +5821,13 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     incluir_detalhes: bool = True,
     agrupar_por_processo: bool = False,
 ):
+    detalhamento_demonstrativo = incluir_detalhes and any((
+        conciliacao_remessa_id,
+        cd_remessa,
+        str(processo_original or '').strip(),
+        str(paciente or '').strip(),
+        cd_atendimento,
+    ))
     # A listagem resumida não pode varrer e bloquear todas as conciliações.
     # A complementação legada é feita somente ao abrir uma remessa específica.
     if incluir_detalhes and conciliacao_remessa_id is not None:
@@ -6064,7 +6071,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             session,
             session_oracle,
             remessas_modeladas,
-            incluir_detalhes=incluir_detalhes,
+            incluir_detalhes=detalhamento_demonstrativo,
             q=q,
             numero_nfse=numero_nfse,
             cd_remessa=cd_remessa,
@@ -6301,7 +6308,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             descricoes_tiss,
         )
         pacientes_materializados = bool(pacientes)
-        if incluir_detalhes:
+        if detalhamento_demonstrativo:
             pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
                 session,
                 session_oracle,
