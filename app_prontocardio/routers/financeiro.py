@@ -4880,6 +4880,27 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     termo_convenio = str(convenio or '').strip().casefold()
     termo_paciente = str(paciente or '').strip().casefold()
     termo_tipo = str(tipo_atendimento or '').strip().casefold()
+    protocolos_paciente = set()
+    if (
+        termo_paciente
+        and session_oracle is not None
+        and _tabela_ipm_existe(session, 'demonstrativo_conta_ipm')
+    ):
+        protocolos_paciente = {
+            str(numero or '').strip()
+            for numero in session.execute(
+                text(
+                    """
+                    SELECT DISTINCT BTRIM(numero_protocolo)
+                      FROM api_prontocardio.demonstrativo_conta_ipm
+                     WHERE nome_beneficiario ILIKE :paciente
+                       AND COALESCE(valor_glosa, 0) > 0
+                       AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+                    """
+                ),
+                {'paciente': f'%{str(paciente or "").strip()}%'},
+            ).scalars()
+        }
 
     cards_map: dict[tuple[str, int], dict] = {}
     pacientes_map: dict[tuple[str, int], dict[tuple[int, str], dict]] = (
@@ -4912,7 +4933,12 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             continue
         if termo_processo and termo_processo not in numero_processo.casefold():
             continue
-        if termo_paciente and termo_paciente not in nome_paciente.casefold():
+        protocolo_row = str(row['numero_protocolo'] or '').strip()
+        if (
+            termo_paciente
+            and termo_paciente not in nome_paciente.casefold()
+            and protocolo_row not in protocolos_paciente
+        ):
             continue
         if cd_atendimento is not None and atendimento != cd_atendimento:
             continue
@@ -5132,6 +5158,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         ]
         paciente_card['itens'].append(item)
 
+    chaves_remover = []
     for chave, card in cards_map.items():
         card['numero_protocolo'] = ', '.join(
             card.pop('numeros_protocolo')
@@ -5149,6 +5176,18 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             card['numero_protocolo'],
         )
         if pacientes_demonstrativo:
+            if termo_paciente:
+                pacientes_demonstrativo = [
+                    paciente_demonstrativo
+                    for paciente_demonstrativo in pacientes_demonstrativo
+                    if termo_paciente
+                    in str(
+                        paciente_demonstrativo['nm_paciente'] or ''
+                    ).casefold()
+                ]
+            if not pacientes_demonstrativo:
+                chaves_remover.append(chave)
+                continue
             card['pacientes'] = pacientes_demonstrativo
             card['valor_glosado'] = sum(
                 (
@@ -5168,6 +5207,12 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 card['valor_glosado'] - card['valor_total_tratado'],
                 Decimal('0.00'),
             )
+        elif termo_paciente and card['numero_protocolo'] in (
+            protocolos_paciente
+        ):
+            chaves_remover.append(chave)
+    for chave in chaves_remover:
+        cards_map.pop(chave, None)
     return list(cards_map.values())
 
 
