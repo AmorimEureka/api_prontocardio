@@ -6308,7 +6308,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             descricoes_tiss,
         )
         pacientes_materializados = bool(pacientes)
-        if detalhamento_demonstrativo:
+        if detalhamento_demonstrativo and not pacientes:
             pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
                 session,
                 session_oracle,
