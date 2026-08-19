@@ -5150,6 +5150,24 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         )
         if pacientes_demonstrativo:
             card['pacientes'] = pacientes_demonstrativo
+            card['valor_glosado'] = sum(
+                (
+                    _money(paciente['valor_glosado'])
+                    for paciente in pacientes_demonstrativo
+                ),
+                Decimal('0.00'),
+            )
+            card['valor_total_tratado'] = sum(
+                (
+                    _money(paciente['valor_total_tratado'])
+                    for paciente in pacientes_demonstrativo
+                ),
+                Decimal('0.00'),
+            )
+            card['valor_glosa_pendente'] = max(
+                card['valor_glosado'] - card['valor_total_tratado'],
+                Decimal('0.00'),
+            )
     return list(cards_map.values())
 
 
