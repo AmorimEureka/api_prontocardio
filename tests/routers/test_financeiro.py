@@ -1253,13 +1253,19 @@ def test_follow_up_exibe_demonstrativo_conciliado_sem_materializar(
         'valor_total_tratado': Decimal('0.00'),
         'itens': [],
     }
+    chamadas_demonstrativo = []
+
+    def pacientes_demonstrativo(*args):
+        chamadas_demonstrativo.append(args)
+        return [paciente_demonstrativo]
+
     monkeypatch.setattr(
         financeiro,
         '_pacientes_demonstrativo_conciliado',
-        lambda *_args: [paciente_demonstrativo],
+        pacientes_demonstrativo,
     )
 
-    follow_up = financeiro.consultar_follow_up_glosas(
+    resumo = financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
         session=session,
         session_oracle=object(),
@@ -1268,8 +1274,22 @@ def test_follow_up_exibe_demonstrativo_conciliado_sem_materializar(
         offset=0,
     )
 
+    assert resumo['cards'][0]['pacientes'] == []
+    assert chamadas_demonstrativo == []
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        limit=20,
+        offset=0,
+        conciliacao_remessa_id=vinculo.id,
+    )
+
     card = follow_up['cards'][0]
     assert card['pacientes'] == [paciente_demonstrativo]
+    assert len(chamadas_demonstrativo) == 1
     assert card['valor_itens'] == Decimal('120.00')
     assert session.scalars(
         select(RegistroGlosa).where(
