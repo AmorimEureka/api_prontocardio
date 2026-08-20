@@ -73,6 +73,34 @@ def test_gera_pdf_com_layout_de_recurso():
     assert len(conteudo) > TAMANHO_MINIMO_PDF
 
 
+def test_gera_pdf_consolidando_remessas_do_processo():
+    primeira_remessa = _card_recurso()
+    segunda_remessa = _card_recurso()
+    segunda_remessa['cd_remessa'] = 17972
+    segunda_remessa['numero_protocolo'] = '5519207'
+    for item in segunda_remessa['pacientes'][0]['itens']:
+        item['numero_protocolo'] = '5519207'
+        item['registro_recusa'] = {
+            **item['registro_recusa'],
+            'id': 23262,
+        }
+
+    linhas = [
+        linha
+        for card in (primeira_remessa, segunda_remessa)
+        for linha in montar_linhas_recurso_glosa(card)
+    ]
+    conteudo = gerar_pdf_recurso_glosa(
+        [primeira_remessa, segunda_remessa]
+    )
+
+    assert len(linhas) == 4
+    assert sum(
+        linha['valor_recurso'] for linha in linhas
+    ) == Decimal('1040.28')
+    assert conteudo.startswith(b'%PDF-')
+
+
 def test_pdf_exige_ao_menos_um_recurso_registrado():
     card = _card_recurso()
     for item in card['pacientes'][0]['itens']:
@@ -80,6 +108,6 @@ def test_pdf_exige_ao_menos_um_recurso_registrado():
 
     with pytest.raises(
         ValueError,
-        match='não possui recursos registrados',
+        match='processo não possui recursos registrados',
     ):
         gerar_pdf_recurso_glosa(card)
