@@ -369,6 +369,82 @@ class OracleComContaFake:
         return SimpleNamespace(cd_con_cor=7)
 
 
+def test_distribui_recurso_agregado_entre_linhas_do_demonstrativo():
+    registro = SimpleNamespace(
+        id=1,
+        sn_ativo='true',
+        status_tratativa='recurso',
+        valor_recursado=Decimal('520.14'),
+    )
+    itens = [
+        ({'valor_glosa': Decimal('120.03')}, [registro]),
+        ({'valor_glosa': Decimal('400.11')}, [registro]),
+    ]
+
+    financeiro._distribuir_tratativas_itens_demonstrativo(itens)
+
+    assert [item['valor_total_tratado'] for item, _ in itens] == [
+        Decimal('120.03'),
+        Decimal('400.11'),
+    ]
+    assert [item['valor_pendente'] for item, _ in itens] == [
+        Decimal('0.00'),
+        Decimal('0.00'),
+    ]
+    assert all(item['registro_recusa'] is registro for item, _ in itens)
+
+
+def test_distribui_recurso_parcial_sem_duplicar_valor_tratado():
+    registro = SimpleNamespace(
+        id=1,
+        sn_ativo='true',
+        status_tratativa='recurso',
+        valor_recursado=Decimal('200.00'),
+    )
+    itens = [
+        ({'valor_glosa': Decimal('120.03')}, [registro]),
+        ({'valor_glosa': Decimal('400.11')}, [registro]),
+    ]
+
+    financeiro._distribuir_tratativas_itens_demonstrativo(itens)
+
+    assert [item['valor_total_tratado'] for item, _ in itens] == [
+        Decimal('46.15'),
+        Decimal('153.85'),
+    ]
+    assert sum(
+        item['valor_total_tratado'] for item, _ in itens
+    ) == Decimal('200.00')
+
+
+def test_tratativa_conciliada_participa_do_detalhamento_demonstrativo(
+    session,
+    usuario_teste,
+):
+    vinculo = criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+        cd_remessa=987,
+    )
+    registro = criar_recurso_aberto(
+        session,
+        cd_remessa=987,
+        conciliacao_remessa_id=vinculo.id,
+        processo_controle_fatura_gab='PROC-ANTERIOR',
+        cd_atendimento=2,
+        conta=3,
+        cd_lancamento=7,
+    )
+
+    tratativas = financeiro._tratativas_demonstrativo_por_item(
+        session,
+        {987},
+    )
+
+    chave = ('proc-anterior', 987, 2, 3, 7)
+    assert [item.id for item in tratativas[chave]] == [registro.id]
+
+
 def test_lista_apenas_nfse_nao_conciliada(
     session,
     usuario_teste,
