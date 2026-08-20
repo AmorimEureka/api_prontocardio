@@ -4832,6 +4832,9 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
                 Decimal('0.00'),
             ),
             'valor_total_tratado': valor_tratado,
+            'possui_recurso': any(
+                item.get('registro_recusa') is not None for item in itens
+            ),
             'processo': {
                 'numero_processo': numero_processo,
                 'data_abertura': processo.get('data_abertura'),
@@ -5167,6 +5170,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 'valor_glosado': Decimal('0.00'),
                 'valor_glosa_pendente': Decimal('0.00'),
                 'valor_total_tratado': Decimal('0.00'),
+                'possui_recurso': False,
                 'processo': {
                     'numero_processo': numero_processo,
                     'data_abertura': row.get('data_abertura'),
@@ -5202,6 +5206,10 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         card['valor_glosado'] += valor_glosa
         card['valor_total_tratado'] += item['valor_total_tratado']
         card['valor_glosa_pendente'] += item['valor_pendente']
+        card['possui_recurso'] = (
+            card['possui_recurso']
+            or item['registro_recusa'] is not None
+        )
         codigo_paciente = int(row['cd_paciente'] or 0)
         paciente_card = pacientes_map[chave_card].setdefault(
             (codigo_paciente, nome_paciente.casefold()),
@@ -5282,6 +5290,11 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             card['valor_glosa_pendente'] = max(
                 card['valor_glosado'] - card['valor_total_tratado'],
                 Decimal('0.00'),
+            )
+            card['possui_recurso'] = any(
+                item.get('registro_recusa') is not None
+                for paciente_card in pacientes_demonstrativo
+                for item in paciente_card.get('itens') or []
             )
         elif termo_paciente and card['numero_protocolo'] in (
             protocolos_paciente
@@ -5666,6 +5679,11 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 Decimal('0.00'),
             ),
             'valor_total_tratado': valor_tratado,
+            'possui_recurso': any(
+                item.get('registro_recusa') is not None
+                for paciente_card in pacientes_demonstrativo
+                for item in paciente_card.get('itens') or []
+            ),
             'processo': {
                 'numero_processo': numero_processo,
                 'data_abertura': row.get('data_abertura'),
