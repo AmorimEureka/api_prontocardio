@@ -6,7 +6,7 @@ from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import (
     Numeric,
     String,
@@ -71,6 +71,9 @@ from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.importacao_glosas_ipm import (
     indexar_itens_oracle,
     resolver_correspondencia_item_oracle,
+)
+from app_prontocardio.services.pdf_recurso_glosa import (
+    gerar_pdf_recurso_glosa,
 )
 from app_prontocardio.services.remessas import (
     sincronizar_totais_remessas_financeiras,
@@ -6595,6 +6598,83 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         'limit': limit,
         'offset': offset,
     }
+
+
+@router.get(
+    '/conciliacao-faturamento/glosas-pendentes/recurso.pdf',
+    status_code=HTTPStatus.OK,
+)
+def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+    cd_remessa: int = Query(ge=1),
+    processo_original: str = Query(min_length=1, max_length=100),
+    download: bool = True,
+):
+    processo_normalizado = processo_original.strip()
+    resultado = consultar_follow_up_glosas(
+        usuario_atual=usuario_atual,
+        session=session,
+        session_oracle=session_oracle,
+        q=None,
+        numero_nfse=None,
+        cd_remessa=cd_remessa,
+        convenio=None,
+        processo_original=processo_normalizado,
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+        limit=100,
+        offset=0,
+        conciliacao_remessa_id=None,
+        incluir_detalhes=True,
+        agrupar_por_processo=True,
+    )
+    card = next(
+        (
+            item
+            for item in resultado['cards']
+            if int(item['cd_remessa']) == cd_remessa
+            and str(
+                (item.get('processo') or {}).get('numero_processo') or ''
+            ).strip().casefold()
+            == processo_normalizado.casefold()
+        ),
+        None,
+    )
+    if card is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Card do Follow-Up de Glosas não encontrado.',
+        )
+    try:
+        conteudo = gerar_pdf_recurso_glosa(card)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    processo_arquivo = ''.join(
+        caractere if caractere.isalnum() else '-'
+        for caractere in processo_normalizado
+    ).strip('-')
+    nome_arquivo = (
+        f'recurso-glosa-{processo_arquivo}-remessa-{cd_remessa}.pdf'
+    )
+    disposicao = 'attachment' if download else 'inline'
+    return Response(
+        content=conteudo,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': (
+                f'{disposicao}; filename="{nome_arquivo}"'
+            ),
+            'X-Content-Type-Options': 'nosniff',
+        },
+    )
 
 
 def _conciliacao_alteracao_publica(

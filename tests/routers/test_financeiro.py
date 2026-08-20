@@ -369,6 +369,46 @@ class OracleComContaFake:
         return SimpleNamespace(cd_con_cor=7)
 
 
+def test_endpoint_gera_pdf_do_recurso_por_processo_e_remessa(
+    monkeypatch,
+    usuario_teste,
+):
+    card = {
+        'cd_remessa': 987,
+        'processo': {'numero_processo': 'PROC-12/2026'},
+        'pacientes': [],
+    }
+    monkeypatch.setattr(
+        financeiro,
+        'consultar_follow_up_glosas',
+        lambda **_kwargs: {'cards': [card]},
+    )
+    monkeypatch.setattr(
+        financeiro,
+        'gerar_pdf_recurso_glosa',
+        lambda card_recebido: (
+            b'%PDF-1.7\nrecurso'
+            if card_recebido is card
+            else b''
+        ),
+    )
+
+    response = financeiro.gerar_pdf_recurso_follow_up(
+        usuario_atual=usuario_teste,
+        session=object(),
+        session_oracle=object(),
+        cd_remessa=987,
+        processo_original='PROC-12/2026',
+        download=False,
+    )
+
+    assert response.media_type == 'application/pdf'
+    assert response.body == b'%PDF-1.7\nrecurso'
+    assert response.headers['content-disposition'] == (
+        'inline; filename="recurso-glosa-PROC-12-2026-remessa-987.pdf"'
+    )
+
+
 def test_distribui_recurso_agregado_entre_linhas_do_demonstrativo():
     registro = SimpleNamespace(
         id=1,
