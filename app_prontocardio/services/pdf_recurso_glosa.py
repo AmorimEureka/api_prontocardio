@@ -162,10 +162,15 @@ def _paragrafo(valor, estilo: ParagraphStyle) -> Paragraph:
     return Paragraph(escape(str(valor or '-')).replace('\n', '<br/>'), estilo)
 
 
-def gerar_pdf_recurso_glosa(card: dict) -> bytes:
-    linhas = montar_linhas_recurso_glosa(card)
+def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
+    cards_processo = cards if isinstance(cards, list) else [cards]
+    linhas = [
+        linha
+        for card in cards_processo
+        for linha in montar_linhas_recurso_glosa(card)
+    ]
     if not linhas:
-        raise ValueError('O card não possui recursos registrados.')
+        raise ValueError('O processo não possui recursos registrados.')
 
     buffer = BytesIO()
     pagina = landscape(A4)

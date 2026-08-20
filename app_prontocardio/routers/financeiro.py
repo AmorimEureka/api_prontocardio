@@ -6581,6 +6581,11 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                     Decimal('0.00'),
                 ),
                 'valor_total_tratado': _money(tratado),
+                'possui_recurso': any(
+                    registro.sn_ativo == 'true'
+                    and registro.status_tratativa == 'recurso'
+                    for registro in registros_por_vinculo[vinculo.id]
+                ),
                 'processo': processo,
                 'recebimentos': recebimentos,
                 'fiscal': dados_fiscais_por_conciliacao[conciliacao.id],
@@ -6608,7 +6613,6 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
     session_oracle: Session = Depends(get_session_oracle),
-    cd_remessa: int = Query(ge=1),
     processo_original: str = Query(min_length=1, max_length=100),
     download: bool = True,
 ):
@@ -6619,7 +6623,7 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
         session_oracle=session_oracle,
         q=None,
         numero_nfse=None,
-        cd_remessa=cd_remessa,
+        cd_remessa=None,
         convenio=None,
         processo_original=processo_normalizado,
         processo_recurso=None,
@@ -6632,25 +6636,21 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
         incluir_detalhes=True,
         agrupar_por_processo=True,
     )
-    card = next(
-        (
-            item
-            for item in resultado['cards']
-            if int(item['cd_remessa']) == cd_remessa
-            and str(
-                (item.get('processo') or {}).get('numero_processo') or ''
-            ).strip().casefold()
-            == processo_normalizado.casefold()
-        ),
-        None,
-    )
-    if card is None:
+    cards_processo = [
+        item
+        for item in resultado['cards']
+        if str(
+            (item.get('processo') or {}).get('numero_processo') or ''
+        ).strip().casefold()
+        == processo_normalizado.casefold()
+    ]
+    if not cards_processo:
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
-            detail='Card do Follow-Up de Glosas não encontrado.',
+            detail='Processo do Follow-Up de Glosas não encontrado.',
         )
     try:
-        conteudo = gerar_pdf_recurso_glosa(card)
+        conteudo = gerar_pdf_recurso_glosa(cards_processo)
     except ValueError as exc:
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
@@ -6661,9 +6661,7 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
         caractere if caractere.isalnum() else '-'
         for caractere in processo_normalizado
     ).strip('-')
-    nome_arquivo = (
-        f'recurso-glosa-{processo_arquivo}-remessa-{cd_remessa}.pdf'
-    )
+    nome_arquivo = f'recurso-glosa-{processo_arquivo}.pdf'
     disposicao = 'attachment' if download else 'inline'
     return Response(
         content=conteudo,
