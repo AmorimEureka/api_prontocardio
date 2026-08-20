@@ -24,6 +24,7 @@ from app_prontocardio.models import (
 )
 from app_prontocardio.routers import app_glosas, financeiro
 from app_prontocardio.schema import (
+    CardFollowUpGlosaPublic,
     ConciliacaoFaturamentoCreate,
     ConciliacaoFaturamentoUpdate,
     ConciliacaoRemessaCreate,
@@ -47,6 +48,32 @@ GRU_FAT_MEDICAMENTOS = 2
 REMESSA_RELATORIO_TRAMITANDO = 19218
 CONTA_RELATORIO_TRAMITANDO = 123456
 ATENDIMENTO_RELATORIO_TRAMITANDO = 314159
+
+
+def test_schema_do_card_preserva_indicacao_de_recurso():
+    card = CardFollowUpGlosaPublic.model_validate(
+        {
+            'cd_remessa': 17923,
+            'convenio': 'IPM',
+            'numero_nfse': '',
+            'valor_remessa': '112.38',
+            'valor_itens': '112.38',
+            'valor_glosado': '106.38',
+            'valor_glosa_pendente': '21.38',
+            'valor_total_tratado': '85.00',
+            'possui_recurso': True,
+            'processo': {'numero_processo': 'P197016/2026'},
+            'fiscal': {
+                'numero_nfse': '',
+                'valor_servicos': '0',
+                'impostos': '0',
+                'valor_liquido_nfse': '0',
+            },
+            'pacientes': [],
+        }
+    )
+
+    assert card.possui_recurso is True
 
 
 def criar_nfse(
@@ -1015,7 +1042,23 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     monkeypatch.setattr(
         financeiro,
         '_tratativas_demonstrativo_por_item',
-        lambda *_args: {},
+        lambda *_args: {
+            (
+                'p335842/2026',
+                REMESSA_RELATORIO_TRAMITANDO,
+                ATENDIMENTO_RELATORIO_TRAMITANDO,
+                CONTA_RELATORIO_TRAMITANDO,
+                101,
+            ): [
+                SimpleNamespace(
+                    id=99,
+                    sn_ativo='true',
+                    status_tratativa='recurso',
+                    valor_recursado=Decimal('25.00'),
+                    motivo_glosa='1305',
+                )
+            ]
+        },
     )
 
     cards = financeiro._cards_relatorios_follow_up(
@@ -1037,6 +1080,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert cards[0]['valor_glosado'] == Decimal('55.00')
     assert cards[0]['numero_protocolo'] == 'PROTOCOLO-1'
     assert cards[0]['processo']['status_processo'] == 'TRAMITANDO'
+    assert cards[0]['possui_recurso'] is True
     itens = cards[0]['pacientes'][0]['itens']
     assert len(itens) == 1
     item = itens[0]
@@ -1048,6 +1092,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert item['numero_protocolo'] == 'PROTOCOLO-1'
     assert item['codigo_beneficiario'] == '00042'
     assert item['valor_glosa'] == Decimal('55.00')
+    assert item['valor_total_tratado'] == Decimal('25.00')
     assert item['tratativa_disponivel'] is True
     assert "IN ('FINALIZADO', 'TRAMITANDO')" in queries[0]
     assert '::integer >= 2024' in queries[0]
