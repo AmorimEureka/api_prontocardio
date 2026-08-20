@@ -3831,7 +3831,7 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
         session,
         {int(cd_remessa)},
     )
-    itens = []
+    itens_com_tratativas = []
     for demonstrativo, correspondencia in correspondencias:
         origem = correspondencia.itens[0]
         codigo_glosa = str(
@@ -3857,8 +3857,10 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
                 for registro in registros_item
                 if registro.motivo_glosa == codigo_glosa
             ]
-        _aplicar_tratativas_item_demonstrativo(item, registros_item)
-        itens.append(item)
+        itens_com_tratativas.append((item, registros_item))
+
+    _distribuir_tratativas_itens_demonstrativo(itens_com_tratativas)
+    itens = [item for item, _ in itens_com_tratativas]
 
     pacientes: dict[tuple[int, str], dict] = {}
     for item in itens:
@@ -4415,7 +4417,9 @@ def _item_demonstrativo_follow_up(
             ),
             Decimal('1.00'),
         ),
-        'vl_total_conta': _money(item_oracle.get('vl_total_conta')),
+        # O item Oracle pode reunir várias linhas do demonstrativo. Cada
+        # linha deve conservar o próprio valor processado na apresentação.
+        'vl_total_conta': valor_processado,
         'valor_processado': valor_processado,
         'valor_glosa': valor_glosa,
         'valor_liberado': _money(demonstrativo.get('valor_liberado')),
@@ -4446,6 +4450,8 @@ def _item_demonstrativo_follow_up(
 def _aplicar_tratativas_item_demonstrativo(
     item: dict,
     registros: list[RegistroGlosa],
+    *,
+    valor_tratado: Decimal | None = None,
 ) -> None:
     registros_ativos = [
         registro for registro in registros if registro.sn_ativo == 'true'
@@ -4466,14 +4472,15 @@ def _aplicar_tratativas_item_demonstrativo(
         ),
         None,
     )
-    valor_tratado = sum(
-        (
-            _money(registro.valor_recursado)
-            for registro in registros_ativos
-            if registro.status_tratativa != 'pendente'
-        ),
-        Decimal('0.00'),
-    )
+    if valor_tratado is None:
+        valor_tratado = sum(
+            (
+                _money(registro.valor_recursado)
+                for registro in registros_ativos
+                if registro.status_tratativa != 'pendente'
+            ),
+            Decimal('0.00'),
+        )
     item['registro_glosa'] = registro_recusa or registro_acato
     item['registro_recusa'] = registro_recusa
     item['registro_acato'] = registro_acato
@@ -4482,6 +4489,59 @@ def _aplicar_tratativas_item_demonstrativo(
         item['valor_glosa'] - valor_tratado,
         Decimal('0.00'),
     )
+
+
+def _distribuir_tratativas_itens_demonstrativo(
+    itens: list[tuple[dict, list[RegistroGlosa]]],
+) -> None:
+    grupos: dict[tuple[int, ...], list[tuple[dict, list[RegistroGlosa]]]] = (
+        defaultdict(list)
+    )
+    for item, registros in itens:
+        grupos[tuple(registro.id for registro in registros)].append(
+            (item, registros)
+        )
+    for grupo in grupos.values():
+        registros = grupo[0][1]
+        valor_tratado_grupo = sum(
+            (
+                _money(registro.valor_recursado)
+                for registro in registros
+                if registro.sn_ativo == 'true'
+                and registro.status_tratativa != 'pendente'
+            ),
+            Decimal('0.00'),
+        )
+        total_glosado_grupo = sum(
+            (_money(item['valor_glosa']) for item, _ in grupo),
+            Decimal('0.00'),
+        )
+        total_distribuir = min(
+            max(valor_tratado_grupo, Decimal('0.00')),
+            total_glosado_grupo,
+        )
+        valor_restante = total_distribuir
+        for indice, (item, registros_item) in enumerate(grupo):
+            valor_glosa_item = _money(item['valor_glosa'])
+            if total_glosado_grupo <= 0:
+                valor_item = Decimal('0.00')
+            elif indice == len(grupo) - 1:
+                valor_item = min(valor_glosa_item, valor_restante)
+            else:
+                valor_item = min(
+                    valor_glosa_item,
+                    _money(
+                        total_distribuir
+                        * valor_glosa_item
+                        / total_glosado_grupo
+                    ),
+                )
+            _aplicar_tratativas_item_demonstrativo(
+                item,
+                registros_item,
+                valor_tratado=valor_item,
+            )
+            valor_restante -= valor_item
 
 
 def _tratativas_demonstrativo_por_item(
@@ -4493,7 +4553,6 @@ def _tratativas_demonstrativo_por_item(
     registros = session.scalars(
         select(RegistroGlosa)
         .where(
-            RegistroGlosa.conciliacao_remessa_id.is_(None),
             RegistroGlosa.cd_remessa.in_(codigos_remessa),
             RegistroGlosa.sn_ativo == 'true',
         )
@@ -4670,7 +4729,7 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
         ):
             continue
 
-        itens = []
+        itens_com_tratativas = []
         for demonstrativo, correspondencia in linhas:
             item_oracle = correspondencia.itens[0]
             item = _item_demonstrativo_follow_up(
@@ -4696,7 +4755,6 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
                     if registro.motivo_glosa
                     == item['motivo_glosa_codigo']
                 ]
-            _aplicar_tratativas_item_demonstrativo(item, registros_item)
             if termo_paciente and termo_paciente not in str(
                 item['nm_paciente'] or ''
             ).casefold():
@@ -4710,7 +4768,11 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
                 item['tp_atendimento'] or ''
             ).casefold():
                 continue
-            itens.append(item)
+            itens_com_tratativas.append((item, registros_item))
+        _distribuir_tratativas_itens_demonstrativo(
+            itens_com_tratativas
+        )
+        itens = [item for item, _ in itens_com_tratativas]
         if not itens:
             continue
 
@@ -6447,7 +6509,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             descricoes_tiss,
         )
         pacientes_materializados = bool(pacientes)
-        if detalhamento_demonstrativo and not pacientes:
+        if detalhamento_demonstrativo:
             pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
                 session,
                 session_oracle,
@@ -6458,6 +6520,16 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 numeros_protocolo_por_remessa.get(vinculo.cd_remessa),
             )
             if pacientes_demonstrativo:
+                termo_paciente_card = str(paciente or '').strip().casefold()
+                if termo_paciente_card:
+                    pacientes_demonstrativo = [
+                        paciente_demonstrativo
+                        for paciente_demonstrativo in pacientes_demonstrativo
+                        if termo_paciente_card
+                        in str(
+                            paciente_demonstrativo['nm_paciente'] or ''
+                        ).casefold()
+                    ]
                 pacientes = pacientes_demonstrativo
         valor_itens_demonstrativo = sum(
             (
