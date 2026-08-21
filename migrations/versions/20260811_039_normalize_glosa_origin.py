@@ -1,7 +1,7 @@
 """normalize denial code and preserve Oracle matching criterion
 
 Revision ID: 20260811_039
-Revises: 20260809_038
+Revises: 20260810_038
 Create Date: 2026-08-11 14:00:00.000000
 
 """
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = '20260811_039'
-down_revision: Union[str, Sequence[str], None] = '20260809_038'
+down_revision: Union[str, Sequence[str], None] = '20260810_038'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

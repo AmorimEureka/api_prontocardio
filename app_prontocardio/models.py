@@ -153,6 +153,39 @@ class AssociacaoRemessaIpmManual:
 
 
 @table_registry.mapped_as_dataclass
+class ProcessoRecursoGlosa:
+    __tablename__ = 'processos_recurso_glosa'
+    __table_args__ = (
+        UniqueConstraint(
+            'processo_original_normalizado',
+            name='uq_processo_recurso_glosa_original_normalizado',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, init=False)
+    processo_original: Mapped[str] = mapped_column(String(100))
+    processo_original_normalizado: Mapped[str] = mapped_column(String(100))
+    processo_recurso: Mapped[str] = mapped_column(String(100))
+    usuario_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.usuarios_api.id',
+            ondelete='SET NULL',
+        ),
+        default=None,
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
 class RegistroGlosa:
     __tablename__ = 'registros_glosa'
     __table_args__ = (

@@ -3,6 +3,7 @@ import json
 TELAS_SISTEMA = (
     'indicadores',
     'follow_up_glosas',
+    'recursos_processos',
     'triagem',
     'acompanhamento',
     'conciliacao_manual',

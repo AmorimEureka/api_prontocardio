@@ -18,6 +18,7 @@ from sqlalchemy import (
     or_,
     select,
     text,
+    update,
 )
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -36,6 +37,7 @@ from app_prontocardio.models import (
     ModelProFat,
     NfseXml,
     ProcessoConciliacaoRemessa,
+    ProcessoRecursoGlosa,
     RecebimentoRemessa,
     RegistroGlosa,
     RemessaFinanceira,
@@ -60,6 +62,8 @@ from app_prontocardio.schema import (
     NfseConciliacaoRemessaInput,
     NfsesPendentesConciliacao,
     NfsesSaldoRemessaList,
+    ProcessoRecursoGlosaInput,
+    ProcessoRecursoGlosaPublic,
     RecebimentoRemessaCreate,
     RecebimentoRemessaPublic,
     RecebimentoRemessaUpdate,
@@ -6808,6 +6812,220 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         'limit': limit,
         'offset': offset,
     }
+
+
+def _chave_processo_recurso(numero_processo: str | None) -> str:
+    return str(numero_processo or '').strip().casefold()
+
+
+@router.get(
+    '/conciliacao-faturamento/recursos-processos',
+    status_code=HTTPStatus.OK,
+)
+def consultar_processos_recurso(  # noqa: PLR0913
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+    processo_original: Annotated[str | None, Query(max_length=100)] = None,
+    processo_recurso: Annotated[str | None, Query(max_length=100)] = None,
+    paciente: Annotated[str | None, Query(max_length=150)] = None,
+    periodo: Annotated[
+        str | None,
+        Query(pattern=r'^(0[1-9]|1[0-2])/\d{4}$'),
+    ] = None,
+    situacao: Annotated[str | None, Query(pattern=r'^(com|sem)$')] = None,
+    detalhar_processo: Annotated[str | None, Query(max_length=100)] = None,
+    incluir_detalhes: bool = False,
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+):
+    # O Follow-Up já consolida todas as fontes IPM e elimina as duplicidades.
+    # Aqui percorremos suas páginas para aplicar a nova visão por processo.
+    cards: list[dict] = []
+    cursor = 0
+    total_origem = 1
+    while cursor < total_origem:
+        resultado = consultar_follow_up_glosas(
+            usuario_atual=usuario_atual,
+            session=session,
+            session_oracle=session_oracle,
+            q=None,
+            numero_nfse=None,
+            cd_remessa=None,
+            convenio=None,
+            processo_original=(processo_original or '').strip() or None,
+            processo_recurso=None,
+            paciente=(paciente or '').strip() or None,
+            cd_atendimento=None,
+            tipo_atendimento=None,
+            limit=100,
+            offset=cursor,
+            conciliacao_remessa_id=None,
+            incluir_detalhes=False,
+            agrupar_por_processo=True,
+        )
+        cards.extend(resultado['cards'])
+        total_origem = int(resultado['total'])
+        cursor += 100
+
+    agrupados: dict[str, dict] = {}
+    ordem: list[str] = []
+    for card in cards:
+        numero = str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip()
+        chave = _chave_processo_recurso(numero)
+        if not chave:
+            continue
+        if chave not in agrupados:
+            agrupados[chave] = {
+                'processo_original': numero,
+                'cards': [],
+            }
+            ordem.append(chave)
+        agrupados[chave]['cards'].append(card)
+
+    if periodo:
+        mes, ano = map(int, periodo.split('/'))
+        ordem = [
+            chave
+            for chave in ordem
+            if any(
+                card.get('data_competencia')
+                and card['data_competencia'].month == mes
+                and card['data_competencia'].year == ano
+                for card in agrupados[chave]['cards']
+            )
+        ]
+
+    cadastros = {
+        cadastro.processo_original_normalizado: cadastro
+        for cadastro in session.scalars(
+            select(ProcessoRecursoGlosa).where(
+                ProcessoRecursoGlosa.processo_original_normalizado.in_(ordem)
+            )
+        )
+    } if ordem else {}
+    termo_recurso = str(processo_recurso or '').strip().casefold()
+    if termo_recurso:
+        ordem = [
+            chave
+            for chave in ordem
+            if termo_recurso
+            in str(
+                getattr(cadastros.get(chave), 'processo_recurso', '')
+            ).casefold()
+        ]
+
+    quantidade_com = sum(chave in cadastros for chave in ordem)
+    quantidade_sem = len(ordem) - quantidade_com
+    if situacao == 'com':
+        ordem = [chave for chave in ordem if chave in cadastros]
+    elif situacao == 'sem':
+        ordem = [chave for chave in ordem if chave not in cadastros]
+
+    total = len(ordem)
+    chaves_pagina = ordem[offset : offset + limit]
+    detalhar_chave = _chave_processo_recurso(detalhar_processo)
+    processos = []
+    for chave in chaves_pagina:
+        grupo = agrupados[chave]
+        cards_processo = grupo['cards']
+        if incluir_detalhes or chave == detalhar_chave:
+            detalhe = consultar_follow_up_glosas(
+                usuario_atual=usuario_atual,
+                session=session,
+                session_oracle=session_oracle,
+                q=None,
+                numero_nfse=None,
+                cd_remessa=None,
+                convenio=None,
+                processo_original=grupo['processo_original'],
+                processo_recurso=None,
+                paciente=None,
+                cd_atendimento=None,
+                tipo_atendimento=None,
+                limit=100,
+                offset=0,
+                conciliacao_remessa_id=None,
+                incluir_detalhes=True,
+                agrupar_por_processo=True,
+            )
+            cards_processo = [
+                card
+                for card in detalhe['cards']
+                if _chave_processo_recurso(
+                    (card.get('processo') or {}).get('numero_processo')
+                )
+                == chave
+            ]
+        cadastro = cadastros.get(chave)
+        processos.append(
+            {
+                'processo_original': grupo['processo_original'],
+                'processo_recurso': (
+                    cadastro.processo_recurso if cadastro else None
+                ),
+                'cards': cards_processo,
+                'detalhes_carregados': (
+                    incluir_detalhes or chave == detalhar_chave
+                ),
+            }
+        )
+    return {
+        'processos': processos,
+        'total': total,
+        'quantidade_com_processo_recurso': quantidade_com,
+        'quantidade_sem_processo_recurso': quantidade_sem,
+        'limit': limit,
+        'offset': offset,
+    }
+
+
+@router.put(
+    '/conciliacao-faturamento/recursos-processos',
+    status_code=HTTPStatus.OK,
+    response_model=ProcessoRecursoGlosaPublic,
+)
+def salvar_processo_recurso(
+    payload: ProcessoRecursoGlosaInput,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    processo_original = payload.processo_original.strip()
+    processo_recurso = payload.processo_recurso.strip()
+    chave = _chave_processo_recurso(processo_original)
+    cadastro = session.scalar(
+        select(ProcessoRecursoGlosa).where(
+            ProcessoRecursoGlosa.processo_original_normalizado == chave
+        )
+    )
+    if cadastro is None:
+        cadastro = ProcessoRecursoGlosa(
+            processo_original=processo_original,
+            processo_original_normalizado=chave,
+            processo_recurso=processo_recurso,
+            usuario_id=usuario_atual.id,
+        )
+        session.add(cadastro)
+    else:
+        cadastro.processo_original = processo_original
+        cadastro.processo_recurso = processo_recurso
+        cadastro.usuario_id = usuario_atual.id
+        cadastro.data_atualizacao = datetime.now(ZoneInfo('America/Sao_Paulo'))
+
+    session.execute(
+        update(RegistroGlosa)
+        .where(
+            func.lower(
+                func.trim(RegistroGlosa.processo_controle_fatura_gab)
+            ) == chave
+        )
+        .values(processo_recurso=processo_recurso)
+    )
+    session.commit()
+    session.refresh(cadastro)
+    return cadastro
 
 
 @router.get(
