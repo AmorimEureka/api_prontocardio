@@ -6433,15 +6433,16 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         )
     )
     totais_remessas_hpc = {}
-    try:
-        totais_remessas_hpc = sincronizar_totais_remessas_financeiras(
-            session,
-            session_oracle,
-            codigos_remessa,
-        )
-    except SQLAlchemyError:
-        # O snapshot persistido continua disponível se o Oracle oscilar.
-        pass
+    if incluir_detalhes and conciliacao_remessa_id is not None:
+        try:
+            totais_remessas_hpc = sincronizar_totais_remessas_financeiras(
+                session,
+                session_oracle,
+                codigos_remessa,
+            )
+        except SQLAlchemyError:
+            # O snapshot persistido continua disponível se o Oracle oscilar.
+            pass
     remessas_financeiras = {
         remessa.cd_remessa: remessa
         for remessa in session.scalars(
