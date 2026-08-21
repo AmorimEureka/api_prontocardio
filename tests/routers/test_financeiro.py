@@ -141,6 +141,26 @@ def test_normaliza_chave_da_associacao_manual_por_processo_competencia_e_nr():
     ) == ('P123/2026', '05/2026', 'NR-10')
 
 
+def test_seleciona_remessa_manual_da_cogestao_sem_depender_do_valor():
+    remessa_manual = {
+        'cd_remessa': 17058,
+        'valor_total': Decimal('5957.56'),
+        'data_competencia': date(2026, 2, 1),
+    }
+
+    selecionada = financeiro._selecionar_remessa_cogestao(
+        {
+            'cd_remessa_manual': 17058,
+            'valor_protocolo': Decimal('5957.56'),
+            'competencia_producao': '02/2026',
+        },
+        {},
+        {17058: remessa_manual},
+    )
+
+    assert selecionada == remessa_manual
+
+
 def cards_remessas_hpc(*_args, **kwargs):
     codigo = int(kwargs.get('q') or CD_REMESSA_TESTE)
     return (

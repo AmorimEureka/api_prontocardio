@@ -4187,7 +4187,11 @@ def _persistir_remessas_cogestao(
 def _selecionar_remessa_cogestao(
     row: Mapping,
     remessas_por_valor: dict[Decimal, list[dict]],
+    remessas_manuais: dict[int, dict] | None = None,
 ) -> dict | None:
+    codigo_manual = row.get('cd_remessa_manual')
+    if codigo_manual is not None:
+        return (remessas_manuais or {}).get(int(codigo_manual))
     candidatos = remessas_por_valor.get(
         _money(row['valor_protocolo']),
         [],
@@ -5436,10 +5440,12 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     ):
         return []
 
-    rows = session.execute(
-        text(
-            """
-            SELECT DISTINCT ON (
+    rows = [
+        dict(row)
+        for row in session.execute(
+            text(
+                """
+                SELECT DISTINCT ON (
                        UPPER(BTRIM(cog.numero_processo)),
                        BTRIM(COALESCE(cog.nr, '')),
                        BTRIM(COALESCE(cog.competencia_producao, '')),
@@ -5453,7 +5459,8 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                    cog.data_fechamento,
                    proc.data_abertura,
                    proc.status_processo,
-                   proc.motivo_finalizacao
+                   proc.motivo_finalizacao,
+                   NULL::BIGINT AS cd_remessa_manual
               FROM api_prontocardio.processos_ipm_saude_cogestao AS cog
               LEFT JOIN api_prontocardio.processos_ipm AS proc
                 ON UPPER(BTRIM(proc.numero_processo))
@@ -5466,9 +5473,61 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                       ROUND(cog.valor_protocolo, 2),
                       cog.data_fechamento DESC NULLS LAST,
                       cog.id_registro
-            """
+                """
+            )
+        ).mappings()
+    ]
+    if _tabela_ipm_existe(
+        session, 'associacoes_remessas_ipm_manuais'
+    ):
+        rows.extend(
+            dict(row)
+            for row in session.execute(
+                text(
+                    """
+                    SELECT BTRIM(manual.numero_processo)
+                               AS numero_processo,
+                           BTRIM(manual.nr) AS nr,
+                           manual.competencia_producao,
+                           MAX(demo.valor_protocolo) AS valor_protocolo,
+                           MAX(demo.valor_glosa_protocolo)
+                               AS valor_glosado_protocolo,
+                           MAX(demo.referencia) AS data_fechamento,
+                           proc.data_abertura,
+                           proc.status_processo,
+                           proc.motivo_finalizacao,
+                           manual.cd_remessa AS cd_remessa_manual
+                      FROM api_prontocardio.
+                           associacoes_remessas_ipm_manuais AS manual
+                      JOIN api_prontocardio.demonstrativo_conta_ipm AS demo
+                        ON UPPER(BTRIM(demo.numero_protocolo))
+                         = UPPER(BTRIM(manual.nr))
+                       AND TO_CHAR(demo.data_realizacao, 'MM/YYYY')
+                         = manual.competencia_producao
+                      LEFT JOIN api_prontocardio.processos_ipm AS proc
+                        ON UPPER(BTRIM(proc.numero_processo))
+                         = UPPER(BTRIM(manual.numero_processo))
+                     WHERE COALESCE(demo.valor_glosa_protocolo, 0) > 0
+                       AND NOT EXISTS (
+                           SELECT 1
+                             FROM api_prontocardio.
+                                  processos_ipm_saude_cogestao AS cog
+                            WHERE UPPER(BTRIM(cog.numero_processo))
+                                  = UPPER(BTRIM(manual.numero_processo))
+                              AND BTRIM(cog.competencia_producao)
+                                  = manual.competencia_producao
+                              AND UPPER(BTRIM(manual.nr)) IN (
+                                  UPPER(BTRIM(cog.nr)),
+                                  UPPER(BTRIM(cog.nr_origem))
+                              )
+                       )
+                     GROUP BY manual.id, proc.data_abertura,
+                              proc.status_processo,
+                              proc.motivo_finalizacao
+                    """
+                )
+            ).mappings()
         )
-    ).mappings().all()
     termo_processo = str(processo_original or '').strip().casefold()
     if termo_processo:
         rows = [
@@ -5561,6 +5620,28 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 if int(item['cd_remessa']) not in codigos_persistidos
             )
 
+    codigos_remessas_manuais = {
+        int(row['cd_remessa_manual'])
+        for row in rows
+        if row.get('cd_remessa_manual') is not None
+    }
+    remessas_manuais = {
+        remessa.cd_remessa: {
+            'cd_remessa': remessa.cd_remessa,
+            'cnpj_convenio': remessa.cnpj_convenio,
+            'convenio': remessa.convenio,
+            'valor_total': _money(remessa.valor_total),
+            'data_competencia': remessa.data_competencia,
+        }
+        for remessa in session.scalars(
+            select(RemessaFinanceira).where(
+                RemessaFinanceira.cd_remessa.in_(
+                    codigos_remessas_manuais
+                )
+            )
+        )
+    }
+
     termo_geral = str(q or '').strip().casefold()
     termo_convenio = str(convenio or '').strip().casefold()
     termo_paciente = str(paciente or '').strip().casefold()
@@ -5574,7 +5655,11 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         valor_protocolo = _money(row['valor_protocolo'])
         competencia = _competencia_cogestao(row['competencia_producao'])
         numero_processo = str(row['numero_processo'] or '').strip()
-        remessa = _selecionar_remessa_cogestao(row, remessas_por_valor)
+        remessa = _selecionar_remessa_cogestao(
+            row,
+            remessas_por_valor,
+            remessas_manuais,
+        )
         if remessa is None:
             continue
 
