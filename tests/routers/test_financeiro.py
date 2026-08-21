@@ -220,6 +220,38 @@ def test_resumo_da_cogestao_nao_confunde_acato_com_recurso():
     assert possui_recurso is False
 
 
+def test_marca_recurso_no_card_resumido_sem_carregar_pacientes():
+    class Resultado:
+        @staticmethod
+        def all():
+            return [(' P094380/2026 ', 16839)]
+
+    class Sessao:
+        @staticmethod
+        def execute(_query):
+            return Resultado()
+
+    cards = [
+        {
+            'cd_remessa': 16839,
+            'possui_recurso': False,
+            'processo': {'numero_processo': 'P094380/2026'},
+            'pacientes': [],
+        },
+        {
+            'cd_remessa': 17055,
+            'possui_recurso': False,
+            'processo': {'numero_processo': 'P094380/2026'},
+            'pacientes': [],
+        },
+    ]
+
+    financeiro._marcar_cards_com_recurso_ativo(Sessao(), cards)
+
+    assert cards[0]['possui_recurso'] is True
+    assert cards[1]['possui_recurso'] is False
+
+
 def cards_remessas_hpc(*_args, **kwargs):
     codigo = int(kwargs.get('q') or CD_REMESSA_TESTE)
     return (
