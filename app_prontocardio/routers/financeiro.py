@@ -4607,6 +4607,49 @@ def _resumo_tratativas_cogestao_remessa(
     return valor_tratado, possui_recurso
 
 
+def _marcar_cards_com_recurso_ativo(
+    session: Session,
+    cards: list[dict],
+) -> None:
+    codigos_remessa = {
+        int(card['cd_remessa'])
+        for card in cards
+        if card.get('cd_remessa') is not None
+    }
+    if not codigos_remessa:
+        return
+    chaves_com_recurso = {
+        (
+            str(numero_processo or '').strip().casefold(),
+            int(codigo_remessa),
+        )
+        for numero_processo, codigo_remessa in session.execute(
+            select(
+                RegistroGlosa.processo_controle_fatura_gab,
+                RegistroGlosa.cd_remessa,
+            )
+            .where(
+                RegistroGlosa.cd_remessa.in_(codigos_remessa),
+                RegistroGlosa.sn_ativo == 'true',
+                RegistroGlosa.dt_recurso.is_not(None),
+                RegistroGlosa.sn_glosado != 'not',
+            )
+            .distinct()
+        ).all()
+    }
+    for card in cards:
+        numero_processo = str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip().casefold()
+        codigo_remessa = card.get('cd_remessa')
+        if codigo_remessa is None:
+            continue
+        card['possui_recurso'] = bool(card.get('possui_recurso')) or (
+            numero_processo,
+            int(codigo_remessa),
+        ) in chaves_com_recurso
+
+
 def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -6754,6 +6797,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
     cards.extend(cards_cogestao)
+    _marcar_cards_com_recurso_ativo(session, cards)
     return {
         'cards': cards,
         'total': int(total),
