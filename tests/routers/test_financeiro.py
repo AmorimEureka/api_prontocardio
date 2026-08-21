@@ -800,7 +800,9 @@ def test_follow_up_pagina_por_processo_sem_separar_suas_remessas(
     monkeypatch.setattr(
         financeiro,
         'sincronizar_totais_remessas_financeiras',
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: pytest.fail(
+            'A listagem resumida não deve sincronizar totais no Oracle.'
+        ),
     )
     monkeypatch.setattr(
         financeiro,
@@ -1262,6 +1264,11 @@ def test_follow_up_usa_total_registro_no_card_e_total_conta_nos_itens(
             CD_REMESSA_TESTE: Decimal('135.00')
         },
     )
+    conciliacao_remessa_id = session.scalar(
+        select(ConciliacaoFaturamentoRemessa.id).where(
+            ConciliacaoFaturamentoRemessa.cd_remessa == CD_REMESSA_TESTE
+        )
+    )
 
     follow_up = financeiro.consultar_follow_up_glosas(
         usuario_atual=usuario_teste,
@@ -1270,6 +1277,7 @@ def test_follow_up_usa_total_registro_no_card_e_total_conta_nos_itens(
         q=None,
         limit=20,
         offset=0,
+        conciliacao_remessa_id=conciliacao_remessa_id,
     )
 
     card = follow_up['cards'][0]
