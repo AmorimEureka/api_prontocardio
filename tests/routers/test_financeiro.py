@@ -48,6 +48,7 @@ GRU_FAT_MEDICAMENTOS = 2
 REMESSA_RELATORIO_TRAMITANDO = 19218
 CONTA_RELATORIO_TRAMITANDO = 123456
 ATENDIMENTO_RELATORIO_TRAMITANDO = 314159
+LANCAMENTO_RELATORIO_TRAMITANDO = 101
 
 
 def test_schema_do_card_preserva_indicacao_de_recurso():
@@ -159,6 +160,64 @@ def test_seleciona_remessa_manual_da_cogestao_sem_depender_do_valor():
     )
 
     assert selecionada == remessa_manual
+
+
+def test_resumo_da_cogestao_identifica_valor_e_recurso_ativo():
+    tratativas = {
+        ('p094380/2026', 16839, 1, 2, 3): [
+            SimpleNamespace(
+                sn_ativo='true',
+                status_tratativa='recurso',
+                valor_recursado=Decimal('188.12'),
+            )
+        ],
+        ('p094380/2026', 16839, 4, 5, 6): [
+            SimpleNamespace(
+                sn_ativo='false',
+                status_tratativa='recurso',
+                valor_recursado=Decimal('999.00'),
+            ),
+            SimpleNamespace(
+                sn_ativo='true',
+                status_tratativa='pendente',
+                valor_recursado=None,
+            ),
+        ],
+    }
+
+    valor, possui_recurso = (
+        financeiro._resumo_tratativas_cogestao_remessa(
+            tratativas,
+            ' P094380/2026 ',
+            16839,
+        )
+    )
+
+    assert valor == Decimal('188.12')
+    assert possui_recurso is True
+
+
+def test_resumo_da_cogestao_nao_confunde_acato_com_recurso():
+    tratativas = {
+        ('p094380/2026', 17055, 1, 2, 3): [
+            SimpleNamespace(
+                sn_ativo='true',
+                status_tratativa='acato',
+                valor_recursado=Decimal('564.36'),
+            )
+        ]
+    }
+
+    valor, possui_recurso = (
+        financeiro._resumo_tratativas_cogestao_remessa(
+            tratativas,
+            'P094380/2026',
+            17055,
+        )
+    )
+
+    assert valor == Decimal('564.36')
+    assert possui_recurso is False
 
 
 def cards_remessas_hpc(*_args, **kwargs):
@@ -1006,7 +1065,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
                 {
                     **base,
                     'id_item_relatorio': 'item-1',
-                    'cd_lancamento': 101,
+                    'cd_lancamento': LANCAMENTO_RELATORIO_TRAMITANDO,
                     'cd_pro_fat': 'PROC-1',
                     'cd_tuss': 'TUSS-1',
                     'descricao': 'Diária hospitalar',
@@ -1070,7 +1129,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
                 REMESSA_RELATORIO_TRAMITANDO,
                 ATENDIMENTO_RELATORIO_TRAMITANDO,
                 CONTA_RELATORIO_TRAMITANDO,
-                101,
+                LANCAMENTO_RELATORIO_TRAMITANDO,
             ): [
                 SimpleNamespace(
                     id=99,
@@ -1109,7 +1168,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert item['nr_guia'] == '778899'
     assert item['cd_reg'] == CONTA_RELATORIO_TRAMITANDO
     assert item['cd_atendimento'] == ATENDIMENTO_RELATORIO_TRAMITANDO
-    assert item['cd_lancamento'] == 101
+    assert item['cd_lancamento'] == LANCAMENTO_RELATORIO_TRAMITANDO
     assert item['descricao'] == 'Diária hospitalar'
     assert item['numero_protocolo'] == 'PROTOCOLO-1'
     assert item['codigo_beneficiario'] == '00042'

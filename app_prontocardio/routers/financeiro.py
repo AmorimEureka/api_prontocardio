@@ -4580,6 +4580,33 @@ def _tratativas_demonstrativo_por_item(
     return dict(resultado)
 
 
+def _resumo_tratativas_cogestao_remessa(
+    tratativas_por_item: dict[tuple, list[RegistroGlosa]],
+    numero_processo: str,
+    codigo_remessa: int,
+) -> tuple[Decimal, bool]:
+    chave_processo = numero_processo.strip().casefold()
+    registros = [
+        registro
+        for chave, registros_item in tratativas_por_item.items()
+        if chave[0] == chave_processo and chave[1] == codigo_remessa
+        for registro in registros_item
+        if registro.sn_ativo == 'true'
+    ]
+    valor_tratado = sum(
+        (
+            _money(registro.valor_recursado)
+            for registro in registros
+            if registro.status_tratativa != 'pendente'
+        ),
+        Decimal('0.00'),
+    )
+    possui_recurso = any(
+        registro.status_tratativa == 'recurso' for registro in registros
+    )
+    return valor_tratado, possui_recurso
+
+
 def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -5650,6 +5677,15 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         if incluir_detalhes and termo_paciente
         else set()
     )
+    codigos_remessa_cogestao = {
+        int(item['cd_remessa'])
+        for itens in remessas_por_valor.values()
+        for item in itens
+    } | set(remessas_manuais)
+    tratativas_cogestao = _tratativas_demonstrativo_por_item(
+        session,
+        codigos_remessa_cogestao,
+    )
     cards = []
     for row in rows:
         valor_protocolo = _money(row['valor_protocolo'])
@@ -5681,9 +5717,22 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         ):
             continue
         numero_protocolo = str(row['nr'] or '').strip()
+        valor_tratado_fallback, possui_recurso = (
+            _resumo_tratativas_cogestao_remessa(
+                tratativas_cogestao,
+                numero_processo,
+                codigo_remessa,
+            )
+        )
         pacientes_demonstrativo = []
-        if termo_paciente:
-            if numero_protocolo not in protocolos_paciente:
+        carregar_detalhes = termo_paciente or (
+            incluir_detalhes and possui_recurso
+        )
+        if carregar_detalhes:
+            if (
+                termo_paciente
+                and numero_protocolo not in protocolos_paciente
+            ):
                 continue
             pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
                 session,
@@ -5694,15 +5743,16 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 _money(row['valor_glosado_protocolo']),
                 numero_protocolo,
             )
-            pacientes_demonstrativo = [
-                paciente_demonstrativo
-                for paciente_demonstrativo in pacientes_demonstrativo
-                if termo_paciente
-                in str(
-                    paciente_demonstrativo['nm_paciente'] or ''
-                ).casefold()
-            ]
-            if not pacientes_demonstrativo:
+            if termo_paciente:
+                pacientes_demonstrativo = [
+                    paciente_demonstrativo
+                    for paciente_demonstrativo in pacientes_demonstrativo
+                    if termo_paciente
+                    in str(
+                        paciente_demonstrativo['nm_paciente'] or ''
+                    ).casefold()
+                ]
+            if termo_paciente and not pacientes_demonstrativo:
                 continue
         elif any(
             (
@@ -5723,12 +5773,16 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             if pacientes_demonstrativo
             else _money(row['valor_glosado_protocolo'])
         )
-        valor_tratado = sum(
-            (
-                _money(paciente['valor_total_tratado'])
-                for paciente in pacientes_demonstrativo
-            ),
-            Decimal('0.00'),
+        valor_tratado = (
+            sum(
+                (
+                    _money(paciente['valor_total_tratado'])
+                    for paciente in pacientes_demonstrativo
+                ),
+                Decimal('0.00'),
+            )
+            if pacientes_demonstrativo
+            else valor_tratado_fallback
         )
         cards.append({
             'conciliacao_remessa_id': None,
@@ -5764,7 +5818,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 Decimal('0.00'),
             ),
             'valor_total_tratado': valor_tratado,
-            'possui_recurso': any(
+            'possui_recurso': possui_recurso or any(
                 item.get('registro_recusa') is not None
                 for paciente_card in pacientes_demonstrativo
                 for item in paciente_card.get('itens') or []
@@ -6378,7 +6432,10 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             # incluir_detalhes=false. Em consultas direcionadas, completa
             # somente os cards parciais do relatório; a listagem genérica
             # continua sem consultas Oracle por card.
-            incluir_detalhes=consulta_direcionada,
+            incluir_detalhes=(
+                detalhamento_demonstrativo
+                or bool(str(paciente or '').strip())
+            ),
             q=q,
             numero_nfse=numero_nfse,
             cd_remessa=cd_remessa,
