@@ -77,6 +77,44 @@ def test_schema_do_card_preserva_indicacao_de_recurso():
     assert card.possui_recurso is True
 
 
+def test_recursos_processos_filtra_periodo_e_calcula_cards(monkeypatch):
+    card = {
+        'cd_remessa': 17923,
+        'data_competencia': date(2026, 7, 1),
+        'processo': {'numero_processo': 'P197016/2026'},
+    }
+    monkeypatch.setattr(
+        financeiro,
+        'consultar_follow_up_glosas',
+        lambda **_kwargs: {'cards': [card], 'total': 1},
+    )
+
+    class SessionSemCadastros:
+        @staticmethod
+        def scalars(_consulta):
+            return []
+
+    resultado = financeiro.consultar_processos_recurso(
+        usuario_atual=SimpleNamespace(id=1),
+        session=SessionSemCadastros(),
+        session_oracle=SimpleNamespace(),
+        processo_original=None,
+        processo_recurso=None,
+        paciente=None,
+        periodo='07/2026',
+        situacao=None,
+        detalhar_processo=None,
+        incluir_detalhes=False,
+        limit=10,
+        offset=0,
+    )
+
+    assert resultado['total'] == 1
+    assert resultado['quantidade_com_processo_recurso'] == 0
+    assert resultado['quantidade_sem_processo_recurso'] == 1
+    assert resultado['processos'][0]['processo_original'] == 'P197016/2026'
+
+
 def criar_nfse(
     session,
     row_hash='nfse-1',

@@ -1587,6 +1587,20 @@ class FollowUpGlosasList(BaseModel):
     offset: int
 
 
+class ProcessoRecursoGlosaInput(BaseModel):
+    processo_original: str = Field(min_length=1, max_length=100)
+    processo_recurso: str = Field(min_length=1, max_length=100)
+
+
+class ProcessoRecursoGlosaPublic(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    processo_original: str
+    processo_recurso: str
+    data_atualizacao: datetime
+
+
 class AssociacaoRemessaIpmManualCreate(BaseModel):
     numero_processo: str = Field(min_length=1, max_length=100)
     competencia_producao: str = Field(

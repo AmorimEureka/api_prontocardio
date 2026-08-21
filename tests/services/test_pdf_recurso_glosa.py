@@ -2,12 +2,14 @@ from decimal import Decimal
 
 import pytest
 
+from app_prontocardio.services import pdf_recurso_glosa
 from app_prontocardio.services.pdf_recurso_glosa import (
     gerar_pdf_recurso_glosa,
     montar_linhas_recurso_glosa,
 )
 
 QUANTIDADE_LINHAS_ESPERADA = 2
+QUANTIDADE_LINHAS_DUAS_REMESSAS = 4
 TAMANHO_MINIMO_PDF = 1000
 
 
@@ -73,6 +75,23 @@ def test_gera_pdf_com_layout_de_recurso():
     assert len(conteudo) > TAMANHO_MINIMO_PDF
 
 
+def test_pdf_exibe_total_ao_final_da_coluna_valor_recurso(monkeypatch):
+    tabelas = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        tabelas.append(dados)
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+
+    gerar_pdf_recurso_glosa(_card_recurso())
+
+    linha_total = tabelas[-1][-1]
+    assert linha_total[10].getPlainText() == 'TOTAL'
+    assert linha_total[11].getPlainText() == 'R$ 520,14'
+
+
 def test_gera_pdf_consolidando_remessas_do_processo():
     primeira_remessa = _card_recurso()
     segunda_remessa = _card_recurso()
@@ -94,7 +113,7 @@ def test_gera_pdf_consolidando_remessas_do_processo():
         [primeira_remessa, segunda_remessa]
     )
 
-    assert len(linhas) == 4
+    assert len(linhas) == QUANTIDADE_LINHAS_DUAS_REMESSAS
     assert sum(
         linha['valor_recurso'] for linha in linhas
     ) == Decimal('1040.28')

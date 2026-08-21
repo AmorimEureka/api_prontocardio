@@ -311,6 +311,14 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
                 _paragrafo(linha['justificativa'], estilo),
             ]
         )
+    dados.append(
+        [
+            '', '', '', '', '', '', '', '', '', '',
+            _paragrafo('TOTAL', estilo_negrito),
+            _paragrafo(_formatar_reais(total_recurso), estilo_negrito),
+            '',
+        ]
+    )
     larguras = [
         largura_util * proporcao
         for proporcao in (
@@ -335,6 +343,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             [
                 ('GRID', (0, 0), (-1, -1), 0.7, colors.black),
                 ('BACKGROUND', (0, 0), (-1, 0), FUNDO_CABECALHO),
+                ('BACKGROUND', (10, -1), (11, -1), FUNDO_CABECALHO),
+                ('SPAN', (0, -1), (9, -1)),
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('TOPPADDING', (0, 0), (-1, -1), 3),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
