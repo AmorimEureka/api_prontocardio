@@ -604,6 +604,7 @@ def resolver_correspondencia_item_oracle(
             chave_item_lancamento_pro_fat_valor_demonstrativo,
         ),
     )
+    primeira_conta_unica = None
     primeira_ambiguidade = None
     primeira_divergencia = None
     for criterio, indice, gerar_chave in fontes:
@@ -647,7 +648,11 @@ def resolver_correspondencia_item_oracle(
                 cd_remessa_esperada is None
                 or cd_remessa == cd_remessa_esperada
             ):
-                return correspondencia
+                if resolucao.status == 'item_unico':
+                    return correspondencia
+                if primeira_conta_unica is None:
+                    primeira_conta_unica = correspondencia
+                continue
             if primeira_divergencia is None:
                 primeira_divergencia = correspondencia
             continue
@@ -660,7 +665,8 @@ def resolver_correspondencia_item_oracle(
             )
 
     return (
-        primeira_divergencia
+        primeira_conta_unica
+        or primeira_divergencia
         or primeira_ambiguidade
         or CorrespondenciaItemOracle(status='nao_encontrado')
     )
