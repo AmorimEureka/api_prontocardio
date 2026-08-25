@@ -445,6 +445,61 @@ def test_data_exata_refina_lancamentos_da_mesma_conta_e_guia():
     assert correspondencia.resolucao.cd_lancamento == 117
 
 
+def test_valor_refina_lancamentos_iguais_da_mesma_conta_guia_e_dia():
+    item_base = {
+        'cd_remessa': 17371,
+        'cd_reg': 22093,
+        'nr_guia': '481510',
+        'cd_pro_fat': '40812057',
+        'cd_tuss': None,
+        'nr_carteira': '1013939009',
+        'dt_competencia': date(2026, 3, 1),
+        'dt_lancamento': date(2026, 3, 2),
+    }
+    itens_oracle = [
+        {
+            **item_base,
+            'cd_lancamento': 304,
+            'vl_total_conta': Decimal('489.11'),
+        },
+        {
+            **item_base,
+            'cd_lancamento': 345,
+            'vl_total_conta': Decimal('489.10'),
+        },
+    ]
+    indices = indexar_itens_oracle(itens_oracle)
+
+    for valor_processado, lancamento_esperado in (
+        (Decimal('489.11'), 304),
+        (Decimal('489.10'), 345),
+    ):
+        linha = demonstrativo(
+            id_registro=f'remessa-17371-{lancamento_esperado}',
+            numero_guia_senha='481510',
+            codigo_servico='40812057',
+            codigo_beneficiario='1013939009',
+            data_realizacao=date(2026, 3, 2),
+            valor_processado=valor_processado,
+        )
+
+        correspondencia = resolver_correspondencia_item_oracle(
+            linha,
+            indices,
+            cd_remessa_esperada=17371,
+        )
+
+        assert correspondencia.status == 'item_unico'
+        assert correspondencia.criterio == (
+            'competencia_coalesce_servico_valor'
+        )
+        assert correspondencia.resolucao is not None
+        assert (
+            correspondencia.resolucao.cd_lancamento
+            == lancamento_esperado
+        )
+
+
 def test_quinta_chave_usa_competencia_coalesce_servico_e_valor():
     demo = demonstrativo(
         codigo_servico='TUSS-ALTERNATIVO',
