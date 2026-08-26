@@ -68,6 +68,45 @@ def test_pdf_rateia_recurso_sem_duplicar_itens_desmembrados():
     ) == Decimal('520.14')
 
 
+def test_pdf_prioriza_descricao_individual_sobre_descricao_agrupada():
+    card = _card_recurso()
+    registro = card['pacientes'][0]['itens'][0]['registro_recusa']
+    registro['descricao_glosa_agrupada'] = 'Descrição coletiva do recurso.'
+
+    linhas = montar_linhas_recurso_glosa(card)
+
+    assert {linha['justificativa'] for linha in linhas} == {
+        'Solicito análise da glosa.'
+    }
+
+
+def test_pdf_usa_descricao_agrupada_quando_individual_esta_vazia():
+    card = _card_recurso()
+    registro = card['pacientes'][0]['itens'][0]['registro_recusa']
+    registro['descricao_glosa'] = '   '
+    registro['descricao_glosa_agrupada'] = 'Descrição coletiva do recurso.'
+
+    linhas = montar_linhas_recurso_glosa(card)
+
+    assert {linha['justificativa'] for linha in linhas} == {
+        'Descrição coletiva do recurso.'
+    }
+
+
+def test_pdf_usa_descricao_coletiva_especifica_do_recurso():
+    card = _card_recurso()
+    registro = card['pacientes'][0]['itens'][0]['registro_recusa']
+    registro['descricao_glosa'] = '   '
+    registro['descricao_recurso_agrupada'] = 'Descrição dos itens marcados.'
+    registro['descricao_glosa_agrupada'] = 'Descrição coletiva antiga.'
+
+    linhas = montar_linhas_recurso_glosa(card)
+
+    assert {linha['justificativa'] for linha in linhas} == {
+        'Descrição dos itens marcados.'
+    }
+
+
 def test_gera_pdf_com_layout_de_recurso():
     conteudo = gerar_pdf_recurso_glosa(_card_recurso())
 

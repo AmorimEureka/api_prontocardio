@@ -142,7 +142,7 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
                 'item_glosado': item.get('descricao') or '-',
                 'qtde_apre': _formatar_decimal(item.get('qt_lancamento') or 0),
                 'qtde_glosada': _formatar_decimal(
-                    item.get('qt_lancamento') or 0
+                    item.get('qtd_glosada') or item.get('qt_lancamento') or 0
                 ),
                 'valor_apres': _money(item.get('valor_processado')),
                 'valor_pago': _money(item.get('valor_liberado')),
@@ -150,7 +150,19 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
                 'motivo_glosa': item.get('motivo_glosa_descricao') or '-',
                 'valor_recurso': valor_recurso,
                 'justificativa': (
-                    _valor(registro, 'descricao_glosa', '') or '-'
+                    str(_valor(registro, 'descricao_glosa', '') or '').strip()
+                    or str(
+                        _valor(
+                            registro,
+                            'descricao_recurso_agrupada',
+                            '',
+                        )
+                        or ''
+                    ).strip()
+                    or str(
+                        _valor(registro, 'descricao_glosa_agrupada', '') or ''
+                    ).strip()
+                    or '-'
                 ),
                 'data_recurso': _data(_valor(registro, 'dt_recurso')),
             }

@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import insert, select
 from sqlalchemy.dialects import oracle
+from sqlalchemy.exc import SQLAlchemyError
 
 from app_prontocardio.models import (
     AuditoriaConciliacaoFaturamento,
@@ -198,6 +199,68 @@ def test_seleciona_remessa_manual_da_cogestao_sem_depender_do_valor():
     )
 
     assert selecionada == remessa_manual
+
+
+def test_complemento_cogestao_preserva_snapshot_quando_oracle_oscila(
+    monkeypatch,
+):
+    def oracle_indisponivel(*_args):
+        raise SQLAlchemyError('Oracle indisponível')
+
+    persistencias = []
+    monkeypatch.setattr(
+        financeiro,
+        '_remessas_cogestao_oracle',
+        oracle_indisponivel,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_persistir_remessas_cogestao',
+        lambda *_args: persistencias.append(True),
+    )
+
+    resultado = financeiro._complementar_remessas_cogestao(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        {Decimal('100.00')},
+        {'12345678000190'},
+        {date(2026, 8, 1)},
+    )
+
+    assert resultado == {}
+    assert persistencias == []
+
+
+def test_verificacao_de_tabelas_reutiliza_catalogo_na_mesma_sessao(
+    monkeypatch,
+):
+    class Inspector:
+        calls = 0
+
+        def get_table_names(self, *, schema):
+            assert schema == 'api_prontocardio'
+            self.calls += 1
+            return ['processos_ipm', 'demonstrativo_conta_ipm']
+
+    inspector = Inspector()
+    class Session:
+        info = {}
+
+        @staticmethod
+        def get_bind():
+            return SimpleNamespace(dialect=SimpleNamespace(name='postgresql'))
+
+        @staticmethod
+        def connection():
+            return object()
+
+    session = Session()
+    monkeypatch.setattr(financeiro, 'inspect', lambda _connection: inspector)
+
+    assert financeiro._tabela_ipm_existe(session, 'processos_ipm')
+    assert financeiro._tabela_ipm_existe(session, 'demonstrativo_conta_ipm')
+    assert not financeiro._tabela_ipm_existe(session, 'tabela_ausente')
+    assert inspector.calls == 1
 
 
 def test_resumo_da_cogestao_identifica_valor_e_recurso_ativo():
