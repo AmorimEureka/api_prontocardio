@@ -23,6 +23,7 @@ from app_prontocardio.routers.app_glosas import (
     editar_glosa,
     registrar_glosa,
     registrar_recebimento_glosa,
+    salvar_descricoes_agrupadas_glosa,
     salvar_prazos_recurso_convenio,
 )
 from app_prontocardio.schema import (
@@ -30,6 +31,7 @@ from app_prontocardio.schema import (
     FilterSearch,
     PrazoRecursoConvenioInput,
     RegistroGlosaCreate,
+    RegistroGlosaDescricaoAgrupadaUpdate,
     RegistroGlosaRecebimentoUpdate,
 )
 
@@ -430,6 +432,129 @@ def test_recurso_e_acato_coexistem_respeitando_limites_do_item(
             ),
             usuario_teste,
             session,
+        )
+
+
+def test_salva_descricoes_agrupadas_separadas_por_tipo(
+    session,
+    usuario_teste,
+):
+    recurso_um = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(conta=101, cd_lancamento=1)
+        ),
+        usuario_teste,
+        session,
+    )
+    recurso_dois = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(conta=102, cd_lancamento=2)
+        ),
+        usuario_teste,
+        session,
+    )
+    acato = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                conta=103,
+                cd_lancamento=3,
+                sn_glosado='not',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    response_recursos = salvar_descricoes_agrupadas_glosa(
+        RegistroGlosaDescricaoAgrupadaUpdate(
+            recursos_ids=[recurso_um.id, recurso_dois.id],
+            descricao_recurso='Fundamentação única dos recursos',
+        ),
+        usuario_teste,
+        session,
+    )
+    response_acato = salvar_descricoes_agrupadas_glosa(
+        RegistroGlosaDescricaoAgrupadaUpdate(
+            acatos_ids=[acato.id],
+            descricao_acato='Fundamentação específica do acato',
+        ),
+        usuario_teste,
+        session,
+    )
+    session.refresh(recurso_um)
+    session.refresh(recurso_dois)
+    session.refresh(acato)
+
+    assert response_recursos == {
+        'recursos_atualizados': [recurso_um.id, recurso_dois.id],
+        'acatos_atualizados': [],
+    }
+    assert response_acato == {
+        'recursos_atualizados': [],
+        'acatos_atualizados': [acato.id],
+    }
+    assert recurso_um.descricao_glosa_agrupada == (
+        'Fundamentação única dos recursos'
+    )
+    assert recurso_um.descricao_recurso_agrupada == (
+        'Fundamentação única dos recursos'
+    )
+    assert recurso_dois.descricao_glosa_agrupada == (
+        'Fundamentação única dos recursos'
+    )
+    assert recurso_dois.descricao_recurso_agrupada == (
+        'Fundamentação única dos recursos'
+    )
+    assert acato.descricao_glosa_agrupada == (
+        'Fundamentação específica do acato'
+    )
+    assert acato.descricao_acato_agrupada == (
+        'Fundamentação específica do acato'
+    )
+    assert recurso_um.descricao_glosa == 'descricao da glosa'
+
+
+def test_rejeita_item_sem_tratativa_na_descricao_agrupada(
+    session,
+    usuario_teste,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(**registro_glosa_payload()),
+        usuario_teste,
+        session,
+    )
+    registro.dt_recurso = None
+    registro.qtd_recursado = None
+    registro.valor_recursado = None
+    registro.descricao_glosa_agrupada = None
+    session.commit()
+
+    with pytest.raises(HTTPException, match='mesmo tipo'):
+        salvar_descricoes_agrupadas_glosa(
+            RegistroGlosaDescricaoAgrupadaUpdate(
+                recursos_ids=[registro.id],
+                descricao_recurso='Descrição futura do recurso',
+            ),
+            usuario_teste,
+            session,
+        )
+
+
+def test_descricao_agrupada_exige_texto_do_tipo_selecionado():
+    with pytest.raises(ValueError, match='descricao dos recursos'):
+        RegistroGlosaDescricaoAgrupadaUpdate(
+            recursos_ids=[1, 2],
+            descricao_recurso=' ',
+        )
+
+
+def test_descricao_agrupada_rejeita_tipos_mistos():
+    with pytest.raises(ValueError, match='unico tipo'):
+        RegistroGlosaDescricaoAgrupadaUpdate(
+            recursos_ids=[1],
+            descricao_recurso='Descrição dos recursos',
+            acatos_ids=[2],
+            descricao_acato='Descrição dos acatos',
         )
 
 

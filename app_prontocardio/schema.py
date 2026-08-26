@@ -743,6 +743,9 @@ class RegistroGlosaPublic(BaseModel):
     data_glosa: date
     motivo_glosa: str | None
     descricao_glosa: str
+    descricao_glosa_agrupada: str | None = None
+    descricao_recurso_agrupada: str | None = None
+    descricao_acato_agrupada: str | None = None
     qtd_registro: Decimal | None = None
     descricao_item: str | None = None
     data_alta: datetime | None = None
@@ -768,6 +771,43 @@ class RegistroGlosaPublic(BaseModel):
     valor_glosa_pendente: Decimal | None = None
     status_tratativa: str
     valor_indicador: Decimal
+
+
+class RegistroGlosaDescricaoAgrupadaUpdate(BaseModel):
+    recursos_ids: list[int] = Field(default_factory=list)
+    descricao_recurso: str | None = Field(default=None, max_length=4000)
+    acatos_ids: list[int] = Field(default_factory=list)
+    descricao_acato: str | None = Field(default=None, max_length=4000)
+
+    @field_validator('recursos_ids', 'acatos_ids', mode='before')
+    @classmethod
+    def normalize_ids_descricao_agrupada(cls, value):
+        return list(dict.fromkeys(value or []))
+
+    @field_validator('descricao_recurso', 'descricao_acato', mode='before')
+    @classmethod
+    def normalize_descricao_agrupada(cls, value):
+        text = str(value or '').strip()
+        return text or None
+
+    @model_validator(mode='after')
+    def validate_descricao_agrupada(self):
+        if not self.recursos_ids and not self.acatos_ids:
+            raise ValueError('Selecione ao menos um recurso ou acato.')
+        if self.recursos_ids and not self.descricao_recurso:
+            raise ValueError('Informe a descricao dos recursos selecionados.')
+        if self.acatos_ids and not self.descricao_acato:
+            raise ValueError('Informe a descricao dos acatos selecionados.')
+        if self.recursos_ids and self.acatos_ids:
+            raise ValueError(
+                'Selecione registros de um unico tipo: recurso ou acato.'
+            )
+        return self
+
+
+class RegistroGlosaDescricaoAgrupadaPublic(BaseModel):
+    recursos_atualizados: list[int]
+    acatos_atualizados: list[int]
 
 
 class RegistroGlosas(BaseModel):
@@ -1505,6 +1545,7 @@ class ItemFollowUpGlosaPublic(BaseModel):
     dt_alta: datetime | None = None
     dt_lancamento: datetime | None = None
     qt_lancamento: Decimal
+    qtd_glosada: Decimal | None = None
     vl_total_conta: Decimal
     valor_processado: Decimal
     valor_glosa: Decimal

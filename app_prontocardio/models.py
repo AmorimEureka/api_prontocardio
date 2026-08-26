@@ -283,6 +283,18 @@ class RegistroGlosa:
         default=None,
     )
     cd_tuss: Mapped[str | None] = mapped_column(String, default=None)
+    descricao_glosa_agrupada: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    descricao_recurso_agrupada: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
+    descricao_acato_agrupada: Mapped[str | None] = mapped_column(
+        String,
+        default=None,
+    )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento_remessas.id',

@@ -1,3 +1,4 @@
+import logging
 from collections import defaultdict
 from collections.abc import Mapping
 from datetime import date, datetime
@@ -87,6 +88,7 @@ router = APIRouter(
     prefix='/app_glosas/financeiro',
     tags=['financeiro'],
 )
+LOGGER = logging.getLogger(__name__)
 
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
@@ -3020,18 +3022,18 @@ def consultar_recebimentos_remessas(  # noqa: PLR0913
 
 
 def _tabela_ipm_existe(session: Session, nome: str) -> bool:
-    if session.get_bind().dialect.name != 'postgresql':
-        return False
-    return inspect(session.connection()).has_table(
-        nome,
-        schema='api_prontocardio',
-    )
+    return _tabela_schema_existe(session, 'api_prontocardio', nome)
 
 
 def _tabela_schema_existe(session: Session, schema: str, nome: str) -> bool:
     if session.get_bind().dialect.name != 'postgresql':
         return False
-    return inspect(session.connection()).has_table(nome, schema=schema)
+    cache = session.info.setdefault('_tabelas_por_schema', {})
+    if schema not in cache:
+        cache[schema] = frozenset(
+            inspect(session.connection()).get_table_names(schema=schema)
+        )
+    return nome in cache[schema]
 
 
 def _normalizar_chave_associacao_manual(
@@ -3669,6 +3671,7 @@ def _item_follow_up_glosa(
         'dt_alta': registro.data_alta,
         'dt_lancamento': registro.data_lancamento,
         'qt_lancamento': registro.qtd_registro or Decimal('1.00'),
+        'qtd_glosada': registro.qtd_registro or Decimal('1.00'),
         'vl_total_conta': registro.valor,
         'valor_processado': valor_processado,
         'valor_glosa': valor_glosa,
@@ -4150,6 +4153,39 @@ def _remessas_cogestao_persistidas(
     return dict(resultado)
 
 
+def _complementar_remessas_cogestao(
+    session: Session,
+    session_oracle: Session,
+    valores_protocolos: set[Decimal],
+    cnpjs_operadoras: set[str],
+    competencias: set[date],
+) -> dict[Decimal, list[dict]]:
+    try:
+        remessas = _remessas_cogestao_oracle(
+            session_oracle,
+            valores_protocolos,
+            cnpjs_operadoras,
+            competencias,
+        )
+    except SQLAlchemyError:
+        LOGGER.warning(
+            'Oracle indisponível ao complementar remessas da cogestão; '
+            'o Follow-Up continuará com o snapshot persistido.',
+            exc_info=True,
+        )
+        return {}
+
+    try:
+        _persistir_remessas_cogestao(session, remessas)
+    except SQLAlchemyError:
+        LOGGER.warning(
+            'Não foi possível atualizar o snapshot de remessas da cogestão; '
+            'os dados obtidos nesta requisição serão preservados na resposta.',
+            exc_info=True,
+        )
+    return remessas
+
+
 def _persistir_remessas_cogestao(
     session: Session,
     remessas_por_valor: dict[Decimal, list[dict]],
@@ -4422,6 +4458,13 @@ def _item_demonstrativo_follow_up(
         'dt_alta': item_oracle.get('dt_alta'),
         'dt_lancamento': item_oracle.get('dt_lancamento'),
         'qt_lancamento': max(
+            _money(
+                demonstrativo.get('quantidade_executada')
+                or item_oracle.get('qt_lancamento')
+            ),
+            Decimal('1.00'),
+        ),
+        'qtd_glosada': max(
             _money(
                 demonstrativo.get('quantidade_executada')
                 or item_oracle.get('qt_lancamento')
@@ -5663,7 +5706,8 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         if not remessas_por_valor.get(_money(row['valor_protocolo']))
     ]
     if linhas_sem_remessa:
-        remessas_oracle = _remessas_cogestao_oracle(
+        remessas_oracle = _complementar_remessas_cogestao(
+            session,
             session_oracle,
             {
                 _money(row['valor_protocolo'])
@@ -5681,7 +5725,6 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 is not None
             },
         )
-        _persistir_remessas_cogestao(session, remessas_oracle)
         codigos_persistidos = {
             int(item['cd_remessa'])
             for itens in remessas_por_valor.values()
