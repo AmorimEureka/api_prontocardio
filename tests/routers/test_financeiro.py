@@ -78,6 +78,39 @@ def test_schema_do_card_preserva_indicacao_de_recurso():
     assert card.possui_recurso is True
 
 
+def test_protocolo_cogestao_completa_card_sem_demonstrativo(monkeypatch):
+    class ResultadoFake:
+        def mappings(self):
+            return [
+                {
+                    'processo': 'p058752/2026',
+                    'valor_glosado': Decimal('70.00'),
+                    'numero_protocolo': '4124037',
+                }
+            ]
+
+    class SessaoFake:
+        def execute(self, _consulta, _parametros=None):
+            return ResultadoFake()
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda *_args: True,
+    )
+
+    protocolos = (
+        financeiro._protocolos_cogestao_por_processo_glosa_follow_up(
+            SessaoFake(),
+            {'p058752/2026'},
+        )
+    )
+
+    assert protocolos == {
+        ('p058752/2026', Decimal('70.00')): '4124037'
+    }
+
+
 def test_recursos_processos_filtra_periodo_e_calcula_cards(monkeypatch):
     card = {
         'cd_remessa': 17923,
