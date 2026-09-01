@@ -3515,9 +3515,34 @@ def _dados_demonstrativo_follow_up(
         )
     ):
         return {}
+    ids_registros = set(
+        session.scalars(
+            select(RegistroGlosa.id).where(
+                RegistroGlosa.conciliacao_remessa_id.in_(ids_vinculos)
+            )
+        )
+    )
+    return _dados_demonstrativo_registros_follow_up(
+        session,
+        ids_registros,
+    )
+
+
+def _dados_demonstrativo_registros_follow_up(
+    session: Session,
+    ids_registros: set[int],
+) -> dict[int, dict]:
+    if (
+        not ids_registros
+        or not _tabela_ipm_existe(session, 'demonstrativo_conta_ipm')
+        or not _tabela_ipm_existe(
+            session, 'registros_glosa_demonstrativo_ipm'
+        )
+    ):
+        return {}
     parametros = {
-        f'vinculo_{indice}': valor
-        for indice, valor in enumerate(sorted(ids_vinculos))
+        f'registro_{indice}': valor
+        for indice, valor in enumerate(sorted(ids_registros))
     }
     marcadores = ', '.join(f':{nome}' for nome in parametros)
     rows = session.execute(
@@ -3535,7 +3560,7 @@ def _dados_demonstrativo_follow_up(
                 ON demo.id_registro = rastreio.id_registro
               JOIN api_prontocardio.registros_glosa AS glosa
                 ON glosa.id = rastreio.registro_glosa_id
-             WHERE glosa.conciliacao_remessa_id IN ({marcadores})
+             WHERE glosa.id IN ({marcadores})
             """
         ),
         parametros,
@@ -3740,6 +3765,207 @@ def _pacientes_follow_up_glosa(
             'itens': itens,
         })
     return resultado
+
+
+def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
+    session: Session,
+    chaves_excluidas: set[tuple[str, int]],
+    *,
+    q: str | None,
+    numero_nfse: str | None,
+    cd_remessa: int | None,
+    convenio: str | None,
+    processo_original: str | None,
+    processo_recurso: str | None,
+    paciente: str | None,
+    cd_atendimento: int | None,
+    tipo_atendimento: str | None,
+) -> list[dict]:
+    # NFS-e não faz parte do registro analítico; esse filtro só pode ser
+    # atendido pelos cards financeiros legados.
+    if str(numero_nfse or '').strip():
+        return []
+    filtros = [
+        RegistroGlosa.sn_ativo == 'true',
+        func.trim(RegistroGlosa.processo_controle_fatura_gab) != '',
+    ]
+    if cd_remessa is not None:
+        filtros.append(RegistroGlosa.cd_remessa == cd_remessa)
+    if termo := str(processo_original or '').strip():
+        filtros.append(
+            RegistroGlosa.processo_controle_fatura_gab.ilike(f'%{termo}%')
+        )
+    if termo := str(processo_recurso or '').strip():
+        filtros.append(RegistroGlosa.processo_recurso.ilike(f'%{termo}%'))
+    if termo := str(convenio or '').strip():
+        filtros.append(RegistroGlosa.convenio.ilike(f'%{termo}%'))
+    if termo := str(paciente or '').strip():
+        filtros.append(RegistroGlosa.nm_paciente.ilike(f'%{termo}%'))
+    if cd_atendimento is not None:
+        filtros.append(RegistroGlosa.cd_atendimento == cd_atendimento)
+    if termo := str(tipo_atendimento or '').strip():
+        filtros.append(
+            cast(RegistroGlosa.tp_atendimento, String).ilike(f'%{termo}%')
+        )
+    if termo := str(q or '').strip():
+        pattern = f'%{termo}%'
+        filtros.append(
+            or_(
+                RegistroGlosa.processo_controle_fatura_gab.ilike(pattern),
+                cast(RegistroGlosa.cd_remessa, String).ilike(pattern),
+                RegistroGlosa.convenio.ilike(pattern),
+                RegistroGlosa.nm_paciente.ilike(pattern),
+                RegistroGlosa.guia.ilike(pattern),
+                cast(RegistroGlosa.conta, String).ilike(pattern),
+                cast(RegistroGlosa.cd_atendimento, String).ilike(pattern),
+                RegistroGlosa.procedimento.ilike(pattern),
+            )
+        )
+
+    grupos: dict[tuple[str, int], list[RegistroGlosa]] = defaultdict(list)
+    for registro in session.scalars(
+        select(RegistroGlosa).where(*filtros).order_by(RegistroGlosa.id)
+    ):
+        chave = (
+            str(registro.processo_controle_fatura_gab).strip().casefold(),
+            int(registro.cd_remessa),
+        )
+        if chave not in chaves_excluidas:
+            grupos[chave].append(registro)
+    if not grupos:
+        return []
+
+    todos_registros = [item for itens in grupos.values() for item in itens]
+    ids_registros = {item.id for item in todos_registros}
+    dados_demonstrativo = _dados_demonstrativo_registros_follow_up(
+        session,
+        ids_registros,
+    )
+    descricoes_tiss = _descricoes_tiss(session, todos_registros)
+    protocolos_por_registro: dict[int, set[str]] = defaultdict(set)
+    if (
+        ids_registros
+        and _tabela_ipm_existe(session, 'demonstrativo_conta_ipm')
+        and _tabela_ipm_existe(
+            session, 'registros_glosa_demonstrativo_ipm'
+        )
+    ):
+        for registro_id, protocolo in session.execute(
+            text(
+                """
+                SELECT rastreio.registro_glosa_id,
+                       BTRIM(demo.numero_protocolo)
+                  FROM api_prontocardio.registros_glosa_demonstrativo_ipm
+                           AS rastreio
+                  JOIN api_prontocardio.demonstrativo_conta_ipm AS demo
+                    ON demo.id_registro = rastreio.id_registro
+                 WHERE rastreio.registro_glosa_id = ANY(:ids)
+                   AND BTRIM(COALESCE(demo.numero_protocolo, '')) <> ''
+                """
+            ),
+            {'ids': sorted(ids_registros)},
+        ):
+            protocolos_por_registro[int(registro_id)].add(str(protocolo))
+
+    codigos_remessa = {chave[1] for chave in grupos}
+    remessas = {
+        item.cd_remessa: item
+        for item in session.scalars(
+            select(RemessaFinanceira).where(
+                RemessaFinanceira.cd_remessa.in_(codigos_remessa)
+            )
+        )
+    }
+    processos = {}
+    if _tabela_ipm_existe(session, 'processos_ipm'):
+        processos = {
+            str(row['chave']): dict(row)
+            for row in session.execute(
+                text(
+                    """
+                    SELECT LOWER(BTRIM(numero_processo)) AS chave,
+                           BTRIM(numero_processo) AS numero_processo,
+                           data_abertura, status_processo,
+                           motivo_finalizacao
+                      FROM api_prontocardio.processos_ipm
+                     WHERE LOWER(BTRIM(numero_processo)) = ANY(:processos)
+                    """
+                ),
+                {'processos': sorted({chave[0] for chave in grupos})},
+            ).mappings()
+        }
+
+    cards = []
+    for chave, registros in grupos.items():
+        pacientes = _pacientes_follow_up_glosa(
+            registros,
+            dados_demonstrativo,
+            descricoes_tiss,
+        )
+        valor_itens = sum(
+            (paciente_item['valor_itens'] for paciente_item in pacientes),
+            Decimal('0.00'),
+        )
+        valor_glosado = sum(
+            (paciente_item['valor_glosado'] for paciente_item in pacientes),
+            Decimal('0.00'),
+        )
+        valor_tratado = sum(
+            (
+                paciente_item['valor_total_tratado']
+                for paciente_item in pacientes
+            ),
+            Decimal('0.00'),
+        )
+        remessa = remessas.get(chave[1])
+        processo = processos.get(chave[0]) or {
+            'numero_processo': registros[0].processo_controle_fatura_gab,
+            'data_abertura': None,
+            'status_processo': None,
+            'motivo_finalizacao': None,
+        }
+        protocolos = sorted({
+            protocolo
+            for registro in registros
+            for protocolo in protocolos_por_registro.get(registro.id, set())
+        })
+        cards.append({
+            'conciliacao_remessa_id': None,
+            'cd_remessa': chave[1],
+            'numero_protocolo': ', '.join(protocolos) or None,
+            'convenio': registros[0].convenio,
+            'data_competencia': (
+                remessa.data_competencia if remessa is not None else None
+            ),
+            'data_entrega': min(item.data_glosa for item in registros),
+            'numero_nfse': '',
+            'valor_remessa': (
+                _money(remessa.valor_total)
+                if remessa is not None
+                else valor_itens
+            ),
+            'valor_itens': valor_itens,
+            'valor_glosado': valor_glosado,
+            'valor_glosa_pendente': max(
+                valor_glosado - valor_tratado,
+                Decimal('0.00'),
+            ),
+            'valor_total_tratado': valor_tratado,
+            'possui_recurso': any(
+                item.status_tratativa == 'recurso' for item in registros
+            ),
+            'processo': processo,
+            'recebimentos': [],
+            'fiscal': {
+                'numero_nfse': '',
+                'valor_servicos': Decimal('0.00'),
+                'impostos': Decimal('0.00'),
+                'valor_liquido_nfse': Decimal('0.00'),
+                'data_emissao': None,
+            },
+            'pacientes': pacientes,
+        })
+    return cards
 
 
 def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
@@ -6503,21 +6729,10 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     cards_cogestao: list[dict] = []
     if agrupar_por_processo and conciliacao_remessa_id is None:
         todas_rows = session.execute(consulta_ordenada).all()
-        remessas_modeladas = set(
-            session.scalars(
-                select(ConciliacaoFaturamentoRemessa.cd_remessa)
-                .join(
-                    ConciliacaoFaturamento,
-                    ConciliacaoFaturamento.id
-                    == ConciliacaoFaturamentoRemessa.conciliacao_id,
-                )
-                .where(ConciliacaoFaturamento.ativo.is_(True))
-            )
-        )
         cards_cogestao = _cards_cogestao_follow_up(
             session,
             session_oracle,
-            remessas_modeladas,
+            set(),
             # O frontend expande localmente os processos e mantém
             # incluir_detalhes=false. Em consultas direcionadas, completa
             # somente os cards parciais do relatório; a listagem genérica
@@ -6536,20 +6751,98 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             cd_atendimento=cd_atendimento,
             tipo_atendimento=tipo_atendimento,
         )
-        quantidade_glosas += sum(
+        chaves_fontes_ipm = {
+            (
+                str(
+                    (card.get('processo') or {}).get('numero_processo')
+                    or ''
+                ).strip().casefold(),
+                int(card['cd_remessa']),
+            )
+            for card in cards_cogestao
+            if card.get('cd_remessa') is not None
+        }
+        cards_cogestao.extend(
+            _cards_registros_glosa_follow_up(
+                session,
+                chaves_fontes_ipm,
+                q=q,
+                numero_nfse=numero_nfse,
+                cd_remessa=cd_remessa,
+                convenio=convenio,
+                processo_original=processo_original,
+                processo_recurso=processo_recurso,
+                paciente=paciente,
+                cd_atendimento=cd_atendimento,
+                tipo_atendimento=tipo_atendimento,
+            )
+        )
+
+        # A conciliação é um histórico financeiro legado e não define a
+        # existência da glosa. Quando o IPM possui o mesmo processo/remessa,
+        # sua visão analítica substitui o card legado por completo.
+        chaves_ipm = {
+            (
+                str(
+                    (card.get('processo') or {}).get('numero_processo')
+                    or ''
+                ).strip().casefold(),
+                int(card['cd_remessa']),
+            )
+            for card in cards_cogestao
+            if card.get('cd_remessa') is not None
+        }
+        todas_rows = [
+            row
+            for row in todas_rows
+            if (
+                str(row[1].processo_recebimento or '').strip().casefold(),
+                int(row[0].cd_remessa),
+            )
+            not in chaves_ipm
+        ]
+
+        ids_vinculos_legados = {row[0].id for row in todas_rows}
+        identidades_legadas = set()
+        if ids_vinculos_legados:
+            identidades_legadas = set(
+                session.execute(
+                    select(
+                        RegistroGlosa.conciliacao_remessa_id,
+                        RegistroGlosa.cd_atendimento,
+                        RegistroGlosa.conta,
+                        RegistroGlosa.cd_lancamento,
+                        RegistroGlosa.motivo_glosa,
+                    ).where(
+                        RegistroGlosa.conciliacao_remessa_id.in_(
+                            ids_vinculos_legados
+                        )
+                    )
+                ).all()
+            )
+        quantidade_glosas = len(identidades_legadas) + sum(
             len(paciente.get('itens') or [])
             for card in cards_cogestao
             for paciente in card.get('pacientes') or []
         )
-        valor_total_glosado = _money(valor_total_glosado) + sum(
+        valor_total_glosado = sum(
+            (_money(row[0].valor_glosado) for row in todas_rows),
+            Decimal('0.00'),
+        ) + sum(
             (card['valor_glosado'] for card in cards_cogestao),
             Decimal('0.00'),
         )
-        valor_total_pendente = _money(valor_total_pendente) + sum(
+        valor_total_pendente = sum(
+            (_money(row[3]) for row in todas_rows),
+            Decimal('0.00'),
+        ) + sum(
             (card['valor_glosa_pendente'] for card in cards_cogestao),
             Decimal('0.00'),
         )
-        valor_total_tratado = _money(valor_total_tratado) + sum(
+        valor_total_tratado = sum(
+            (_money(row[4]) for row in todas_rows),
+            Decimal('0.00'),
+        ) + sum(
             (card['valor_total_tratado'] for card in cards_cogestao),
             Decimal('0.00'),
         )

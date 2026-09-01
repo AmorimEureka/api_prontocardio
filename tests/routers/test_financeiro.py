@@ -1428,6 +1428,140 @@ def test_follow_up_pagina_processos_por_competencia_mais_recente(
     )
 
 
+def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    criar_conciliacao_anterior_com_glosa(
+        session,
+        usuario_teste.id,
+        valor_glosado='20.00',
+    )
+    card_ipm = {
+        'conciliacao_remessa_id': None,
+        'cd_remessa': CD_REMESSA_TESTE,
+        'numero_protocolo': 'PROTOCOLO-IPM',
+        'convenio': 'IPM',
+        'data_competencia': date(2026, 6, 1),
+        'data_entrega': date(2026, 6, 10),
+        'numero_nfse': '',
+        'valor_remessa': Decimal('120.00'),
+        'valor_itens': Decimal('100.00'),
+        'valor_glosado': Decimal('55.00'),
+        'valor_glosa_pendente': Decimal('45.00'),
+        'valor_total_tratado': Decimal('10.00'),
+        'possui_recurso': True,
+        'processo': {
+            'numero_processo': 'PROC-ANTERIOR',
+            'data_abertura': date(2026, 6, 1),
+            'status_processo': 'FINALIZADO',
+            'motivo_finalizacao': None,
+        },
+        'recebimentos': [],
+        'fiscal': {
+            'numero_nfse': '',
+            'valor_servicos': Decimal('0.00'),
+            'impostos': Decimal('0.00'),
+            'valor_liquido_nfse': Decimal('0.00'),
+            'data_emissao': None,
+        },
+        'pacientes': [
+            {
+                'codigo_paciente': 1,
+                'nm_paciente': 'Paciente IPM',
+                'valor_itens': Decimal('100.00'),
+                'valor_glosado': Decimal('55.00'),
+                'valor_total_tratado': Decimal('10.00'),
+                'itens': [{'cd_lancamento': 1}],
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_cogestao_follow_up',
+        lambda *_args, **_kwargs: [card_ipm],
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        numero_nfse=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original='PROC-ANTERIOR',
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+        limit=20,
+        offset=0,
+        conciliacao_remessa_id=None,
+        incluir_detalhes=False,
+        agrupar_por_processo=True,
+    )
+
+    assert follow_up['cards'] == [card_ipm]
+    assert follow_up['quantidade_glosas'] == 1
+    assert follow_up['valor_total_glosado'] == Decimal('55.00')
+    assert follow_up['valor_total_pendente'] == Decimal('45.00')
+    assert follow_up['valor_total_tratado'] == Decimal('10.00')
+
+
+def test_follow_up_exibe_registro_analitico_sem_conciliacao_ou_relatorio(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    cd_remessa_orfa = 999
+    criar_recurso_aberto(
+        session,
+        cd_remessa=cd_remessa_orfa,
+        conciliacao_remessa_id=None,
+        processo_controle_fatura_gab='PROC-ORFAO',
+        processo_recurso=None,
+        valor_recursado='0.00',
+        valor=Decimal('20.00'),
+        dt_recurso=None,
+        dt_pagamento=None,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_cogestao_follow_up',
+        lambda *_args, **_kwargs: [],
+    )
+
+    follow_up = financeiro.consultar_follow_up_glosas(
+        usuario_atual=usuario_teste,
+        session=session,
+        session_oracle=object(),
+        q=None,
+        numero_nfse=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original='PROC-ORFAO',
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+        limit=20,
+        offset=0,
+        conciliacao_remessa_id=None,
+        incluir_detalhes=False,
+        agrupar_por_processo=True,
+    )
+
+    assert follow_up['total'] == 1
+    assert follow_up['quantidade_glosas'] == 1
+    assert follow_up['valor_total_glosado'] == Decimal('20.00')
+    assert follow_up['cards'][0]['cd_remessa'] == cd_remessa_orfa
+    assert follow_up['cards'][0]['processo']['numero_processo'] == 'PROC-ORFAO'
+    assert follow_up['cards'][0]['conciliacao_remessa_id'] is None
+    CardFollowUpGlosaPublic.model_validate(follow_up['cards'][0])
+
+
 def test_follow_up_nao_cria_itens_sem_demonstrativo(
     session,
     usuario_teste,
