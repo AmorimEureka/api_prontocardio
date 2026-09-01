@@ -3767,6 +3767,43 @@ def _pacientes_follow_up_glosa(
     return resultado
 
 
+def _protocolos_cogestao_por_processo_glosa_follow_up(
+    session: Session,
+    processos: set[str],
+) -> dict[tuple[str, Decimal], str]:
+    if (
+        not processos
+        or not _tabela_ipm_existe(
+            session,
+            'processos_ipm_saude_cogestao',
+        )
+    ):
+        return {}
+    rows = session.execute(
+        text(
+            """
+            SELECT LOWER(BTRIM(numero_processo)) AS processo,
+                   ROUND(valor_glosado_protocolo, 2) AS valor_glosado,
+                   MIN(BTRIM(nr)) AS numero_protocolo
+              FROM api_prontocardio.processos_ipm_saude_cogestao
+             WHERE LOWER(BTRIM(numero_processo)) = ANY(:processos)
+               AND COALESCE(valor_glosado_protocolo, 0) > 0
+               AND NULLIF(BTRIM(nr), '') IS NOT NULL
+             GROUP BY LOWER(BTRIM(numero_processo)),
+                      ROUND(valor_glosado_protocolo, 2)
+            HAVING COUNT(DISTINCT BTRIM(nr)) = 1
+            """
+        ),
+        {'processos': sorted(processos)},
+    ).mappings()
+    return {
+        (str(row['processo']), _money(row['valor_glosado'])): str(
+            row['numero_protocolo']
+        )
+        for row in rows
+    }
+
+
 def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
     session: Session,
     chaves_excluidas: set[tuple[str, int]],
@@ -3894,6 +3931,12 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
                 {'processos': sorted({chave[0] for chave in grupos})},
             ).mappings()
         }
+    protocolos_cogestao = (
+        _protocolos_cogestao_por_processo_glosa_follow_up(
+            session,
+            {chave[0] for chave in grupos},
+        )
+    )
 
     cards = []
     for chave, registros in grupos.items():
@@ -3929,6 +3972,12 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             for registro in registros
             for protocolo in protocolos_por_registro.get(registro.id, set())
         })
+        if not protocolos:
+            protocolo_cogestao = protocolos_cogestao.get(
+                (chave[0], _money(valor_glosado))
+            )
+            if protocolo_cogestao:
+                protocolos.append(protocolo_cogestao)
         cards.append({
             'conciliacao_remessa_id': None,
             'cd_remessa': chave[1],
