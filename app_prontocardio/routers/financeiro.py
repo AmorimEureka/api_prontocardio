@@ -4630,10 +4630,17 @@ def _selecionar_remessa_cogestao(
     row: Mapping,
     remessas_por_valor: dict[Decimal, list[dict]],
     remessas_manuais: dict[int, dict] | None = None,
+    remessas_spu: dict[tuple[str, str], dict] | None = None,
 ) -> dict | None:
     codigo_manual = row.get('cd_remessa_manual')
     if codigo_manual is not None:
         return (remessas_manuais or {}).get(int(codigo_manual))
+    chave_portais = (
+        str(row.get('numero_processo') or '').strip().casefold(),
+        str(row.get('nr') or '').strip().casefold(),
+    )
+    if remessa_spu := (remessas_spu or {}).get(chave_portais):
+        return remessa_spu
     candidatos = remessas_por_valor.get(
         _money(row['valor_protocolo']),
         [],
@@ -4655,6 +4662,96 @@ def _selecionar_remessa_cogestao(
     if len(candidatos) == 1:
         return candidatos[0]
     return None
+
+
+def _remessas_cogestao_indicadas_pelo_spu(
+    session: Session,
+    rows: list[dict],
+) -> dict[tuple[str, str], dict]:
+    if (
+        not rows
+        or not _tabela_ipm_existe(
+            session, 'processos_relatorios_itens_ipm'
+        )
+    ):
+        return {}
+
+    parametros = {}
+    valores = []
+    chaves = {
+        (
+            str(row.get('numero_processo') or '').strip(),
+            str(row.get('nr') or '').strip(),
+        )
+        for row in rows
+        if str(row.get('numero_processo') or '').strip()
+        and str(row.get('nr') or '').strip()
+    }
+    for indice, (numero_processo, numero_protocolo) in enumerate(
+        sorted(chaves)
+    ):
+        processo = f'processo_{indice}'
+        protocolo = f'protocolo_{indice}'
+        parametros[processo] = numero_processo
+        parametros[protocolo] = numero_protocolo
+        valores.append(f'(:{processo}, :{protocolo})')
+    if not valores:
+        return {}
+
+    resultados = session.execute(
+        text(
+            f"""
+            WITH protocolos(numero_processo, numero_protocolo) AS (
+                VALUES {', '.join(valores)}
+            ), candidatos AS (
+                SELECT protocolos.numero_processo,
+                       protocolos.numero_protocolo,
+                       item.cd_remessa
+                  FROM protocolos
+                  JOIN api_prontocardio.processos_relatorios_itens_ipm item
+                    ON UPPER(BTRIM(item.numero_processo))
+                     = UPPER(BTRIM(protocolos.numero_processo))
+                   AND UPPER(BTRIM(item.numero_protocolo))
+                     = UPPER(BTRIM(protocolos.numero_protocolo))
+                 WHERE item.cd_remessa IS NOT NULL
+                 GROUP BY protocolos.numero_processo,
+                          protocolos.numero_protocolo,
+                          item.cd_remessa
+            ), unicos AS (
+                SELECT numero_processo,
+                       numero_protocolo,
+                       MIN(cd_remessa) AS cd_remessa
+                  FROM candidatos
+                 GROUP BY numero_processo, numero_protocolo
+                HAVING COUNT(DISTINCT cd_remessa) = 1
+            )
+            SELECT unicos.numero_processo,
+                   unicos.numero_protocolo,
+                   remessa.cd_remessa,
+                   remessa.cnpj_convenio,
+                   remessa.convenio,
+                   remessa.valor_total,
+                   remessa.data_competencia
+              FROM unicos
+              JOIN api_prontocardio.remessas_financeiras remessa
+                ON remessa.cd_remessa = unicos.cd_remessa
+            """
+        ),
+        parametros,
+    ).mappings()
+    return {
+        (
+            str(row['numero_processo']).strip().casefold(),
+            str(row['numero_protocolo']).strip().casefold(),
+        ): {
+            'cd_remessa': int(row['cd_remessa']),
+            'cnpj_convenio': row['cnpj_convenio'],
+            'convenio': row['convenio'],
+            'valor_total': _money(row['valor_total']),
+            'data_competencia': row['data_competencia'],
+        }
+        for row in resultados
+    }
 
 
 def _mes_seguinte(valor: date) -> date:
@@ -6210,6 +6307,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             )
         )
     }
+    remessas_spu = _remessas_cogestao_indicadas_pelo_spu(session, rows)
 
     termo_geral = str(q or '').strip().casefold()
     termo_convenio = str(convenio or '').strip().casefold()
@@ -6223,7 +6321,9 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         int(item['cd_remessa'])
         for itens in remessas_por_valor.values()
         for item in itens
-    } | set(remessas_manuais)
+    } | set(remessas_manuais) | {
+        int(item['cd_remessa']) for item in remessas_spu.values()
+    }
     tratativas_cogestao = _tratativas_demonstrativo_por_item(
         session,
         codigos_remessa_cogestao,
@@ -6237,6 +6337,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             row,
             remessas_por_valor,
             remessas_manuais,
+            remessas_spu,
         )
         if remessa is None:
             continue
