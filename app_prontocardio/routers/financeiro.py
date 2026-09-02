@@ -3102,12 +3102,42 @@ def _validar_remessa_associacao_manual(  # noqa: PLR0913
         ),
         {'cd_remessa': cd_remessa},
     ).mappings().first()
-    if remessa is None or remessa['competencia'] != competencia:
+    indicada_pelo_portal = False
+    if (
+        remessa is not None
+        and _tabela_ipm_existe(session, 'processos_relatorios_itens_ipm')
+    ):
+        indicada_pelo_portal = bool(
+            session.scalar(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                          FROM api_prontocardio.
+                               processos_relatorios_itens_ipm AS item
+                         WHERE UPPER(BTRIM(item.numero_processo)) = :processo
+                           AND UPPER(BTRIM(item.numero_protocolo)) = :nr
+                           AND item.cd_remessa = :cd_remessa
+                    )
+                    """
+                ),
+                {
+                    'processo': processo,
+                    'nr': protocolo,
+                    'cd_remessa': cd_remessa,
+                },
+            )
+        )
+    if remessa is None or (
+        remessa['competencia'] != competencia
+        and not indicada_pelo_portal
+    ):
         raise HTTPException(
             status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             detail=(
                 'A remessa precisa existir no Oracle e possuir a mesma '
-                'competência de produção.'
+                'competência de produção ou estar indicada para o '
+                'processo e o NR pelos dados do outro portal IPM.'
             ),
         )
 
@@ -3159,7 +3189,7 @@ def _validar_remessa_associacao_manual(  # noqa: PLR0913
 
 
 @router.get('/associacoes-remessas-ipm')
-def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
+def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
     competencia: Annotated[str | None, Query(max_length=7)] = None,
@@ -3255,7 +3285,10 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
                            COALESCE(demo.valor_protocolo, 0)
                            - COALESCE(demo.valor_glosa_protocolo, 0)
                        ) AS valor_aprovado_nr,
-                       MAX(demo.valor_glosa_protocolo) AS valor_glosado_nr
+                       COALESCE(
+                           MAX(pendente.valor_glosado_pendente),
+                           MAX(demo.valor_glosa_protocolo)
+                       ) AS valor_glosado_nr
                   FROM chaves AS chave
                   LEFT JOIN api_prontocardio.demonstrativo_processos_ipm
                             AS demo
@@ -3264,6 +3297,24 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
                    AND BTRIM(demo.competencia_producao)
                      = chave.competencia_producao
                    AND UPPER(BTRIM(demo.numero_protocolo)) = chave.nr
+                  LEFT JOIN (
+                      SELECT UPPER(BTRIM(numero_processo))
+                                 AS numero_processo_normalizado,
+                             TO_CHAR(data_realizacao, 'MM/YYYY')
+                                 AS competencia_producao,
+                             UPPER(BTRIM(numero_protocolo)) AS nr,
+                             SUM(valor_glosa) AS valor_glosado_pendente
+                        FROM api_prontocardio.glossas_nao_vinculadas_ipm
+                       WHERE motivo = 'remessa_nao_encontrada_ou_ambigua'
+                       GROUP BY UPPER(BTRIM(numero_processo)),
+                                TO_CHAR(data_realizacao, 'MM/YYYY'),
+                                UPPER(BTRIM(numero_protocolo))
+                  ) AS pendente
+                    ON pendente.numero_processo_normalizado
+                     = chave.numero_processo_normalizado
+                   AND pendente.competencia_producao
+                     = chave.competencia_producao
+                   AND pendente.nr = chave.nr
                  GROUP BY chave.numero_processo_normalizado,
                           chave.competencia_producao, chave.nr
             )
@@ -3291,8 +3342,53 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
     competencias = sorted(
         {row['competencia_producao'] for row in processos_rows}
     )
+    chaves_pendentes = {
+        (
+            row['numero_processo_normalizado'],
+            row['nr'],
+        )
+        for row in processos_rows
+    }
+    remessas_portal_por_chave: dict[tuple[str, str], set[int]] = defaultdict(
+        set
+    )
+    if (
+        chaves_pendentes
+        and _tabela_ipm_existe(session, 'processos_relatorios_itens_ipm')
+    ):
+        processos_pendentes = sorted({chave[0] for chave in chaves_pendentes})
+        for candidata in session.execute(
+            text(
+                """
+                SELECT DISTINCT
+                       UPPER(BTRIM(numero_processo))
+                           AS numero_processo_normalizado,
+                       UPPER(BTRIM(numero_protocolo)) AS nr,
+                       cd_remessa
+                  FROM api_prontocardio.processos_relatorios_itens_ipm
+                 WHERE UPPER(BTRIM(numero_processo)) = ANY(:processos)
+                   AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+                   AND cd_remessa IS NOT NULL
+                """
+            ),
+            {'processos': processos_pendentes},
+        ).mappings():
+            chave = (
+                candidata['numero_processo_normalizado'],
+                candidata['nr'],
+            )
+            if chave in chaves_pendentes:
+                remessas_portal_por_chave[chave].add(
+                    int(candidata['cd_remessa'])
+                )
+    codigos_remessas_portal = sorted({
+        codigo
+        for codigos in remessas_portal_por_chave.values()
+        for codigo in codigos
+    })
     remessas_por_competencia: dict[str, list[dict]] = defaultdict(list)
-    if competencias:
+    remessas_por_codigo: dict[int, dict] = {}
+    if competencias or codigos_remessas_portal:
         remessas = session.execute(
             text(
                 """
@@ -3315,23 +3411,49 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
                             associacoes_remessas_ipm_manuais AS manual
                     ON manual.cd_remessa = rem.cd_remessa
                  WHERE rem.competencia = ANY(:competencias)
+                    OR rem.cd_remessa = ANY(:codigos_remessas_portal)
                  ORDER BY rem.competencia DESC, rem.cd_remessa
                 """
             ),
-            {'competencias': competencias},
+            {
+                'competencias': competencias,
+                'codigos_remessas_portal': codigos_remessas_portal,
+            },
         ).mappings().all()
         for remessa in remessas:
+            remessa_publica = dict(remessa)
             remessas_por_competencia[remessa['competencia']].append(
-                dict(remessa)
+                remessa_publica
             )
+            remessas_por_codigo[int(remessa['cd_remessa'])] = remessa_publica
 
     processos_por_chave: dict[tuple[str, str], dict] = {}
     for row in processos_rows:
         associacoes = []
         candidatas = []
-        for remessa in remessas_por_competencia[
-            row['competencia_producao']
-        ]:
+        chave_portal = (
+            row['numero_processo_normalizado'],
+            row['nr'],
+        )
+        codigos_indicados_portal = remessas_portal_por_chave[chave_portal]
+        remessas_candidatas = {
+            int(remessa['cd_remessa']): remessa
+            for remessa in remessas_por_competencia[
+                row['competencia_producao']
+            ]
+        }
+        remessas_candidatas.update({
+            codigo: remessas_por_codigo[codigo]
+            for codigo in codigos_indicados_portal
+            if codigo in remessas_por_codigo
+        })
+        for codigo_remessa, remessa in sorted(
+            remessas_candidatas.items(),
+            key=lambda item: (
+                item[0] not in codigos_indicados_portal,
+                item[0],
+            ),
+        ):
             pertence_ao_processo = (
                 str(remessa['processo_associado'] or '').strip().upper()
                 == row['numero_processo_normalizado']
@@ -3347,7 +3469,12 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0913
                 and not pertence_ao_processo
             ):
                 continue
-            candidatas.append(remessa)
+            candidatas.append({
+                **remessa,
+                'indicada_pelo_portal': (
+                    codigo_remessa in codigos_indicados_portal
+                ),
+            })
             if pertence_ao_processo:
                 associacoes.append(
                     {
@@ -5832,6 +5959,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     ):
         return []
 
+    processo_sem_glosa = str(processo_original or '').strip()
     rows = [
         dict(row)
         for row in session.execute(
@@ -5858,7 +5986,14 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 ON UPPER(BTRIM(proc.numero_processo))
                  = UPPER(BTRIM(cog.numero_processo))
              WHERE COALESCE(cog.valor_protocolo, 0) > 0
-               AND COALESCE(cog.valor_glosado_protocolo, 0) > 0
+               AND (
+                    COALESCE(cog.valor_glosado_protocolo, 0) > 0
+                    OR (
+                        NULLIF(:processo_sem_glosa, '') IS NOT NULL
+                        AND UPPER(BTRIM(cog.numero_processo)) LIKE
+                            UPPER(:processo_sem_glosa_like)
+                    )
+               )
              ORDER BY UPPER(BTRIM(cog.numero_processo)),
                       BTRIM(COALESCE(cog.nr, '')),
                       BTRIM(COALESCE(cog.competencia_producao, '')),
@@ -5866,7 +6001,11 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                       cog.data_fechamento DESC NULLS LAST,
                       cog.id_registro
                 """
-            )
+            ),
+            {
+                'processo_sem_glosa': processo_sem_glosa,
+                'processo_sem_glosa_like': f'%{processo_sem_glosa}%',
+            },
         ).mappings()
     ]
     if _tabela_ipm_existe(

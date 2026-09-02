@@ -1461,6 +1461,258 @@ def test_follow_up_pagina_processos_por_competencia_mais_recente(
     )
 
 
+def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
+    monkeypatch,
+):
+    consultas = []
+    cd_remessa = 16303
+
+    class Resultado:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def mappings(self):
+            return self
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class Sessao:
+        def execute(self, query, params=None):
+            consultas.append((str(query), params))
+            if 'processos_ipm_saude_cogestao AS cog' in str(query):
+                return Resultado([
+                    {
+                        'numero_processo': 'P058752/2026',
+                        'nr': '4123928',
+                        'competencia_producao': '12/2025',
+                        'valor_protocolo': Decimal('7298.14'),
+                        'valor_glosado_protocolo': Decimal('0.00'),
+                        'data_fechamento': None,
+                        'data_abertura': date(2026, 2, 9),
+                        'status_processo': 'FINALIZADO',
+                        'motivo_finalizacao': None,
+                        'cd_remessa_manual': None,
+                    }
+                ])
+            return Resultado([])
+
+        def scalar(self, _query):
+            return None
+
+        def scalars(self, _query):
+            return []
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda _session, tabela: (
+            tabela != 'associacoes_remessas_ipm_manuais'
+        ),
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_remessas_cogestao_persistidas',
+        lambda *_args: {
+            Decimal('7298.14'): [{
+                'cd_remessa': cd_remessa,
+                'cnpj_convenio': '',
+                'convenio': 'IPM',
+                'valor_total': Decimal('7298.14'),
+                'data_competencia': date(2025, 12, 1),
+            }]
+        },
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_tratativas_demonstrativo_por_item',
+        lambda *_args: {},
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_demonstrativo_processos_abertos',
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_cards_relatorios_follow_up',
+        lambda *_args, **_kwargs: [],
+    )
+
+    cards = financeiro._cards_cogestao_follow_up(
+        Sessao(),
+        object(),
+        set(),
+        incluir_detalhes=False,
+        q=None,
+        numero_nfse=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original='P058752/2026',
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+    )
+
+    assert len(cards) == 1
+    assert cards[0]['cd_remessa'] == cd_remessa
+    assert cards[0]['numero_protocolo'] == '4123928'
+    assert cards[0]['valor_glosado'] == Decimal('0.00')
+    assert cards[0]['valor_total_tratado'] == Decimal('0.00')
+    assert cards[0]['valor_glosa_pendente'] == Decimal('0.00')
+    assert consultas[0][1] == {
+        'processo_sem_glosa': 'P058752/2026',
+        'processo_sem_glosa_like': '%P058752/2026%',
+    }
+
+
+def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
+    monkeypatch,
+):
+    class Resultado:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class Sessao:
+        def execute(self, query, params=None):
+            consulta = str(query)
+            if 'WITH chaves_pendentes AS' in consulta:
+                return Resultado([{
+                    'numero_processo_normalizado': 'P058752/2026',
+                    'competencia_producao': '12/2025',
+                    'nr': '4124085',
+                    'numero_processo': 'P058752/2026',
+                    'valor_informado': Decimal('14754.69'),
+                    'valor_aprovado_producao': Decimal('14660.90'),
+                    'valor_glosado_producao': Decimal('93.79'),
+                    'valor_protocolado_nr': Decimal('5846.55'),
+                    'valor_aprovado_nr': Decimal('5822.76'),
+                    'valor_glosado_nr': Decimal('0.92'),
+                    'data_abertura': date(2026, 2, 9),
+                    'status_processo': 'FINALIZADO',
+                }])
+            if 'SELECT DISTINCT' in consulta and (
+                'processos_relatorios_itens_ipm' in consulta
+            ):
+                assert params == {'processos': ['P058752/2026']}
+                return Resultado([{
+                    'numero_processo_normalizado': 'P058752/2026',
+                    'nr': '4124085',
+                    'cd_remessa': 16425,
+                }])
+            if 'ipm_remessas_oracle AS rem' in consulta:
+                assert params == {
+                    'competencias': ['12/2025'],
+                    'codigos_remessas_portal': [16425],
+                }
+                return Resultado([{
+                    'cd_remessa': 16425,
+                    'competencia': '01/2026',
+                    'nm_convenio': 'IPM',
+                    'valor_total': Decimal('5846.55'),
+                    'associacao_id': None,
+                    'processo_associado': None,
+                    'competencia_associada': None,
+                    'nr_associado': None,
+                    'vinculada_automaticamente': False,
+                }])
+            raise AssertionError(consulta)
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_schema_existe',
+        lambda *_args: True,
+    )
+
+    resultado = financeiro.consultar_associacoes_remessas_ipm(
+        usuario_atual=object(),
+        session=Sessao(),
+        competencia=None,
+        numero_processo='P058752/2026',
+        limit=10,
+        offset=0,
+    )
+
+    nr = resultado['processos'][0]['nrs'][0]
+    assert nr['valor_glosado'] == Decimal('0.92')
+    assert nr['remessas'] == [{
+        'cd_remessa': 16425,
+        'competencia': '01/2026',
+        'nm_convenio': 'IPM',
+        'valor_total': Decimal('5846.55'),
+        'associacao_id': None,
+        'processo_associado': None,
+        'competencia_associada': None,
+        'nr_associado': None,
+        'vinculada_automaticamente': False,
+        'indicada_pelo_portal': True,
+    }]
+
+
+def test_validacao_aceita_competencia_distinta_indicada_pelo_portal(
+    monkeypatch,
+):
+    class Resultado:
+        def mappings(self):
+            return self
+
+        def first(self):
+            return {
+                'cd_remessa': 16425,
+                'competencia': '01/2026',
+                'nm_convenio': 'IPM',
+                'valor_total': Decimal('5846.55'),
+            }
+
+    class Sessao:
+        def __init__(self):
+            self.resultados_scalar = iter((True, True, None))
+
+        def scalar(self, _query, _params=None):
+            return next(self.resultados_scalar)
+
+        def execute(self, _query, _params=None):
+            return Resultado()
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda _session, tabela: (
+            tabela == 'processos_relatorios_itens_ipm'
+        ),
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_schema_existe',
+        lambda *_args: False,
+    )
+
+    chave = financeiro._validar_remessa_associacao_manual(
+        Sessao(),
+        numero_processo='p058752/2026',
+        competencia_producao='12/2025',
+        nr='4124085',
+        cd_remessa=16425,
+    )
+
+    assert chave == ('P058752/2026', '12/2025', '4124085')
+
+
 def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
     session,
     usuario_teste,
