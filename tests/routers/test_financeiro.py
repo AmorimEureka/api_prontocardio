@@ -234,6 +234,29 @@ def test_seleciona_remessa_manual_da_cogestao_sem_depender_do_valor():
     assert selecionada == remessa_manual
 
 
+def test_seleciona_remessa_indicada_pelo_spu_com_competencia_diferente():
+    remessa_spu = {
+        'cd_remessa': 16425,
+        'valor_total': Decimal('5846.55'),
+        'data_competencia': date(2026, 1, 1),
+    }
+
+    selecionada = financeiro._selecionar_remessa_cogestao(
+        {
+            'numero_processo': 'P058752/2026',
+            'nr': '4124085',
+            'cd_remessa_manual': None,
+            'valor_protocolo': Decimal('5846.55'),
+            'competencia_producao': '12/2025',
+        },
+        {},
+        {},
+        {('p058752/2026', '4124085'): remessa_spu},
+    )
+
+    assert selecionada == remessa_spu
+
+
 def test_complemento_cogestao_preserva_snapshot_quando_oracle_oscila(
     monkeypatch,
 ):
