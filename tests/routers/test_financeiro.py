@@ -1713,6 +1713,29 @@ def test_validacao_aceita_competencia_distinta_indicada_pelo_portal(
     assert chave == ('P058752/2026', '12/2025', '4124085')
 
 
+def test_relatorio_preserva_total_de_glosa_sinalizado_pelo_portal():
+    card_relatorio = {
+        'cd_remessa': 16425,
+        'valor_glosado': Decimal('22.87'),
+        'valor_glosa_pendente': Decimal('22.87'),
+        'valor_total_tratado': Decimal('0.00'),
+        'processo': {'numero_processo': 'P058752/2026'},
+    }
+    cards_cogestao = [{
+        'cd_remessa': 16425,
+        'valor_glosado': Decimal('23.79'),
+        'processo': {'numero_processo': 'P058752/2026'},
+    }]
+
+    financeiro._preservar_totais_glosa_portal(
+        [card_relatorio],
+        cards_cogestao,
+    )
+
+    assert card_relatorio['valor_glosado'] == Decimal('23.79')
+    assert card_relatorio['valor_glosa_pendente'] == Decimal('23.79')
+
+
 def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
     session,
     usuario_teste,

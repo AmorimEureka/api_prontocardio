@@ -5930,6 +5930,44 @@ def _numeros_protocolo_cogestao_follow_up(
     }
 
 
+def _preservar_totais_glosa_portal(
+    cards_relatorios: list[dict],
+    cards_cogestao: list[dict],
+) -> None:
+    totais_cogestao: dict[tuple[str, int], Decimal] = defaultdict(
+        lambda: Decimal('0.00')
+    )
+    for card in cards_cogestao:
+        codigo_remessa = card.get('cd_remessa')
+        if codigo_remessa is None:
+            continue
+        numero_processo = str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip().casefold()
+        totais_cogestao[(numero_processo, int(codigo_remessa))] += _money(
+            card.get('valor_glosado')
+        )
+
+    for card in cards_relatorios:
+        codigo_remessa = card.get('cd_remessa')
+        if codigo_remessa is None:
+            continue
+        numero_processo = str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip().casefold()
+        valor_portal = totais_cogestao.get(
+            (numero_processo, int(codigo_remessa)),
+            Decimal('0.00'),
+        )
+        if valor_portal <= _money(card.get('valor_glosado')):
+            continue
+        card['valor_glosado'] = valor_portal
+        card['valor_glosa_pendente'] = max(
+            valor_portal - _money(card.get('valor_total_tratado')),
+            Decimal('0.00'),
+        )
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -6373,6 +6411,11 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     remessas_relatorios = {
         int(card['cd_remessa']) for card in cards_relatorios
     }
+    # O relatório SPU enriquece os itens encontrados no Oracle, mas uma
+    # glosa sinalizada pelo portal não pode desaparecer do total enquanto o
+    # item ainda aguarda vínculo analítico. O protocolo da COGESTÃO preserva
+    # esse total até a próxima materialização completar os itens.
+    _preservar_totais_glosa_portal(cards_relatorios, cards)
     cards = [
         card for card in cards
         if int(card['cd_remessa']) not in remessas_relatorios
