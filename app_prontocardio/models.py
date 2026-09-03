@@ -153,6 +153,51 @@ class AssociacaoRemessaIpmManual:
 
 
 @table_registry.mapped_as_dataclass
+class AssociacaoItemIpmManual:
+    __tablename__ = 'associacoes_itens_ipm_manuais'
+    __table_args__ = (
+        UniqueConstraint(
+            'glosa_id_registro',
+            name='uq_assoc_item_ipm_manual_glosa',
+        ),
+        UniqueConstraint(
+            'cd_remessa',
+            'conta',
+            'cd_lancamento',
+            name='uq_assoc_item_ipm_manual_lancamento',
+        ),
+        {'schema': settings.POSTGRES_SCHEMA},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, init=False)
+    glosa_id_registro: Mapped[str] = mapped_column(String)
+    numero_processo: Mapped[str] = mapped_column(String(100))
+    competencia_producao: Mapped[str] = mapped_column(String(7))
+    nr: Mapped[str] = mapped_column(String(100))
+    cd_remessa: Mapped[int] = mapped_column(BigInteger)
+    conta: Mapped[int] = mapped_column(BigInteger)
+    cd_lancamento: Mapped[int] = mapped_column(BigInteger)
+    usuario_id: Mapped[int] = mapped_column(
+        ForeignKey(
+            f'{settings.POSTGRES_SCHEMA}.usuarios_api.id',
+            ondelete='RESTRICT',
+        )
+    )
+    criterio_correspondencia: Mapped[str | None] = mapped_column(
+        String(100), default=None
+    )
+    data_criacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+    )
+    data_atualizacao: Mapped[datetime] = mapped_column(
+        init=False,
+        server_default=text("timezone('America/Sao_Paulo', now())"),
+        onupdate=func.now(),
+    )
+
+
+@table_registry.mapped_as_dataclass
 class ProcessoRecursoGlosa:
     __tablename__ = 'processos_recurso_glosa'
     __table_args__ = (

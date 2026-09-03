@@ -12,6 +12,7 @@ from sqlalchemy.dialects import oracle
 from sqlalchemy.exc import SQLAlchemyError
 
 from app_prontocardio.models import (
+    AssociacaoItemIpmManual,
     AuditoriaConciliacaoFaturamento,
     ConciliacaoFaturamento,
     ConciliacaoFaturamentoRemessa,
@@ -25,6 +26,8 @@ from app_prontocardio.models import (
 )
 from app_prontocardio.routers import app_glosas, financeiro
 from app_prontocardio.schema import (
+    AssociacaoItemIpmManualCreate,
+    AssociacaoItemIpmManualUpdate,
     CardFollowUpGlosaPublic,
     ConciliacaoFaturamentoCreate,
     ConciliacaoFaturamentoUpdate,
@@ -50,6 +53,13 @@ REMESSA_RELATORIO_TRAMITANDO = 19218
 CONTA_RELATORIO_TRAMITANDO = 123456
 ATENDIMENTO_RELATORIO_TRAMITANDO = 314159
 LANCAMENTO_RELATORIO_TRAMITANDO = 101
+REMESSA_ASSOCIACAO_MANUAL = 16425
+REMESSA_ASSOCIACAO_MANUAL_EDITADA = 16426
+CONTA_ASSOCIACAO_MANUAL = 343332
+CONTA_ASSOCIACAO_MANUAL_EDITADA = 343333
+LANCAMENTO_ASSOCIACAO_MANUAL = 9
+LANCAMENTO_ASSOCIACAO_MANUAL_EDITADO = 10
+ID_ASSOCIACAO_MANUAL = 7
 
 
 def test_schema_do_card_preserva_indicacao_de_recurso():
@@ -1645,6 +1655,8 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
             if 'SELECT DISTINCT' in consulta and (
                 'processos_relatorios_itens_ipm' in consulta
             ):
+                if params == {'remessas': [16425]}:
+                    return Resultado([])
                 assert params == {'processos': ['P058752/2026']}
                 return Resultado([{
                     'numero_processo_normalizado': 'P058752/2026',
@@ -1733,7 +1745,9 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
             'valor_item': Decimal('10.95'),
         }],
         'correspondencia_unica': True,
+        'associacao': None,
     }]
+    assert nr['associacoes_itens'] == 0
     assert nr['remessas'] == [{
         'cd_remessa': 16425,
         'competencia': '01/2026',
@@ -1746,6 +1760,174 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
         'vinculada_automaticamente': False,
         'indicada_pelo_portal': True,
     }]
+
+
+def test_associacao_item_manual_gera_linha_para_follow_up(monkeypatch):
+    class Resultado:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return [{
+                'associacao_id': 7,
+                'associacao_cd_remessa': 16425,
+                'associacao_conta': 343332,
+                'associacao_cd_lancamento': 9,
+                'criterio_correspondencia': (
+                    'atendimento_guia_servico_carteira_valor'
+                ),
+                'numero_processo': 'P058752/2026',
+                'numero_protocolo': '4124085',
+                'numero_lote': None,
+                'codigo_servico': '90222377',
+                'codigo_glosa': '1714',
+                'codigo_beneficiario': '1106530000',
+                'referencia': date(2026, 1, 1),
+                'valor_protocolo': Decimal('5846.55'),
+                'valor_glosa_protocolo': Decimal('23.79'),
+                'valor_processado': Decimal('10.95'),
+                'valor_liberado': Decimal('10.07'),
+                'valor_glosa': Decimal('0.88'),
+                'data_realizacao': date(2025, 12, 21),
+                'descricao_glosa': 'Cobrança em desacordo',
+                'data_abertura': date(2026, 2, 9),
+                'status_processo': 'FINALIZADO',
+                'motivo_finalizacao': None,
+            }]
+
+    class Sessao:
+        def execute(self, _query):
+            return Resultado()
+
+    item_oracle = {
+        'cd_remessa': 16425,
+        'cd_reg': 343332,
+        'cd_lancamento': 9,
+        'cd_atendimento': 279139,
+        'cd_paciente': 107036,
+        'nm_paciente': 'PHABYANE FRANCA RIBEIRO',
+        'cd_prestador': 1,
+        'nm_prestador': 'HOSPITAL PRONTOCARDIO',
+        'cd_convenio': 10,
+        'nm_convenio': 'IPM',
+        'tp_atendimento': 'Externo',
+        'nr_guia': '363150',
+        'cd_pro_fat': '90222377',
+        'cd_tuss': None,
+        'descricao': 'CLORETO SODIO',
+        'dt_atendimento': date(2025, 12, 21),
+        'dt_alta': None,
+        'dt_competencia': date(2026, 1, 1),
+        'dt_lancamento': date(2025, 12, 21),
+        'qt_lancamento': Decimal('1'),
+        'vl_total_conta': Decimal('10.95'),
+        'vl_total_registro': Decimal('5846.55'),
+        'cd_gru_fat': 1,
+        'ds_gru_fat': 'MEDICAMENTOS',
+        'cd_gru_pro': 1,
+        'ds_gru_pro': 'MEDICAMENTOS',
+    }
+    monkeypatch.setattr(financeiro, '_tabela_ipm_existe', lambda *_: True)
+    monkeypatch.setattr(
+        financeiro,
+        '_itens_oracle_remessas_ipm',
+        lambda *_: (
+            {
+                16425: {
+                    'data_competencia': date(2026, 1, 1),
+                }
+            },
+            {16425: [item_oracle]},
+        ),
+    )
+
+    linhas = financeiro._linhas_associacoes_itens_manuais_follow_up(
+        Sessao(), object()
+    )
+
+    assert len(linhas) == 1
+    assert linhas[0]['id_item_relatorio'] == 'manual:7'
+    assert linhas[0]['valor_glosa'] == Decimal('0.88')
+    assert linhas[0]['conta'] == CONTA_ASSOCIACAO_MANUAL
+    assert linhas[0]['cd_lancamento'] == LANCAMENTO_ASSOCIACAO_MANUAL
+
+
+def test_cria_edita_e_exclui_associacao_manual_de_item(monkeypatch):
+    class Sessao:
+        def __init__(self):
+            self.objeto = None
+            self.excluido = None
+
+        def add(self, objeto):
+            self.objeto = objeto
+
+        def commit(self):
+            if self.objeto is not None and self.objeto.id is None:
+                self.objeto.id = 7
+
+        def refresh(self, _objeto):
+            return None
+
+        def get(self, _modelo, _id):
+            return self.objeto
+
+        def delete(self, objeto):
+            self.excluido = objeto
+
+    pendencia = {
+        'id_registro': 'registro-1',
+        'numero_processo': 'P058752/2026',
+        'numero_protocolo': '4124085',
+        'data_realizacao': date(2025, 12, 21),
+    }
+    monkeypatch.setattr(
+        financeiro,
+        '_validar_associacao_item_manual',
+        lambda *_args, **_kwargs: (
+            pendencia,
+            'atendimento_guia_servico_carteira_valor',
+        ),
+    )
+    session = Sessao()
+    usuario = SimpleNamespace(id=3)
+
+    criada = financeiro.criar_associacao_item_ipm(
+        AssociacaoItemIpmManualCreate(
+            glosa_id_registro='registro-1',
+            cd_remessa=16425,
+            conta=343332,
+            cd_lancamento=9,
+        ),
+        usuario,
+        session,
+        object(),
+    )
+
+    assert isinstance(criada, AssociacaoItemIpmManual)
+    assert criada.id == ID_ASSOCIACAO_MANUAL
+    assert criada.glosa_id_registro == 'registro-1'
+    assert criada.competencia_producao == '12/2025'
+
+    editada = financeiro.editar_associacao_item_ipm(
+        7,
+        AssociacaoItemIpmManualUpdate(
+            cd_remessa=16426,
+            conta=343333,
+            cd_lancamento=10,
+        ),
+        usuario,
+        session,
+        object(),
+    )
+
+    assert editada.cd_remessa == REMESSA_ASSOCIACAO_MANUAL_EDITADA
+    assert editada.conta == CONTA_ASSOCIACAO_MANUAL_EDITADA
+    assert (
+        editada.cd_lancamento == LANCAMENTO_ASSOCIACAO_MANUAL_EDITADO
+    )
+
+    financeiro.excluir_associacao_item_ipm(7, usuario, session)
+    assert session.excluido is editada
 
 
 def test_validacao_aceita_competencia_distinta_indicada_pelo_portal(
