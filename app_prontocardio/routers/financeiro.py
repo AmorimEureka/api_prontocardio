@@ -6194,7 +6194,7 @@ def _linhas_associacoes_itens_manuais_follow_up(
         )
     ):
         return []
-    associacoes = session.execute(
+    associacoes_brutas = session.execute(
         text(
             """
             SELECT associacao.id AS associacao_id,
@@ -6219,8 +6219,18 @@ def _linhas_associacoes_itens_manuais_follow_up(
             """
         )
     ).mappings().all()
-    if not associacoes or 'associacao_cd_remessa' not in associacoes[0]:
+    if (
+        not associacoes_brutas
+        or 'associacao_cd_remessa' not in associacoes_brutas[0]
+    ):
         return []
+    associacoes_por_id = {}
+    for associacao in associacoes_brutas:
+        associacoes_por_id.setdefault(
+            int(associacao['associacao_id']),
+            associacao,
+        )
+    associacoes = list(associacoes_por_id.values())
     try:
         remessas, itens_por_remessa = _itens_oracle_remessas_ipm(
             session_oracle,
