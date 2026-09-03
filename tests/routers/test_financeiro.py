@@ -1787,7 +1787,7 @@ def test_associacao_item_manual_gera_linha_para_follow_up(monkeypatch):
             return self
 
         def all(self):
-            return [{
+            associacao = {
                 'associacao_id': 7,
                 'associacao_cd_remessa': 16425,
                 'associacao_conta': 343332,
@@ -1812,7 +1812,10 @@ def test_associacao_item_manual_gera_linha_para_follow_up(monkeypatch):
                 'data_abertura': date(2026, 2, 9),
                 'status_processo': 'FINALIZADO',
                 'motivo_finalizacao': None,
-            }]
+            }
+            # O portal pode manter mais de uma linha do mesmo processo.
+            # A associação deve compor o Follow-Up uma única vez.
+            return [associacao, dict(associacao)]
 
     class Sessao:
         def execute(self, _query):
