@@ -7065,7 +7065,10 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         for row in rows
         if not remessas_por_valor.get(_money(row['valor_protocolo']))
     ]
-    if linhas_sem_remessa:
+    # A listagem resumida deve usar somente vínculos já persistidos. Consultar
+    # o MV para cada protocolo ainda não associado torna o Follow-Up lento e
+    # antecipa uma decisão que pertence à tela de Associação Manual.
+    if linhas_sem_remessa and incluir_detalhes:
         remessas_oracle = _complementar_remessas_cogestao(
             session,
             session_oracle,
