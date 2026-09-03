@@ -402,10 +402,12 @@ def test_data_exata_refina_itens_ambiguos_no_mes():
 
 
 def test_data_exata_refina_lancamentos_da_mesma_conta_e_guia():
+    lancamento_esperado = 117
     linha = demonstrativo(
         id_registro='lancamento-exato-mesma-conta',
         numero_guia_senha='GUIA-502043',
         codigo_servico='00010081',
+        codigo_beneficiario='001166865008',
         data_realizacao=date(2026, 3, 5),
     )
     item_base = {
@@ -442,7 +444,46 @@ def test_data_exata_refina_lancamentos_da_mesma_conta_e_guia():
         'lancamento_dia_coalesce_servico_carteira'
     )
     assert correspondencia.resolucao is not None
-    assert correspondencia.resolucao.cd_lancamento == 117
+    assert correspondencia.resolucao.cd_lancamento == lancamento_esperado
+
+
+def test_associacao_manual_combina_senha_procedimento_e_carteira():
+    cd_remessa_associada = 16425
+    linha = demonstrativo(
+        numero_guia_senha='389690',
+        codigo_servico='90222377',
+        codigo_beneficiario='1106530000',
+        valor_processado=Decimal('10.95'),
+        data_realizacao=date(2025, 12, 21),
+    )
+    item = {
+        'cd_remessa': cd_remessa_associada,
+        'cd_reg': 343332,
+        'cd_lancamento': 9,
+        'nr_guia': '363150',
+        'cd_senha': '389690',
+        'cd_pro_fat': '90222377',
+        'cd_tuss': None,
+        'nr_carteira': '1106530000',
+        'vl_total_conta': Decimal('10.95'),
+        'dt_competencia': date(2026, 1, 1),
+        'dt_atendimento': date(2025, 12, 21),
+        'dt_lancamento': date(2025, 12, 21),
+    }
+
+    correspondencia = resolver_correspondencia_item_oracle(
+        linha,
+        indexar_itens_oracle([item]),
+        criterios_permitidos={
+            'atendimento_guia_servico_carteira_valor'
+        },
+    )
+
+    assert correspondencia.status == 'item_unico'
+    assert correspondencia.cd_remessa == cd_remessa_associada
+    assert correspondencia.criterio == (
+        'atendimento_guia_servico_carteira_valor'
+    )
 
 
 def test_valor_refina_lancamentos_iguais_da_mesma_conta_guia_e_dia():

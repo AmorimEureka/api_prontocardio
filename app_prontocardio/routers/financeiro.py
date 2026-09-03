@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app_prontocardio.database import get_session_oracle, get_session_postgres
 from app_prontocardio.models import (
+    AssociacaoItemIpmManual,
     AssociacaoRemessaIpmManual,
     AuditoriaConciliacaoFaturamento,
     ConciliacaoFaturamento,
@@ -47,6 +48,8 @@ from app_prontocardio.models import (
     Usuario,
 )
 from app_prontocardio.schema import (
+    AssociacaoItemIpmManualCreate,
+    AssociacaoItemIpmManualUpdate,
     AssociacaoRemessaIpmManualCreate,
     AssociacaoRemessaIpmManualUpdate,
     ConciliacaoAlteracaoPublic,
@@ -93,6 +96,16 @@ LOGGER = logging.getLogger(__name__)
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 CENTAVOS = Decimal('0.01')
+CRITERIOS_ASSOCIACAO_ITEM_MANUAL = {
+    'competencia_guia_servico_carteira',
+    'atendimento_guia_servico_carteira_valor',
+    'lancamento_dia_coalesce_servico_carteira',
+    'competencia_servico_carteira',
+    'competencia_tuss_carteira',
+    'lancamento_coalesce_servico_carteira',
+    'atendimento_guia_coalesce_servico_valor',
+    'lancamento_pro_fat_carteira_valor',
+}
 ORACLE_IN_CHUNK_SIZE = 900
 MESES_POR_ANO = 12
 MENSAGEM_VALORES_DIVERGENTES = (
@@ -3188,10 +3201,189 @@ def _validar_remessa_associacao_manual(  # noqa: PLR0913
     return processo, competencia, protocolo
 
 
+def _serializar_item_oracle_associacao(
+    item: Mapping, criterio: str | None
+) -> dict:
+    return {
+        'cd_remessa': int(item['cd_remessa']),
+        'conta': int(item['cd_reg']),
+        'cd_lancamento': int(item['cd_lancamento']),
+        'cd_atendimento': int(item.get('cd_atendimento') or 0),
+        'cd_paciente': int(item.get('cd_paciente') or 0),
+        'nm_paciente': item.get('nm_paciente'),
+        'nr_guia': item.get('nr_guia'),
+        'cd_senha': item.get('cd_senha'),
+        'nr_carteira': item.get('nr_carteira'),
+        'cd_pro_fat': item.get('cd_pro_fat'),
+        'cd_tuss': item.get('cd_tuss'),
+        'descricao': item.get('descricao'),
+        'dt_atendimento': item.get('dt_atendimento'),
+        'dt_lancamento': item.get('dt_lancamento'),
+        'nm_prestador': item.get('nm_prestador'),
+        'valor_item': _money(item.get('vl_total_conta')),
+        'criterio_correspondencia': criterio,
+    }
+
+
+def _resolver_candidatos_associacao_item(
+    session_oracle: Session,
+    pendencia: Mapping,
+    codigos_remessa: set[int],
+) -> tuple[str | None, list[dict]]:
+    _, itens_por_remessa = _itens_oracle_remessas_ipm(
+        session_oracle, codigos_remessa
+    )
+    itens = [
+        item
+        for itens_remessa in itens_por_remessa.values()
+        for item in itens_remessa
+    ]
+    if not itens:
+        return None, []
+    correspondencia = resolver_correspondencia_item_oracle(
+        pendencia,
+        indexar_itens_oracle(itens),
+        criterios_permitidos=CRITERIOS_ASSOCIACAO_ITEM_MANUAL,
+    )
+    candidatos = []
+    chaves = set()
+    for item in correspondencia.itens:
+        chave = (
+            int(item['cd_remessa']),
+            int(item['cd_reg']),
+            int(item['cd_lancamento']),
+        )
+        if chave in chaves:
+            continue
+        chaves.add(chave)
+        candidatos.append(
+            _serializar_item_oracle_associacao(
+                item, correspondencia.criterio
+            )
+        )
+    return correspondencia.criterio, candidatos
+
+
+def _buscar_pendencia_associacao_item(
+    session: Session, glosa_id_registro: str
+) -> Mapping:
+    pendencia = session.execute(
+        text(
+            """
+            SELECT id_registro, numero_processo, numero_protocolo,
+                   data_realizacao, numero_guia_senha,
+                   codigo_beneficiario, codigo_servico, codigo_glosa,
+                   valor_processado, valor_glosa
+              FROM api_prontocardio.glossas_nao_vinculadas_ipm
+             WHERE id_registro = :id_registro
+               AND motivo = 'remessa_nao_encontrada_ou_ambigua'
+            """
+        ),
+        {'id_registro': glosa_id_registro.strip()},
+    ).mappings().first()
+    if pendencia is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='O item de glosa pendente não foi encontrado.',
+        )
+    return pendencia
+
+
+def _validar_associacao_item_manual(  # noqa: PLR0913
+    session: Session,
+    session_oracle: Session,
+    *,
+    glosa_id_registro: str,
+    cd_remessa: int,
+    conta: int,
+    cd_lancamento: int,
+    associacao_id: int | None = None,
+) -> tuple[Mapping, str]:
+    pendencia = _buscar_pendencia_associacao_item(
+        session, glosa_id_registro
+    )
+    criterio, candidatos = _resolver_candidatos_associacao_item(
+        session_oracle, pendencia, {cd_remessa}
+    )
+    chave_escolhida = (cd_remessa, conta, cd_lancamento)
+    if not any(
+        (
+            item['cd_remessa'], item['conta'], item['cd_lancamento']
+        )
+        == chave_escolhida
+        for item in candidatos
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
+            detail=(
+                'O lançamento escolhido não corresponde à guia, ao '
+                'procedimento e ao beneficiário/carteira do item glosado.'
+            ),
+        )
+    filtro_id = (
+        (AssociacaoItemIpmManual.id != associacao_id,)
+        if associacao_id is not None
+        else ()
+    )
+    if session.scalar(
+        select(AssociacaoItemIpmManual.id).where(
+            AssociacaoItemIpmManual.glosa_id_registro
+            == glosa_id_registro.strip(),
+            *filtro_id,
+        )
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='O item de glosa já possui uma associação manual.',
+        )
+    if session.scalar(
+        select(AssociacaoItemIpmManual.id).where(
+            AssociacaoItemIpmManual.cd_remessa == cd_remessa,
+            AssociacaoItemIpmManual.conta == conta,
+            AssociacaoItemIpmManual.cd_lancamento == cd_lancamento,
+            *filtro_id,
+        )
+    ):
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='O lançamento Oracle já foi associado a outra glosa.',
+        )
+    if _tabela_ipm_existe(session, 'processos_relatorios_itens_ipm'):
+        ocupada_automaticamente = session.scalar(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                      FROM api_prontocardio.processos_relatorios_itens_ipm
+                     WHERE cd_remessa = :cd_remessa
+                       AND conta = :conta
+                       AND cd_lancamento = :cd_lancamento
+                       AND NULLIF(BTRIM(criterio_demonstrativo), '')
+                           IS NOT NULL
+                )
+                """
+            ),
+            {
+                'cd_remessa': cd_remessa,
+                'conta': conta,
+                'cd_lancamento': cd_lancamento,
+            },
+        )
+        if ocupada_automaticamente:
+            raise HTTPException(
+                status_code=HTTPStatus.CONFLICT,
+                detail=(
+                    'O lançamento Oracle já possui associação automática.'
+                ),
+            )
+    return pendencia, str(criterio or 'associacao_manual')
+
+
 @router.get('/associacoes-remessas-ipm')
 def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
     competencia: Annotated[str | None, Query(max_length=7)] = None,
     numero_processo: Annotated[str | None, Query(max_length=100)] = None,
     limit: Annotated[int, Query(ge=1, le=100)] = 10,
@@ -3202,6 +3394,7 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
         'processos_ipm_saude_cogestao',
         'processos_ipm',
         'associacoes_remessas_ipm_manuais',
+        'associacoes_itens_ipm_manuais',
     )
     if any(
         not _tabela_ipm_existe(session, tabela)
@@ -3255,6 +3448,10 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 SELECT UPPER(BTRIM(numero_processo)), competencia_producao,
                        UPPER(BTRIM(nr))
                   FROM api_prontocardio.associacoes_remessas_ipm_manuais
+                UNION
+                SELECT UPPER(BTRIM(numero_processo)), competencia_producao,
+                       UPPER(BTRIM(nr))
+                  FROM api_prontocardio.associacoes_itens_ipm_manuais
             ), chaves AS (
                 SELECT * FROM chaves_pendentes AS chave
                 {clausula_filtros}
@@ -3401,6 +3598,7 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 'valor_glosa': _money(pendencia['valor_glosa']),
                 'correspondencias_oracle': [],
                 'correspondencia_unica': False,
+                'associacao': None,
             }
             registros_pendentes_por_chave[chave].append(registro_pendente)
             registros_pendentes_por_id[
@@ -3514,11 +3712,16 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
             registro['correspondencia_unica'] = (
                 len(registro['correspondencias_oracle']) == 1
             )
+    codigos_associados_itens = (
+        set(session.scalars(select(AssociacaoItemIpmManual.cd_remessa)))
+        if hasattr(session, 'scalars')
+        else set()
+    )
     codigos_remessas_portal = sorted({
         codigo
         for codigos in remessas_portal_por_chave.values()
         for codigo in codigos
-    })
+    } | codigos_associados_itens)
     remessas_por_competencia: dict[str, list[dict]] = defaultdict(list)
     remessas_por_codigo: dict[int, dict] = {}
     if competencias or codigos_remessas_portal:
@@ -3595,13 +3798,6 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 and str(remessa['nr_associado'] or '').strip().upper()
                 == row['nr']
             )
-            if remessa['vinculada_automaticamente']:
-                continue
-            if (
-                remessa['associacao_id'] is not None
-                and not pertence_ao_processo
-            ):
-                continue
             candidatas.append({
                 **remessa,
                 'indicada_pelo_portal': (
@@ -3651,23 +3847,161 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
     processos = list(processos_por_chave.values())
+    ids_pendencias = set(registros_pendentes_por_id)
+    todas_associacoes_itens = (
+        list(session.scalars(select(AssociacaoItemIpmManual)))
+        if hasattr(session, 'scalars')
+        else []
+    )
+    associacoes_itens = [
+        associacao
+        for associacao in todas_associacoes_itens
+        if associacao.glosa_id_registro in ids_pendencias
+    ]
+    associacao_por_glosa = {
+        associacao.glosa_id_registro: associacao
+        for associacao in todas_associacoes_itens
+    }
+    alvos_manuais_ocupados = {
+        (
+            associacao.cd_remessa,
+            associacao.conta,
+            associacao.cd_lancamento,
+        ): associacao.glosa_id_registro
+        for associacao in associacoes_itens
+    }
+    codigos_candidatos = {
+        int(remessa['cd_remessa'])
+        for processo in processos
+        for nr in processo['nrs']
+        for remessa in nr['remessas']
+    }
+    alvos_automaticos_ocupados: set[tuple[int, int, int]] = set()
+    if codigos_candidatos and _tabela_ipm_existe(
+        session, 'processos_relatorios_itens_ipm'
+    ):
+        alvos_automaticos_ocupados = {
+            (
+                int(row['cd_remessa']),
+                int(row['conta']),
+                int(row['cd_lancamento']),
+            )
+            for row in session.execute(
+                text(
+                    """
+                    SELECT DISTINCT cd_remessa, conta, cd_lancamento
+                      FROM api_prontocardio.processos_relatorios_itens_ipm
+                     WHERE cd_remessa = ANY(:remessas)
+                       AND NULLIF(BTRIM(criterio_demonstrativo), '')
+                           IS NOT NULL
+                    """
+                ),
+                {'remessas': sorted(codigos_candidatos)},
+            ).mappings()
+        }
+    if codigos_candidatos and hasattr(session_oracle, 'execute'):
+        _, itens_oracle_por_remessa = _itens_oracle_remessas_ipm(
+            session_oracle, codigos_candidatos
+        )
+        indice_itens_oracle = indexar_itens_oracle(
+            item
+            for itens in itens_oracle_por_remessa.values()
+            for item in itens
+        )
+        itens_oracle_por_chave = {
+            (
+                int(item['cd_remessa']),
+                int(item['cd_reg']),
+                int(item['cd_lancamento']),
+            ): item
+            for itens in itens_oracle_por_remessa.values()
+            for item in itens
+        }
+        for registro in registros_pendentes_por_id.values():
+            correspondencia = resolver_correspondencia_item_oracle(
+                registro,
+                indice_itens_oracle,
+                criterios_permitidos=CRITERIOS_ASSOCIACAO_ITEM_MANUAL,
+            )
+            associacao = associacao_por_glosa.get(registro['id_registro'])
+            chave_atual = (
+                (
+                    associacao.cd_remessa,
+                    associacao.conta,
+                    associacao.cd_lancamento,
+                )
+                if associacao is not None
+                else None
+            )
+            candidatos = []
+            chaves_vistas = set()
+            for item in correspondencia.itens:
+                chave_item = (
+                    int(item['cd_remessa']),
+                    int(item['cd_reg']),
+                    int(item['cd_lancamento']),
+                )
+                if chave_item in chaves_vistas:
+                    continue
+                chaves_vistas.add(chave_item)
+                ocupante = alvos_manuais_ocupados.get(chave_item)
+                if (
+                    chave_item != chave_atual
+                    and (
+                        ocupante is not None
+                        or chave_item in alvos_automaticos_ocupados
+                    )
+                ):
+                    continue
+                candidatos.append(
+                    _serializar_item_oracle_associacao(
+                        item, correspondencia.criterio
+                    )
+                )
+            registro['correspondencias_oracle'] = candidatos
+            registro['correspondencia_unica'] = len(candidatos) == 1
+            if associacao is not None:
+                item_atual = itens_oracle_por_chave.get(chave_atual)
+                registro['associacao'] = {
+                    'id': associacao.id,
+                    'cd_remessa': associacao.cd_remessa,
+                    'conta': associacao.conta,
+                    'cd_lancamento': associacao.cd_lancamento,
+                    'criterio_correspondencia': (
+                        associacao.criterio_correspondencia
+                    ),
+                    'item_oracle': (
+                        _serializar_item_oracle_associacao(
+                            item_atual,
+                            associacao.criterio_correspondencia,
+                        )
+                        if item_atual is not None
+                        else None
+                    ),
+                }
+    for processo in processos:
+        for nr in processo['nrs']:
+            nr['associacoes_itens'] = sum(
+                registro['associacao'] is not None
+                for registro in nr['registros_pendentes']
+            )
     resumo = {
         'processos_pendentes': len(processos),
         'nrs_pendentes': sum(
             len(processo['nrs']) for processo in processos
         ),
-        'associacoes_realizadas': sum(
-            len(nr['associacoes'])
-            for processo in processos
-            for nr in processo['nrs']
-        ),
+        'associacoes_realizadas': len(associacoes_itens),
         'remessas_disponiveis': len(
             {
-                remessa['cd_remessa']
+                (
+                    item['cd_remessa'],
+                    item['conta'],
+                    item['cd_lancamento'],
+                )
                 for processo in processos
                 for nr in processo['nrs']
-                for remessa in nr['remessas']
-                if remessa['associacao_id'] is None
+                for registro in nr['registros_pendentes']
+                for item in registro['correspondencias_oracle']
             }
         ),
     }
@@ -3765,6 +4099,109 @@ def excluir_associacao_remessa_ipm(
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
             detail='Associação manual não encontrada.',
+        )
+    session.delete(associacao)
+    session.commit()
+
+
+@router.post('/associacoes-itens-ipm', status_code=HTTPStatus.CREATED)
+def criar_associacao_item_ipm(
+    payload: AssociacaoItemIpmManualCreate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    pendencia, criterio = _validar_associacao_item_manual(
+        session,
+        session_oracle,
+        glosa_id_registro=payload.glosa_id_registro,
+        cd_remessa=payload.cd_remessa,
+        conta=payload.conta,
+        cd_lancamento=payload.cd_lancamento,
+    )
+    associacao = AssociacaoItemIpmManual(
+        glosa_id_registro=str(pendencia['id_registro']),
+        numero_processo=str(pendencia['numero_processo']).strip().upper(),
+        competencia_producao=(
+            pendencia['data_realizacao'].strftime('%m/%Y')
+        ),
+        nr=str(pendencia['numero_protocolo']).strip().upper(),
+        cd_remessa=payload.cd_remessa,
+        conta=payload.conta,
+        cd_lancamento=payload.cd_lancamento,
+        criterio_correspondencia=criterio,
+        usuario_id=usuario_atual.id,
+    )
+    session.add(associacao)
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='O item de glosa ou o lançamento já foi associado.',
+        ) from exc
+    session.refresh(associacao)
+    return associacao
+
+
+@router.put('/associacoes-itens-ipm/{associacao_id}')
+def editar_associacao_item_ipm(
+    associacao_id: int,
+    payload: AssociacaoItemIpmManualUpdate,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    session_oracle: Session = Depends(get_session_oracle),
+):
+    associacao = session.get(AssociacaoItemIpmManual, associacao_id)
+    if associacao is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Associação manual do item não encontrada.',
+        )
+    _, criterio = _validar_associacao_item_manual(
+        session,
+        session_oracle,
+        glosa_id_registro=associacao.glosa_id_registro,
+        cd_remessa=payload.cd_remessa,
+        conta=payload.conta,
+        cd_lancamento=payload.cd_lancamento,
+        associacao_id=associacao.id,
+    )
+    associacao.cd_remessa = payload.cd_remessa
+    associacao.conta = payload.conta
+    associacao.cd_lancamento = payload.cd_lancamento
+    associacao.criterio_correspondencia = criterio
+    associacao.usuario_id = usuario_atual.id
+    associacao.data_atualizacao = datetime.now(
+        ZoneInfo('America/Fortaleza')
+    )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail='O lançamento já foi associado a outra glosa.',
+        ) from exc
+    session.refresh(associacao)
+    return associacao
+
+
+@router.delete(
+    '/associacoes-itens-ipm/{associacao_id}',
+    status_code=HTTPStatus.NO_CONTENT,
+)
+def excluir_associacao_item_ipm(
+    associacao_id: int,
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+):
+    associacao = session.get(AssociacaoItemIpmManual, associacao_id)
+    if associacao is None:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='Associação manual do item não encontrada.',
         )
     session.delete(associacao)
     session.commit()
@@ -4284,6 +4721,56 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
     return cards
 
 
+def _itens_manuais_follow_up(
+    session: Session,
+    *,
+    cd_remessa: int,
+    numero_processo: str,
+    protocolos: list[str],
+    itens_oracle: list[Mapping],
+) -> list[tuple[Mapping, Mapping, str | None]]:
+    if not _tabela_ipm_existe(session, 'associacoes_itens_ipm_manuais'):
+        return []
+    linhas = session.execute(
+        text(
+            """
+            SELECT pendencia.*, associacao.conta,
+                   associacao.cd_lancamento,
+                   associacao.criterio_correspondencia
+              FROM api_prontocardio.associacoes_itens_ipm_manuais associacao
+              JOIN api_prontocardio.glossas_nao_vinculadas_ipm pendencia
+                ON pendencia.id_registro = associacao.glosa_id_registro
+             WHERE associacao.cd_remessa = :cd_remessa
+               AND UPPER(BTRIM(associacao.numero_processo))
+                   = UPPER(BTRIM(:numero_processo))
+               AND BTRIM(associacao.nr)
+                   = ANY(CAST(:protocolos AS TEXT[]))
+            """
+        ),
+        {
+            'cd_remessa': cd_remessa,
+            'numero_processo': numero_processo,
+            'protocolos': protocolos,
+        },
+    ).mappings().all()
+    oracle_por_chave = {
+        (int(item['cd_reg']), int(item['cd_lancamento'])): item
+        for item in itens_oracle
+    }
+    return [
+        (
+            linha,
+            oracle_por_chave[
+                (int(linha['conta']), int(linha['cd_lancamento']))
+            ],
+            linha['criterio_correspondencia'],
+        )
+        for linha in linhas
+        if (int(linha['conta']), int(linha['cd_lancamento']))
+        in oracle_por_chave
+    ]
+
+
 def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
     session: Session,
     session_oracle: Session,
@@ -4352,9 +4839,6 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
             'numeros_protocolo': protocolos,
         },
     ).mappings().all()
-    if not demonstrativos:
-        return []
-
     indice = indexar_itens_oracle(itens_oracle)
     correspondencias = []
     for demonstrativo in demonstrativos:
@@ -4365,7 +4849,14 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
         )
         if correspondencia.cd_remessa == int(cd_remessa):
             correspondencias.append((demonstrativo, correspondencia))
-    if not correspondencias:
+    correspondencias_manuais = _itens_manuais_follow_up(
+        session,
+        cd_remessa=int(cd_remessa),
+        numero_processo=numero_processo,
+        protocolos=protocolos,
+        itens_oracle=itens_oracle,
+    )
+    if not correspondencias and not correspondencias_manuais:
         return []
 
     codigos_tiss = {
@@ -4373,6 +4864,11 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
         for item, _ in correspondencias
         if str(item.get('codigo_glosa') or '').strip()
     }
+    codigos_tiss.update({
+        str(item.get('codigo_glosa') or '').strip()
+        for item, _, _ in correspondencias_manuais
+        if str(item.get('codigo_glosa') or '').strip()
+    })
     descricoes_tiss = {
         item.codigo_termo: item.termo
         for item in session.scalars(
@@ -4393,6 +4889,32 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
             demonstrativo,
             origem,
             correspondencia.criterio,
+            descricoes_tiss.get(codigo_glosa),
+        )
+        chave = (
+            numero_processo.strip().casefold(),
+            int(cd_remessa),
+            item['cd_atendimento'],
+            item['cd_reg'],
+            item['cd_lancamento'],
+        )
+        registros_item = tratativas.get(chave, [])
+        if codigo_glosa:
+            registros_item = [
+                registro
+                for registro in registros_item
+                if registro.motivo_glosa == codigo_glosa
+            ]
+        itens_com_tratativas.append((item, registros_item))
+
+    for demonstrativo, origem, criterio in correspondencias_manuais:
+        codigo_glosa = str(
+            demonstrativo.get('codigo_glosa') or ''
+        ).strip()
+        item = _item_demonstrativo_follow_up(
+            demonstrativo,
+            origem,
+            criterio,
             descricoes_tiss.get(codigo_glosa),
         )
         chave = (
@@ -4969,6 +5491,7 @@ def _itens_oracle_remessas_ipm(
             'nm_convenio': conta.nm_convenio,
             'tp_atendimento': conta.tp_atendimento,
             'nr_guia': conta.nr_guia,
+            'cd_senha': conta.cd_senha,
             'nr_carteira': conta.nr_carteira,
             'cd_pro_fat': conta.cd_pro_fat,
             'cd_tuss': getattr(conta, 'cd_tuss', None),
@@ -4979,6 +5502,7 @@ def _itens_oracle_remessas_ipm(
             'dt_lancamento': conta.dt_lancamento,
             'qt_lancamento': conta.qt_lancamento,
             'vl_total_conta': conta.vl_total_conta,
+            'valor_item': conta.vl_total_conta,
             'vl_total_registro': conta.vl_total_registro,
             'cd_gru_pro': int(cd_gru_pro or 0),
             'ds_gru_pro': ds_gru_pro or 'Grupo não informado',
@@ -5641,6 +6165,129 @@ def _protocolos_demonstrativo_por_paciente(
     }
 
 
+def _linhas_associacoes_itens_manuais_follow_up(
+    session: Session, session_oracle: Session | None
+) -> list[dict]:
+    if (
+        session_oracle is None
+        or not _tabela_ipm_existe(
+            session, 'associacoes_itens_ipm_manuais'
+        )
+    ):
+        return []
+    associacoes = session.execute(
+        text(
+            """
+            SELECT associacao.id AS associacao_id,
+                   associacao.cd_remessa AS associacao_cd_remessa,
+                   associacao.conta AS associacao_conta,
+                   associacao.cd_lancamento AS associacao_cd_lancamento,
+                   associacao.criterio_correspondencia,
+                   pendencia.*,
+                   tiss.termo AS descricao_glosa,
+                   proc.data_abertura, proc.status_processo,
+                   proc.motivo_finalizacao
+              FROM api_prontocardio.associacoes_itens_ipm_manuais associacao
+              JOIN api_prontocardio.glossas_nao_vinculadas_ipm pendencia
+                ON pendencia.id_registro = associacao.glosa_id_registro
+              JOIN api_prontocardio.processos_ipm proc
+                ON UPPER(BTRIM(proc.numero_processo))
+                 = UPPER(BTRIM(associacao.numero_processo))
+              LEFT JOIN api_prontocardio.tiss
+                ON tiss.codigo_termo = pendencia.codigo_glosa
+             WHERE UPPER(BTRIM(proc.status_processo))
+                   IN ('FINALIZADO', 'TRAMITANDO')
+            """
+        )
+    ).mappings().all()
+    if not associacoes or 'associacao_cd_remessa' not in associacoes[0]:
+        return []
+    try:
+        remessas, itens_por_remessa = _itens_oracle_remessas_ipm(
+            session_oracle,
+            {int(item['associacao_cd_remessa']) for item in associacoes},
+        )
+    except (AttributeError, SQLAlchemyError):
+        return []
+    oracle_por_chave = {
+        (
+            int(item['cd_remessa']),
+            int(item['cd_reg']),
+            int(item['cd_lancamento']),
+        ): item
+        for itens in itens_por_remessa.values()
+        for item in itens
+    }
+    linhas = []
+    for associacao in associacoes:
+        chave = (
+            int(associacao['associacao_cd_remessa']),
+            int(associacao['associacao_conta']),
+            int(associacao['associacao_cd_lancamento']),
+        )
+        item = oracle_por_chave.get(chave)
+        if item is None:
+            continue
+        remessa = remessas.get(chave[0], {})
+        linhas.append({
+            'id_item_relatorio': f"manual:{associacao['associacao_id']}",
+            'numero_processo': associacao['numero_processo'],
+            'cd_remessa': chave[0],
+            'competencia': (
+                remessa.get('data_competencia')
+                or item.get('dt_competencia')
+                or associacao['data_realizacao']
+            ),
+            'valor_conta_relatorio': item.get('vl_total_registro'),
+            'criterio_conta': 'associacao_manual',
+            'conta': chave[1],
+            'cd_lancamento': chave[2],
+            'cd_atendimento': item.get('cd_atendimento'),
+            'cd_paciente': item.get('cd_paciente'),
+            'nm_paciente': item.get('nm_paciente'),
+            'cd_prestador': item.get('cd_prestador'),
+            'nm_prestador': item.get('nm_prestador'),
+            'cd_convenio': item.get('cd_convenio'),
+            'nm_convenio': item.get('nm_convenio'),
+            'tp_atendimento': item.get('tp_atendimento'),
+            'nr_guia': item.get('nr_guia'),
+            'cd_pro_fat': item.get('cd_pro_fat'),
+            'cd_tuss': item.get('cd_tuss'),
+            'descricao': item.get('descricao'),
+            'dt_atendimento': item.get('dt_atendimento'),
+            'dt_alta': item.get('dt_alta'),
+            'dt_lancamento': item.get('dt_lancamento'),
+            'qt_lancamento': item.get('qt_lancamento'),
+            'valor_item': item.get('vl_total_conta'),
+            'cd_gru_fat': item.get('cd_gru_fat'),
+            'ds_gru_fat': item.get('ds_gru_fat'),
+            'cd_gru_pro': item.get('cd_gru_pro'),
+            'ds_gru_pro': item.get('ds_gru_pro'),
+            'numero_protocolo': associacao['numero_protocolo'],
+            'numero_lote': associacao.get('numero_lote'),
+            'codigo_servico': associacao['codigo_servico'],
+            'codigo_glosa': associacao['codigo_glosa'],
+            'codigo_beneficiario': associacao['codigo_beneficiario'],
+            'referencia': associacao.get('referencia'),
+            'valor_protocolo': associacao.get('valor_protocolo'),
+            'valor_glosa_protocolo': associacao.get(
+                'valor_glosa_protocolo'
+            ),
+            'valor_processado': associacao['valor_processado'],
+            'valor_liberado': associacao.get('valor_liberado'),
+            'valor_glosa': associacao['valor_glosa'],
+            'data_realizacao': associacao['data_realizacao'],
+            'criterio_demonstrativo': (
+                associacao['criterio_correspondencia']
+            ),
+            'descricao_glosa': associacao['descricao_glosa'],
+            'data_abertura': associacao['data_abertura'],
+            'status_processo': associacao['status_processo'],
+            'motivo_finalizacao': associacao['motivo_finalizacao'],
+        })
+    return linhas
+
+
 def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     remessas_excluidas: set[int],
@@ -5659,7 +6306,7 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
         or not _tabela_ipm_existe(session, 'processos_ipm')
     ):
         return []
-    rows = session.execute(
+    rows = list(session.execute(
         text(
             """
             SELECT item.id_item_relatorio,
@@ -5729,7 +6376,12 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                       item.cd_lancamento
             """
         )
-    ).mappings().all()
+    ).mappings().all())
+    rows.extend(
+        _linhas_associacoes_itens_manuais_follow_up(
+            session, session_oracle
+        )
+    )
     termo_geral = str(q or '').strip().casefold()
     termo_processo = str(processo_original or '').strip().casefold()
     termo_convenio = str(convenio or '').strip().casefold()

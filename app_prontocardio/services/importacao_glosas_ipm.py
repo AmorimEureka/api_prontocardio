@@ -53,6 +53,10 @@ class IndicesItensOracle:
         tuple,
         tuple[Mapping, ...],
     ]
+    atendimento_guia_servico_carteira_valor: Mapping[
+        tuple,
+        tuple[Mapping, ...],
+    ]
     lancamento_dia_coalesce_servico_carteira: Mapping[
         tuple,
         tuple[Mapping, ...],
@@ -406,6 +410,33 @@ def chave_item_atendimento_guia_coalesce_valor_oracle(
     )
 
 
+def chave_item_atendimento_guia_servico_carteira_valor_demonstrativo(
+    linha: Mapping,
+) -> tuple:
+    return (
+        normalizar_mes_ano(linha['data_realizacao']),
+        normalizar_texto(linha['numero_guia_senha']),
+        normalizar_texto(linha['codigo_servico']),
+        normalizar_carteira(linha['codigo_beneficiario']),
+        normalizar_dinheiro(linha['valor_processado']),
+    )
+
+
+def chave_item_atendimento_guia_servico_carteira_valor_oracle(
+    linha: Mapping,
+) -> tuple:
+    codigo_servico = linha.get('cd_tuss')
+    if codigo_servico is None:
+        codigo_servico = linha.get('cd_pro_fat')
+    return (
+        normalizar_mes_ano(linha['dt_atendimento']),
+        normalizar_texto(linha['nr_guia']),
+        normalizar_texto(codigo_servico),
+        normalizar_carteira(linha['nr_carteira']),
+        normalizar_dinheiro(linha.get('vl_total_conta')),
+    )
+
+
 def chave_item_lancamento_pro_fat_valor_demonstrativo(
     linha: Mapping,
 ) -> tuple:
@@ -451,10 +482,13 @@ def resolver_item(
     return ResolucaoItem(status='ambiguo', candidatos=itens)
 
 
-def indexar_itens_oracle(
+def indexar_itens_oracle(  # noqa: PLR0912
     itens: Iterable[Mapping],
 ) -> IndicesItensOracle:
     por_guia: dict[tuple, list[Mapping]] = defaultdict(list)
+    por_atendimento_guia_carteira: dict[tuple, list[Mapping]] = defaultdict(
+        list
+    )
     por_lancamento_dia: dict[tuple, list[Mapping]] = defaultdict(list)
     por_servico: dict[tuple, list[Mapping]] = defaultdict(list)
     por_tuss: dict[tuple, list[Mapping]] = defaultdict(list)
@@ -467,8 +501,17 @@ def indexar_itens_oracle(
     for item in itens:
         if item.get('cd_remessa') is None:
             continue
+        senha = normalizar_texto(item.get('cd_senha'))
+        guia = normalizar_texto(item.get('nr_guia'))
+        item_por_senha = (
+            {**item, 'nr_guia': item.get('cd_senha')}
+            if senha and senha != guia
+            else None
+        )
         if normalizar_mes_ano(item.get('dt_competencia')) is not None:
             por_guia[chave_item_oracle(item)].append(item)
+            if item_por_senha is not None:
+                por_guia[chave_item_oracle(item_por_senha)].append(item)
             por_servico[chave_item_sem_guia_oracle(item)].append(item)
             if normalizar_texto(item.get('cd_tuss')):
                 por_tuss[chave_item_sem_guia_tuss_oracle(item)].append(item)
@@ -501,6 +544,28 @@ def indexar_itens_oracle(
             por_atendimento_guia_valor[
                 chave_item_atendimento_guia_coalesce_valor_oracle(item)
             ].append(item)
+            if normalizar_carteira(item.get('nr_carteira')):
+                por_atendimento_guia_carteira[
+                    chave_item_atendimento_guia_servico_carteira_valor_oracle(
+                        item
+                    )
+                ].append(item)
+        if (
+            item_por_senha is not None
+            and normalizar_mes_ano(item.get('dt_atendimento')) is not None
+            and normalizar_texto(codigo_coalesce_competencia)
+        ):
+            por_atendimento_guia_valor[
+                chave_item_atendimento_guia_coalesce_valor_oracle(
+                    item_por_senha
+                )
+            ].append(item)
+            if normalizar_carteira(item.get('nr_carteira')):
+                por_atendimento_guia_carteira[
+                    chave_item_atendimento_guia_servico_carteira_valor_oracle(
+                        item_por_senha
+                    )
+                ].append(item)
         codigo_coalesce_lancamento = item.get('cd_pro_fat')
         if codigo_coalesce_lancamento is None:
             codigo_coalesce_lancamento = item.get('cd_tuss')
@@ -521,6 +586,10 @@ def indexar_itens_oracle(
     return IndicesItensOracle(
         competencia_guia_servico_carteira={
             chave: tuple(linhas) for chave, linhas in por_guia.items()
+        },
+        atendimento_guia_servico_carteira_valor={
+            chave: tuple(linhas)
+            for chave, linhas in por_atendimento_guia_carteira.items()
         },
         lancamento_dia_coalesce_servico_carteira={
             chave: tuple(linhas)
@@ -550,10 +619,11 @@ def indexar_itens_oracle(
     )
 
 
-def resolver_correspondencia_item_oracle(
+def resolver_correspondencia_item_oracle(  # noqa: PLR0912
     linha: Mapping,
     indices: IndicesItensOracle,
     cd_remessa_esperada: int | None = None,
+    criterios_permitidos: set[str] | None = None,
 ) -> CorrespondenciaItemOracle:
     fontes: tuple[
         tuple[
@@ -567,6 +637,11 @@ def resolver_correspondencia_item_oracle(
             'competencia_guia_servico_carteira',
             indices.competencia_guia_servico_carteira,
             chave_item_demonstrativo,
+        ),
+        (
+            'atendimento_guia_servico_carteira_valor',
+            indices.atendimento_guia_servico_carteira_valor,
+            chave_item_atendimento_guia_servico_carteira_valor_demonstrativo,
         ),
         (
             'lancamento_dia_coalesce_servico_carteira',
@@ -608,6 +683,11 @@ def resolver_correspondencia_item_oracle(
     primeira_ambiguidade = None
     primeira_divergencia = None
     for criterio, indice, gerar_chave in fontes:
+        if (
+            criterios_permitidos is not None
+            and criterio not in criterios_permitidos
+        ):
+            continue
         itens = indice.get(gerar_chave(linha), ())
         if not itens:
             continue
