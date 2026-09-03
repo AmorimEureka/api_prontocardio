@@ -1874,6 +1874,25 @@ def test_associacao_item_manual_gera_linha_para_follow_up(monkeypatch):
     assert linhas[0]['cd_lancamento'] == LANCAMENTO_ASSOCIACAO_MANUAL
 
 
+def test_associacao_manual_substitui_correspondencia_automatica_no_follow_up():
+    item_automatico = ({'id_registro': 'registro-1'}, object())
+    item_nao_associado = ({'id_registro': 'registro-2'}, object())
+    item_manual = (
+        {'id_registro': 'registro-1'},
+        {'cd_reg': 343332, 'cd_lancamento': 9},
+        'associacao_manual',
+    )
+
+    automaticos = (
+        financeiro._remover_correspondencias_automaticas_associadas_manualmente(
+            [item_automatico, item_nao_associado],
+            [item_manual],
+        )
+    )
+
+    assert automaticos == [item_nao_associado]
+
+
 def test_cria_edita_e_exclui_associacao_manual_de_item(monkeypatch):
     class Sessao:
         def __init__(self):

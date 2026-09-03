@@ -4790,6 +4790,22 @@ def _itens_manuais_follow_up(
     ]
 
 
+def _remover_correspondencias_automaticas_associadas_manualmente(
+    correspondencias: list[tuple[Mapping, object]],
+    correspondencias_manuais: list[tuple[Mapping, Mapping, str | None]],
+) -> list[tuple[Mapping, object]]:
+    ids_associados_manualmente = {
+        str(demonstrativo.get('id_registro') or '').strip()
+        for demonstrativo, _, _ in correspondencias_manuais
+    }
+    return [
+        (demonstrativo, correspondencia)
+        for demonstrativo, correspondencia in correspondencias
+        if str(demonstrativo.get('id_registro') or '').strip()
+        not in ids_associados_manualmente
+    ]
+
+
 def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
     session: Session,
     session_oracle: Session,
@@ -4874,6 +4890,12 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
         numero_processo=numero_processo,
         protocolos=protocolos,
         itens_oracle=itens_oracle,
+    )
+    correspondencias = (
+        _remover_correspondencias_automaticas_associadas_manualmente(
+            correspondencias,
+            correspondencias_manuais,
+        )
     )
     if not correspondencias and not correspondencias_manuais:
         return []
