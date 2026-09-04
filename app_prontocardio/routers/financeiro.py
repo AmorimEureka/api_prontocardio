@@ -3468,20 +3468,32 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 SELECT chave.numero_processo_normalizado,
                        chave.competencia_producao,
                        chave.nr,
-                       MAX(BTRIM(cog.numero_processo)) AS numero_processo,
-                       MAX(cog.valor_informado) AS valor_informado,
-                       MAX(cog.valor_aprovado_producao)
-                           AS valor_aprovado_producao,
-                       MAX(cog.valor_glosado_producao)
-                           AS valor_glosado_producao
+                       BTRIM(cog.numero_processo) AS numero_processo,
+                       cog.valor_informado,
+                       cog.valor_aprovado_producao,
+                       cog.valor_glosado_producao,
+                       cog.valor_protocolo AS valor_protocolado_cogestao,
+                       cog.valor_glosado_protocolo
+                           AS valor_glosado_cogestao
                   FROM chaves AS chave
-                  JOIN api_prontocardio.processos_ipm_saude_cogestao AS cog
-                    ON UPPER(BTRIM(cog.numero_processo))
-                     = chave.numero_processo_normalizado
-                   AND BTRIM(cog.competencia_producao)
-                     = chave.competencia_producao
-                 GROUP BY chave.numero_processo_normalizado,
-                          chave.competencia_producao, chave.nr
+                  JOIN LATERAL (
+                      SELECT cog.*
+                        FROM api_prontocardio.
+                             processos_ipm_saude_cogestao AS cog
+                       WHERE UPPER(BTRIM(cog.numero_processo))
+                             = chave.numero_processo_normalizado
+                         AND chave.nr IN (
+                             UPPER(BTRIM(COALESCE(cog.nr, ''))),
+                             UPPER(BTRIM(COALESCE(cog.nr_origem, '')))
+                         )
+                       ORDER BY (
+                                    BTRIM(cog.competencia_producao)
+                                    = chave.competencia_producao
+                                ) DESC,
+                                cog.data_fechamento DESC NULLS LAST,
+                                cog.id_registro
+                       LIMIT 1
+                  ) AS cog ON TRUE
             ), valores_nr AS (
                 SELECT chave.numero_processo_normalizado,
                        chave.competencia_producao,
@@ -3527,8 +3539,16 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                  GROUP BY chave.numero_processo_normalizado,
                           chave.competencia_producao, chave.nr
             )
-            SELECT cog.*, valores_nr.valor_protocolado_nr,
-                   valores_nr.valor_aprovado_nr,
+            SELECT cog.*,
+                   COALESCE(
+                       valores_nr.valor_protocolado_nr,
+                       cog.valor_protocolado_cogestao
+                   ) AS valor_protocolado_nr,
+                   COALESCE(
+                       valores_nr.valor_aprovado_nr,
+                       cog.valor_protocolado_cogestao
+                       - cog.valor_glosado_cogestao
+                   ) AS valor_aprovado_nr,
                    valores_nr.valor_glosado_nr,
                    proc.data_abertura, proc.status_processo
               FROM cogestao AS cog
@@ -6476,6 +6496,9 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     itens_pacientes_totalizados: dict[
         tuple[str, int, int, str], set[str]
     ] = defaultdict(set)
+    totais_portal_por_protocolo: dict[
+        tuple[str, int], dict[str, Decimal]
+    ] = defaultdict(dict)
     tratativas_por_item = _tratativas_demonstrativo_por_item(
         session,
         {int(row['cd_remessa']) for row in rows},
@@ -6680,6 +6703,15 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             and numero_protocolo not in card['numeros_protocolo']
         ):
             card['numeros_protocolo'].append(numero_protocolo)
+        valor_glosa_protocolo = _money(row['valor_glosa_protocolo'])
+        if numero_protocolo and valor_glosa_protocolo > 0:
+            totais_portal_por_protocolo[chave_card][numero_protocolo] = max(
+                totais_portal_por_protocolo[chave_card].get(
+                    numero_protocolo,
+                    Decimal('0.00'),
+                ),
+                valor_glosa_protocolo,
+            )
         if conta not in contas_totalizadas[chave_card]:
             card['valor_remessa'] += _money(
                 row['valor_conta_relatorio']
@@ -6734,6 +6766,16 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             card.pop('numeros_protocolo')
         ) or None
         card['pacientes'] = list(pacientes_map[chave].values())
+        valor_glosa_portal = sum(
+            totais_portal_por_protocolo[chave].values(),
+            Decimal('0.00'),
+        )
+        if valor_glosa_portal > _money(card['valor_glosado']):
+            card['valor_glosado'] = valor_glosa_portal
+            card['valor_glosa_pendente'] = max(
+                valor_glosa_portal - _money(card['valor_total_tratado']),
+                Decimal('0.00'),
+            )
         if session_oracle is None:
             continue
         pacientes_demonstrativo = _pacientes_demonstrativo_conciliado(
@@ -6786,6 +6828,12 @@ def _cards_relatorios_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             protocolos_paciente
         ):
             chaves_remover.append(chave)
+        if valor_glosa_portal > _money(card['valor_glosado']):
+            card['valor_glosado'] = valor_glosa_portal
+            card['valor_glosa_pendente'] = max(
+                valor_glosa_portal - _money(card['valor_total_tratado']),
+                Decimal('0.00'),
+            )
     for chave in chaves_remover:
         cards_map.pop(chave, None)
     return list(cards_map.values())

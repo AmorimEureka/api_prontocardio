@@ -1278,7 +1278,9 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
                     'valor_glosa_protocolo': Decimal('55.00'),
                     'valor_processado': Decimal('300.00'),
                     'valor_liberado': Decimal('245.00'),
-                    'valor_glosa': Decimal('55.00'),
+                    # Parte da glosa pode continuar sem vínculo com o MV.
+                    # O card deve preservar o total informado pelo portal.
+                    'valor_glosa': Decimal('54.92'),
                     'data_realizacao': date(2026, 5, 10),
                     'criterio_demonstrativo': (
                         'relatorio_hpc_conta_guia_servico'
@@ -1371,7 +1373,7 @@ def test_relatorios_dos_dois_status_montam_remessa_paciente_e_item(
     assert item['descricao'] == 'Diária hospitalar'
     assert item['numero_protocolo'] == 'PROTOCOLO-1'
     assert item['codigo_beneficiario'] == '00042'
-    assert item['valor_glosa'] == Decimal('55.00')
+    assert item['valor_glosa'] == Decimal('54.92')
     assert item['valor_total_tratado'] == Decimal('25.00')
     assert item['tratativa_disponivel'] is True
     assert "IN ('FINALIZADO', 'TRAMITANDO')" in queries[0]
@@ -1659,6 +1661,9 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
         def execute(self, query, params=None):
             consulta = str(query)
             if 'WITH chaves_pendentes AS' in consulta:
+                assert 'JOIN LATERAL' in consulta
+                assert "COALESCE(cog.nr_origem, '')" in consulta
+                assert '= chave.competencia_producao' in consulta
                 return Resultado([{
                     'numero_processo_normalizado': 'P058752/2026',
                     'competencia_producao': '12/2025',
