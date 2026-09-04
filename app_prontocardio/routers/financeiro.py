@@ -4556,6 +4556,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
     paciente: str | None,
     cd_atendimento: int | None,
     tipo_atendimento: str | None,
+    numero_protocolo: str | None = None,
 ) -> list[dict]:
     # NFS-e não faz parte do registro analítico; esse filtro só pode ser
     # atendido pelos cards financeiros legados.
@@ -4678,6 +4679,7 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
     )
 
     cards = []
+    termo_protocolo = str(numero_protocolo or '').strip().casefold()
     for chave, registros in grupos.items():
         pacientes = _pacientes_follow_up_glosa(
             registros,
@@ -4717,6 +4719,11 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             )
             if protocolo_cogestao:
                 protocolos.append(protocolo_cogestao)
+        if termo_protocolo and not any(
+            termo_protocolo in protocolo.casefold()
+            for protocolo in protocolos
+        ):
+            continue
         cards.append({
             'conciliacao_remessa_id': None,
             'cd_remessa': chave[1],
@@ -6939,6 +6946,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     paciente: str | None,
     cd_atendimento: int | None,
     tipo_atendimento: str | None,
+    numero_protocolo: str | None = None,
 ) -> list[dict]:
     # Estes filtros dependem de dados fiscais ou de tratativa, ausentes nos
     # cards ainda não conciliados.
@@ -7060,6 +7068,13 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             for row in rows
             if termo_processo
             in str(row['numero_processo'] or '').strip().casefold()
+        ]
+    termo_protocolo = str(numero_protocolo or '').strip().casefold()
+    if termo_protocolo:
+        rows = [
+            row
+            for row in rows
+            if termo_protocolo in str(row['nr'] or '').strip().casefold()
         ]
     competencia_minima = session.scalar(
         select(func.min(RemessaFinanceira.data_competencia))
@@ -7674,6 +7689,9 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     session_oracle: Session = Depends(get_session_oracle),
     q: str | None = Query(default=None, max_length=100),
     numero_nfse: Annotated[str | None, Query(max_length=100)] = None,
+    numero_protocolo: Annotated[
+        str | None, Query(max_length=100)
+    ] = None,
     cd_remessa: Annotated[int | None, Query(ge=1)] = None,
     convenio: Annotated[str | None, Query(max_length=100)] = None,
     processo_original: Annotated[str | None, Query(max_length=100)] = None,
@@ -7773,6 +7791,26 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
     if termo_nfse:
         filtros.append(
             ConciliacaoFaturamento.numero_nfse.ilike(f'%{termo_nfse}%')
+        )
+    termo_protocolo = (numero_protocolo or '').strip()
+    if termo_protocolo:
+        filtros.append(
+            text(
+                """
+                EXISTS (
+                    SELECT 1
+                      FROM api_prontocardio.processos_relatorios_itens_ipm
+                           AS item_protocolo
+                     WHERE item_protocolo.cd_remessa
+                           = api_prontocardio.
+                             conciliacoes_faturamento_remessas.cd_remessa
+                       AND BTRIM(item_protocolo.numero_protocolo)
+                           ILIKE :numero_protocolo_like
+                )
+                """
+            ).bindparams(
+                numero_protocolo_like=f'%{termo_protocolo}%'
+            )
         )
     if cd_remessa is not None:
         filtros.append(
@@ -7944,6 +7982,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             paciente=paciente,
             cd_atendimento=cd_atendimento,
             tipo_atendimento=tipo_atendimento,
+            numero_protocolo=numero_protocolo,
         )
         chaves_fontes_ipm = {
             (
@@ -7969,6 +8008,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
                 paciente=paciente,
                 cd_atendimento=cd_atendimento,
                 tipo_atendimento=tipo_atendimento,
+                numero_protocolo=numero_protocolo,
             )
         )
 
@@ -8381,6 +8421,7 @@ def consultar_processos_recurso(  # noqa: PLR0913
             session_oracle=session_oracle,
             q=None,
             numero_nfse=None,
+            numero_protocolo=None,
             cd_remessa=None,
             convenio=None,
             processo_original=(processo_original or '').strip() or None,
@@ -8468,6 +8509,7 @@ def consultar_processos_recurso(  # noqa: PLR0913
                 session_oracle=session_oracle,
                 q=None,
                 numero_nfse=None,
+                numero_protocolo=None,
                 cd_remessa=None,
                 convenio=None,
                 processo_original=grupo['processo_original'],

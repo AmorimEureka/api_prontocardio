@@ -1605,6 +1605,7 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
         paciente=None,
         cd_atendimento=None,
         tipo_atendimento=None,
+        numero_protocolo='4123928',
     )
 
     assert len(cards) == 1
@@ -1617,6 +1618,25 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
         'processo_sem_glosa': 'P058752/2026',
         'processo_sem_glosa_like': '%P058752/2026%',
     }
+
+    sem_correspondencia = financeiro._cards_cogestao_follow_up(
+        Sessao(),
+        object(),
+        set(),
+        incluir_detalhes=False,
+        q=None,
+        numero_nfse=None,
+        cd_remessa=None,
+        convenio=None,
+        processo_original='P058752/2026',
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+        numero_protocolo='OUTRO-PROTOCOLO',
+    )
+
+    assert sem_correspondencia == []
 
 
 def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
