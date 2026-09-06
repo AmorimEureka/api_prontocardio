@@ -3468,15 +3468,20 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                 SELECT chave.numero_processo_normalizado,
                        chave.competencia_producao,
                        chave.nr,
-                       BTRIM(cog.numero_processo) AS numero_processo,
-                       cog.valor_informado,
-                       cog.valor_aprovado_producao,
-                       cog.valor_glosado_producao,
+                       COALESCE(
+                           BTRIM(cog.numero_processo),
+                           chave.numero_processo_normalizado
+                       ) AS numero_processo,
+                       COALESCE(cog.valor_informado, 0) AS valor_informado,
+                       COALESCE(cog.valor_aprovado_producao, 0)
+                           AS valor_aprovado_producao,
+                       COALESCE(cog.valor_glosado_producao, 0)
+                           AS valor_glosado_producao,
                        cog.valor_protocolo AS valor_protocolado_cogestao,
                        cog.valor_glosado_protocolo
                            AS valor_glosado_cogestao
                   FROM chaves AS chave
-                  JOIN LATERAL (
+                  LEFT JOIN LATERAL (
                       SELECT cog.*
                         FROM api_prontocardio.
                              processos_ipm_saude_cogestao AS cog
@@ -3510,11 +3515,12 @@ def consultar_associacoes_remessas_ipm(  # noqa: PLR0912, PLR0913, PLR0915
                   FROM chaves AS chave
                   LEFT JOIN api_prontocardio.demonstrativo_processos_ipm
                             AS demo
-                    ON UPPER(BTRIM(demo.numero_processo))
-                     = chave.numero_processo_normalizado
-                   AND BTRIM(demo.competencia_producao)
-                     = chave.competencia_producao
-                   AND UPPER(BTRIM(demo.numero_protocolo)) = chave.nr
+                    ON UPPER(BTRIM(demo.numero_protocolo)) = chave.nr
+                   AND (
+                        NULLIF(BTRIM(demo.numero_processo), '') IS NULL
+                        OR UPPER(BTRIM(demo.numero_processo))
+                           = chave.numero_processo_normalizado
+                   )
                   LEFT JOIN (
                       SELECT UPPER(BTRIM(numero_processo))
                                  AS numero_processo_normalizado,

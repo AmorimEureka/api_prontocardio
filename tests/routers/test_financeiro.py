@@ -1662,8 +1662,13 @@ def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
             consulta = str(query)
             if 'WITH chaves_pendentes AS' in consulta:
                 assert 'JOIN LATERAL' in consulta
+                assert 'LEFT JOIN LATERAL' in consulta
                 assert "COALESCE(cog.nr_origem, '')" in consulta
                 assert '= chave.competencia_producao' in consulta
+                assert (
+                    "NULLIF(BTRIM(demo.numero_processo), '') IS NULL"
+                    in consulta
+                )
                 return Resultado([{
                     'numero_processo_normalizado': 'P058752/2026',
                     'competencia_producao': '12/2025',
