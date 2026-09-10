@@ -135,6 +135,11 @@ def montar_linhas_recurso_glosa(card: dict) -> list[dict]:
                     or card.get('cd_remessa')
                     or '-'
                 ),
+                'lote': (
+                    str(_valor(registro, 'numero_lote', '') or '').strip()
+                    or str(item.get('numero_lote') or '').strip()
+                    or '-'
+                ),
                 'paciente': item.get('nm_paciente') or '-',
                 'atend_alta': _formatar_data(
                     item.get('dt_alta') or item.get('dt_atendimento')
@@ -292,6 +297,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     titulos = (
         'PROCESSO<br/>INICIAL',
         'REMESSA',
+        'LOTE',
         'PACIENTE',
         'ATEND.<br/>ALTA',
         'ITEM GLOSADO',
@@ -310,6 +316,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             [
                 _paragrafo(linha['processo_inicial'], estilo),
                 _paragrafo(linha['remessa'], estilo),
+                _paragrafo(linha['lote'], estilo),
                 _paragrafo(linha['paciente'], estilo),
                 _paragrafo(linha['atend_alta'], estilo),
                 _paragrafo(linha['item_glosado'], estilo),
@@ -325,7 +332,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
         )
     dados.append(
         [
-            '', '', '', '', '', '', '', '', '', '',
+            '', '', '', '', '', '', '', '', '', '', '',
             _paragrafo('TOTAL', estilo_negrito),
             _paragrafo(_formatar_reais(total_recurso), estilo_negrito),
             '',
@@ -334,19 +341,20 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     larguras = [
         largura_util * proporcao
         for proporcao in (
-            0.073,
-            0.067,
-            0.085,
-            0.067,
-            0.115,
-            0.042,
-            0.052,
-            0.067,
+            0.065,
+            0.055,
             0.06,
-            0.064,
-            0.102,
-            0.066,
-            0.14,
+            0.08,
+            0.06,
+            0.105,
+            0.04,
+            0.048,
+            0.062,
+            0.057,
+            0.061,
+            0.095,
+            0.062,
+            0.15,
         )
     ]
     tabela_itens = Table(dados, colWidths=larguras, repeatRows=1)
@@ -355,8 +363,8 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             [
                 ('GRID', (0, 0), (-1, -1), 0.7, colors.black),
                 ('BACKGROUND', (0, 0), (-1, 0), FUNDO_CABECALHO),
-                ('BACKGROUND', (10, -1), (11, -1), FUNDO_CABECALHO),
-                ('SPAN', (0, -1), (9, -1)),
+                ('BACKGROUND', (11, -1), (12, -1), FUNDO_CABECALHO),
+                ('SPAN', (0, -1), (10, -1)),
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('TOPPADDING', (0, 0), (-1, -1), 3),
                 ('BOTTOMPADDING', (0, 0), (-1, -1), 3),

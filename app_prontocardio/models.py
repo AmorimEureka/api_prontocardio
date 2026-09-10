@@ -340,6 +340,10 @@ class RegistroGlosa:
         String,
         default=None,
     )
+    numero_lote: Mapped[str | None] = mapped_column(
+        String(255),
+        default=None,
+    )
     conciliacao_remessa_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             f'{settings.POSTGRES_SCHEMA}.conciliacoes_faturamento_remessas.id',

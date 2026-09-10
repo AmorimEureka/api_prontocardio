@@ -4,7 +4,7 @@ from http import HTTPStatus
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy import String, cast, false, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
@@ -40,6 +40,9 @@ from app_prontocardio.schema import (
     TissList,
 )
 from app_prontocardio.security import valida_token_usuario_atual
+from app_prontocardio.services.pdf_recurso_glosa import (
+    gerar_pdf_recurso_glosa,
+)
 
 router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
 
@@ -202,6 +205,7 @@ def _validar_alocacao_glosa_conciliada(
 def _registros_do_mesmo_item(
     registro_origem: RegistroGlosa,
     session: Session,
+    demonstrativo_id_registro: str | None = None,
 ) -> list[RegistroGlosa]:
     filtros = [
         RegistroGlosa.cd_remessa == registro_origem.cd_remessa,
@@ -227,11 +231,25 @@ def _registros_do_mesmo_item(
         filtros.append(
             RegistroGlosa.motivo_glosa == registro_origem.motivo_glosa
         )
-    return session.scalars(
+    registros = session.scalars(
         select(RegistroGlosa)
         .where(*filtros)
         .order_by(RegistroGlosa.id)
     ).all()
+    id_demonstrativo = str(demonstrativo_id_registro or '').strip()
+    if not id_demonstrativo:
+        return registros
+
+    registro_vinculado_id = session.scalar(
+        select(RegistroGlosaDemonstrativoIpm.registro_glosa_id).where(
+            RegistroGlosaDemonstrativoIpm.id_registro == id_demonstrativo
+        )
+    )
+    if registro_vinculado_id is None:
+        return registros
+
+    ids_da_linha = {registro_origem.id, registro_vinculado_id}
+    return [registro for registro in registros if registro.id in ids_da_linha]
 
 
 def _resolver_registro_tratativa(
@@ -659,6 +677,122 @@ def consultar_glosas_registradas(
     return {'glosas': rows}
 
 
+def _cards_recursos_triagem(
+    registros: list[RegistroGlosa],
+    descricoes_tiss: dict[str, str],
+) -> list[dict]:
+    cards_por_remessa: dict[int, dict] = {}
+    for registro in registros:
+        card = cards_por_remessa.setdefault(
+            registro.cd_remessa,
+            {
+                'cd_remessa': registro.cd_remessa,
+                'processo': {
+                    'numero_processo': (
+                        registro.processo_controle_fatura_gab
+                    )
+                },
+                'pacientes': [],
+            },
+        )
+        paciente = next(
+            (
+                item
+                for item in card['pacientes']
+                if item['codigo_paciente'] == registro.codigo_paciente
+            ),
+            None,
+        )
+        if paciente is None:
+            paciente = {
+                'codigo_paciente': registro.codigo_paciente,
+                'itens': [],
+            }
+            card['pacientes'].append(paciente)
+        paciente['itens'].append(
+            {
+                'nm_paciente': registro.nm_paciente,
+                'numero_lote': registro.numero_lote,
+                'dt_alta': registro.data_alta,
+                'dt_atendimento': registro.data_atendimento,
+                'descricao': (
+                    registro.descricao_item or registro.procedimento
+                ),
+                'qt_lancamento': registro.qtd_registro,
+                'qtd_glosada': registro.qtd_registro,
+                'valor_processado': registro.valor,
+                'valor_liberado': Decimal('0.00'),
+                'valor_glosa': registro.valor,
+                'motivo_glosa_descricao': (
+                    descricoes_tiss.get(str(registro.motivo_glosa or ''))
+                    or registro.motivo_glosa
+                    or '-'
+                ),
+                'registro_recusa': registro,
+            }
+        )
+    return list(cards_por_remessa.values())
+
+
+@router.get('/glosas/recurso.pdf', status_code=HTTPStatus.OK)
+def gerar_pdf_recurso_triagem(
+    usuario_atual: ValidaUsuarioAtual,
+    session: SessionPostgres,
+    processo_original: str = Query(min_length=1, max_length=100),
+    download: bool = True,
+):
+    processo_normalizado = processo_original.strip()
+    registros = session.scalars(
+        select(RegistroGlosa)
+        .where(
+            func.lower(
+                func.trim(RegistroGlosa.processo_controle_fatura_gab)
+            ) == processo_normalizado.casefold(),
+            RegistroGlosa.origem_registro == 'triagem',
+            RegistroGlosa.sn_glosado == 'true',
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.valor_recursado.is_not(None),
+            RegistroGlosa.valor_recursado > 0,
+        )
+        .order_by(RegistroGlosa.cd_remessa, RegistroGlosa.id)
+    ).all()
+    if not registros:
+        raise HTTPException(
+            status_code=HTTPStatus.NOT_FOUND,
+            detail='O processo da Triagem não possui recursos registrados.',
+        )
+    codigos_tiss = {
+        str(registro.motivo_glosa or '')
+        for registro in registros
+        if registro.motivo_glosa
+    }
+    descricoes_tiss = {
+        item.codigo_termo: item.termo
+        for item in session.scalars(
+            select(Tiss).where(Tiss.codigo_termo.in_(codigos_tiss))
+        )
+    } if codigos_tiss else {}
+    conteudo = gerar_pdf_recurso_glosa(
+        _cards_recursos_triagem(registros, descricoes_tiss)
+    )
+    processo_arquivo = ''.join(
+        caractere if caractere.isalnum() else '-'
+        for caractere in processo_normalizado
+    ).strip('-')
+    disposicao = 'attachment' if download else 'inline'
+    return Response(
+        content=conteudo,
+        media_type='application/pdf',
+        headers={
+            'Content-Disposition': (
+                f'{disposicao}; filename="recurso-glosa-'
+                f'{processo_arquivo}.pdf"'
+            ),
+            'X-Content-Type-Options': 'nosniff',
+        },
+    )
+
+
 @router.get(
     '/convenios',
     status_code=HTTPStatus.OK,
@@ -887,7 +1021,11 @@ def editar_glosa(
     session: SessionPostgres,
 ):
     registro_origem = _get_registro_glosa_or_404(glosa_id, session)
-    registros_item = _registros_do_mesmo_item(registro_origem, session)
+    registros_item = _registros_do_mesmo_item(
+        registro_origem,
+        session,
+        payload.demonstrativo_id_registro,
+    )
     registro_glosa = _resolver_registro_tratativa(
         registro_origem,
         payload,
