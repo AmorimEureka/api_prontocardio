@@ -4989,7 +4989,11 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
             item['cd_reg'],
             item['cd_lancamento'],
         )
-        registros_item = tratativas.get(chave, [])
+        registros_item = _tratativas_da_linha_demonstrativo(
+            tratativas,
+            chave,
+            item['demonstrativo_id_registro'],
+        )
         if codigo_glosa:
             registros_item = [
                 registro
@@ -5015,7 +5019,11 @@ def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
             item['cd_reg'],
             item['cd_lancamento'],
         )
-        registros_item = tratativas.get(chave, [])
+        registros_item = _tratativas_da_linha_demonstrativo(
+            tratativas,
+            chave,
+            item['demonstrativo_id_registro'],
+        )
         if codigo_glosa:
             registros_item = [
                 registro
@@ -5892,6 +5900,20 @@ def _tratativas_demonstrativo_por_item(
     return dict(resultado)
 
 
+def _tratativas_da_linha_demonstrativo(
+    tratativas_por_item: dict[tuple, list[RegistroGlosa]],
+    chave_tratativa: tuple,
+    demonstrativo_id_registro: str | None,
+) -> list[RegistroGlosa]:
+    return [
+        *tratativas_por_item.get(
+            (*chave_tratativa, demonstrativo_id_registro),
+            [],
+        ),
+        *tratativas_por_item.get(chave_tratativa, []),
+    ]
+
+
 def _resumo_tratativas_cogestao_remessa(
     tratativas_por_item: dict[tuple, list[RegistroGlosa]],
     numero_processo: str,
@@ -6136,16 +6158,11 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
                 item['cd_reg'],
                 item['cd_lancamento'],
             )
-            registros_item = [
-                *tratativas_por_item.get(
-                    (
-                        *chave_tratativa,
-                        item['demonstrativo_id_registro'],
-                    ),
-                    [],
-                ),
-                *tratativas_por_item.get(chave_tratativa, []),
-            ]
+            registros_item = _tratativas_da_linha_demonstrativo(
+                tratativas_por_item,
+                chave_tratativa,
+                item['demonstrativo_id_registro'],
+            )
             if item['motivo_glosa_codigo']:
                 registros_item = [
                     registro

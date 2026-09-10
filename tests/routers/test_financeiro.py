@@ -846,6 +846,24 @@ def test_tratativas_de_lancamento_repetido_respeitam_linha_demonstrativo(
     assert base not in tratativas
 
 
+def test_busca_tratativa_pela_identidade_exata_do_demonstrativo():
+    exata = SimpleNamespace(id=2)
+    legada = SimpleNamespace(id=1)
+    chave = ('p239088/2026', 18289, 313840, 23475, 51)
+    tratativas = {
+        chave: [legada],
+        (*chave, 'linha-303-48'): [exata],
+    }
+
+    registros = financeiro._tratativas_da_linha_demonstrativo(
+        tratativas,
+        chave,
+        'linha-303-48',
+    )
+
+    assert registros == [exata, legada]
+
+
 def test_lista_apenas_nfse_nao_conciliada(
     session,
     usuario_teste,
