@@ -18,6 +18,7 @@ from app_prontocardio.models import (
     ModelHpcPaciente,
     PrazoRecursoConvenio,
     RegistroGlosa,
+    RegistroGlosaDemonstrativoIpm,
     TipoAtendimento,
     Tiss,
     Usuario,
@@ -46,6 +47,7 @@ ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
 TEXT_FILTER_FIELDS = {'nm_paciente', 'nm_convenio', 'descricao'}
 ORACLE_IN_MAX_VALUES = 1000
+REGISTRO_GLOSA_PAYLOAD_EXCLUDE = {'demonstrativo_id_registro'}
 
 
 def _is_oracle_connect_timeout(exc: SQLAlchemyError) -> bool:
@@ -78,6 +80,52 @@ def _get_registro_glosa_or_404(
 
 def _data_criacao_sao_paulo():
     return datetime.now(ZoneInfo('America/Sao_Paulo')).replace(tzinfo=None)
+
+
+def _executar_conta_atendimento_sem_duplicidade(session: Session, query):
+    return session.execute(query).unique().scalars().all()
+
+
+def _vincular_tratativa_ao_demonstrativo(
+    session: Session,
+    registro_origem: RegistroGlosa,
+    registro_tratativa: RegistroGlosa,
+    id_registro: str | None,
+) -> None:
+    id_normalizado = str(id_registro or '').strip()
+    if not id_normalizado:
+        return
+    vinculo = session.get(RegistroGlosaDemonstrativoIpm, id_normalizado)
+    if vinculo is None or vinculo.registro_glosa_id not in {
+        registro_origem.id,
+        registro_tratativa.id,
+    }:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT,
+            detail=(
+                'A linha do demonstrativo nao pertence ao item de glosa '
+                'selecionado.'
+            ),
+        )
+    vinculo.registro_glosa_id = registro_tratativa.id
+
+
+def _linha_compartilha_registro_demonstrativo(
+    session: Session,
+    registro_glosa_id: int,
+    id_registro: str | None,
+) -> bool:
+    if not str(id_registro or '').strip():
+        return False
+    quantidade = session.scalar(
+        select(func.count())
+        .select_from(RegistroGlosaDemonstrativoIpm)
+        .where(
+            RegistroGlosaDemonstrativoIpm.registro_glosa_id
+            == registro_glosa_id
+        )
+    )
+    return int(quantidade or 0) > 1
 
 
 def _registros_da_glosa_conciliada(
@@ -493,7 +541,7 @@ def conta_atendimento(
             ModelContaAtendimento.cd_lancamento,
         )
 
-        rows = session.execute(query).scalars().all()
+        rows = _executar_conta_atendimento_sem_duplicidade(session, query)
 
     except SQLAlchemyError as exc:
         if _is_oracle_connect_timeout(exc):
@@ -751,7 +799,7 @@ def registrar_glosa(
     session: SessionPostgres,
 ):
     registro_glosa = RegistroGlosa(
-        **payload.model_dump(),
+        **payload.model_dump(exclude=REGISTRO_GLOSA_PAYLOAD_EXCLUDE),
         sn_ativo='true',
     )
     _validar_limites_tratativas_item(
@@ -845,6 +893,15 @@ def editar_glosa(
         payload,
         registros_item,
     )
+    if (
+        registro_glosa is registro_origem
+        and _linha_compartilha_registro_demonstrativo(
+            session,
+            registro_origem.id,
+            payload.demonstrativo_id_registro,
+        )
+    ):
+        registro_glosa = None
     _validar_limites_tratativas_item(
         registro_glosa,
         payload,
@@ -859,7 +916,7 @@ def editar_glosa(
 
     if registro_glosa is None:
         registro_glosa = RegistroGlosa(
-            **payload.model_dump(),
+            **payload.model_dump(exclude=REGISTRO_GLOSA_PAYLOAD_EXCLUDE),
             conciliacao_remessa_id=registro_origem.conciliacao_remessa_id,
             origem_registro=registro_origem.origem_registro,
             sn_ativo='true',
@@ -868,7 +925,9 @@ def editar_glosa(
         if alocacao is not None:
             alocacao[0].append(registro_glosa)
     else:
-        for field_name, value in payload.model_dump().items():
+        for field_name, value in payload.model_dump(
+            exclude=REGISTRO_GLOSA_PAYLOAD_EXCLUDE
+        ).items():
             setattr(registro_glosa, field_name, value)
     campo_descricao_agrupada = (
         'descricao_acato_agrupada'
@@ -888,6 +947,13 @@ def editar_glosa(
         registro_glosa.descricao_glosa_agrupada = descricao_agrupada
     registro_glosa.sn_ativo = 'true'
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
+    session.flush()
+    _vincular_tratativa_ao_demonstrativo(
+        session,
+        registro_origem,
+        registro_glosa,
+        payload.demonstrativo_id_registro,
+    )
     if alocacao is not None:
         registros, valor_alocado = alocacao
         conciliacao_remessa = registro_origem.conciliacao_remessa

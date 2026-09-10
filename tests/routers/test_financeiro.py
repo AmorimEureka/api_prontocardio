@@ -21,6 +21,7 @@ from app_prontocardio.models import (
     ProcessoConciliacaoRemessa,
     RecebimentoRemessa,
     RegistroGlosa,
+    RegistroGlosaDemonstrativoIpm,
     RemessaFinanceira,
     TipoAtendimento,
 )
@@ -787,6 +788,62 @@ def test_tratativa_conciliada_participa_do_detalhamento_demonstrativo(
 
     chave = ('proc-anterior', 987, 2, 3, 7)
     assert [item.id for item in tratativas[chave]] == [registro.id]
+
+
+def test_tratativas_de_lancamento_repetido_respeitam_linha_demonstrativo(
+    session,
+):
+    registro_91 = criar_recurso_aberto(
+        session,
+        cd_remessa=18289,
+        valor_recursado='91.04',
+        processo_controle_fatura_gab='P239088/2026',
+        cd_atendimento=313840,
+        conta=1,
+        cd_lancamento=51,
+    )
+    registro_303 = criar_recurso_aberto(
+        session,
+        cd_remessa=18289,
+        valor_recursado='303.48',
+        processo_controle_fatura_gab='P239088/2026',
+        cd_atendimento=313840,
+        conta=2,
+        cd_lancamento=51,
+    )
+    # Os registros usam contas distintas apenas para não acionar a validação
+    # agregada do fixture; a chave relevante é ajustada abaixo.
+    registro_303.conta = registro_91.conta
+    vinculos = [
+        RegistroGlosaDemonstrativoIpm(
+            id_registro='linha-91-04',
+            registro_glosa_id=registro_91.id,
+            criterio_correspondencia='teste',
+        ),
+        RegistroGlosaDemonstrativoIpm(
+            id_registro='linha-303-48',
+            registro_glosa_id=registro_303.id,
+            criterio_correspondencia='teste',
+        ),
+    ]
+    for vinculo in vinculos:
+        vinculo.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add_all(vinculos)
+    session.commit()
+
+    tratativas = financeiro._tratativas_demonstrativo_por_item(
+        session,
+        {18289},
+    )
+    base = ('p239088/2026', 18289, 313840, 1, 51)
+
+    assert [r.id for r in tratativas[(*base, 'linha-91-04')]] == [
+        registro_91.id
+    ]
+    assert [r.id for r in tratativas[(*base, 'linha-303-48')]] == [
+        registro_303.id
+    ]
+    assert base not in tratativas
 
 
 def test_lista_apenas_nfse_nao_conciliada(

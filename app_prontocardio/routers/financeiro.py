@@ -42,6 +42,7 @@ from app_prontocardio.models import (
     ProcessoRecursoGlosa,
     RecebimentoRemessa,
     RegistroGlosa,
+    RegistroGlosaDemonstrativoIpm,
     RemessaFinanceira,
     TipoAtendimento,
     Tiss,
@@ -5657,6 +5658,7 @@ def _item_demonstrativo_follow_up(
     if isinstance(data_glosa, datetime):
         data_glosa = data_glosa.date()
     return {
+        'demonstrativo_id_registro': str(demonstrativo['id_registro']),
         'cd_paciente': int(item_oracle.get('cd_paciente') or 0),
         'nm_paciente': (
             item_oracle.get('nm_paciente')
@@ -5857,8 +5859,16 @@ def _tratativas_demonstrativo_por_item(
 ) -> dict[tuple, list[RegistroGlosa]]:
     if not codigos_remessa:
         return {}
-    registros = session.scalars(
-        select(RegistroGlosa)
+    registros = session.execute(
+        select(
+            RegistroGlosa,
+            RegistroGlosaDemonstrativoIpm.id_registro,
+        )
+        .outerjoin(
+            RegistroGlosaDemonstrativoIpm,
+            RegistroGlosaDemonstrativoIpm.registro_glosa_id
+            == RegistroGlosa.id,
+        )
         .where(
             RegistroGlosa.cd_remessa.in_(codigos_remessa),
             RegistroGlosa.sn_ativo == 'true',
@@ -5866,7 +5876,7 @@ def _tratativas_demonstrativo_por_item(
         .order_by(RegistroGlosa.id)
     ).all()
     resultado: dict[tuple, list[RegistroGlosa]] = defaultdict(list)
-    for registro in registros:
+    for registro, demonstrativo_id_registro in registros:
         chave = (
             str(
                 registro.processo_controle_fatura_gab or ''
@@ -5876,6 +5886,8 @@ def _tratativas_demonstrativo_por_item(
             registro.conta,
             registro.cd_lancamento,
         )
+        if demonstrativo_id_registro:
+            chave = (*chave, demonstrativo_id_registro)
         resultado[chave].append(registro)
     return dict(resultado)
 
@@ -6124,7 +6136,16 @@ def _cards_demonstrativo_processos_abertos(  # noqa: PLR0912, PLR0913, PLR0915
                 item['cd_reg'],
                 item['cd_lancamento'],
             )
-            registros_item = tratativas_por_item.get(chave_tratativa, [])
+            registros_item = [
+                *tratativas_por_item.get(
+                    (
+                        *chave_tratativa,
+                        item['demonstrativo_id_registro'],
+                    ),
+                    [],
+                ),
+                *tratativas_por_item.get(chave_tratativa, []),
+            ]
             if item['motivo_glosa_codigo']:
                 registros_item = [
                     registro
