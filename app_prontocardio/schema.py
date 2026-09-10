@@ -593,6 +593,7 @@ class RegistroGlosaCreate(BaseModel):
     valor: Decimal
     processo_controle_fatura_gab: str
     processo_recurso: str | None = None
+    numero_lote: str | None = Field(default=None, max_length=255)
     data_glosa: date
     motivo_glosa: str
     descricao_glosa: str
@@ -647,6 +648,12 @@ class RegistroGlosaCreate(BaseModel):
     @field_validator('processo_recurso', mode='before')
     @classmethod
     def normalize_optional_processo_recurso(cls, value):
+        text = str(value or '').strip()
+        return text or None
+
+    @field_validator('numero_lote', mode='before')
+    @classmethod
+    def normalize_optional_numero_lote(cls, value):
         text = str(value or '').strip()
         return text or None
 
@@ -744,6 +751,7 @@ class RegistroGlosaPublic(BaseModel):
     valor: Decimal
     processo_controle_fatura_gab: str
     processo_recurso: str | None = None
+    numero_lote: str | None = None
     data_glosa: date
     motivo_glosa: str | None
     descricao_glosa: str

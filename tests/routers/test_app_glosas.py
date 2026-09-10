@@ -23,6 +23,7 @@ from app_prontocardio.routers.app_glosas import (
     consultar_glosas_registradas,
     deletar_glosa,
     editar_glosa,
+    gerar_pdf_recurso_triagem,
     registrar_glosa,
     registrar_recebimento_glosa,
     salvar_descricoes_agrupadas_glosa,
@@ -214,6 +215,63 @@ def test_registro_triagem_preserva_contrato_dos_indicadores(
     assert registro.origem_registro == 'triagem'
     assert registro.status_tratativa == 'recurso'
     assert registro.valor_indicador == Decimal('12.31')
+
+
+def test_lote_opcional_e_persistido_no_registro(session, usuario_teste):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(numero_lote='  LOTE-MAIDA-42  ')
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert registro.numero_lote == 'LOTE-MAIDA-42'
+    assert RegistroGlosaCreate(
+        **registro_glosa_payload(numero_lote='  ')
+    ).numero_lote is None
+
+
+def test_pdf_da_triagem_usa_mesmo_gerador_e_inclui_lote(
+    session,
+    usuario_teste,
+    monkeypatch,
+):
+    registro = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                numero_lote='LOTE-MAIDA-42',
+                processo_controle_fatura_gab='PROC-TRIAGEM/2026',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    cards_recebidos = []
+
+    def gerar_pdf_fake(cards):
+        cards_recebidos.extend(cards)
+        return b'%PDF-1.7\ntriagem'
+
+    monkeypatch.setattr(
+        'app_prontocardio.routers.app_glosas.gerar_pdf_recurso_glosa',
+        gerar_pdf_fake,
+    )
+
+    response = gerar_pdf_recurso_triagem(
+        usuario_atual=usuario_teste,
+        session=session,
+        processo_original=' proc-triagem/2026 ',
+        download=False,
+    )
+
+    item = cards_recebidos[0]['pacientes'][0]['itens'][0]
+    assert item['registro_recusa'].id == registro.id
+    assert item['numero_lote'] == 'LOTE-MAIDA-42'
+    assert response.body == b'%PDF-1.7\ntriagem'
+    assert response.headers['content-disposition'] == (
+        'inline; filename="recurso-glosa-proc-triagem-2026.pdf"'
+    )
 
 
 def test_desfazer_registro_independente_mantem_exclusao_logica(
@@ -507,6 +565,78 @@ def test_vinculo_da_linha_do_demonstrativo_migra_de_forma_idempotente(
     assert mesma_tratativa.id == tratativa.id
     assert vinculo.registro_glosa_id == tratativa.id
     assert outro_vinculo.registro_glosa_id == origem.id
+
+
+def test_tratativas_de_linhas_duplicadas_nao_somam_quantidades(
+    session,
+    usuario_teste,
+):
+    origem = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                valor='394.52',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    origem.processo_recurso = None
+    origem.qtd_recursado = None
+    origem.valor_recursado = None
+    origem.dt_recurso = None
+    linha_303 = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-demonstrativo-30348',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    linha_303.data_importacao = datetime(2026, 6, 10, 10, 0)
+    linha_91 = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-demonstrativo-91-04',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    linha_91.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add_all([linha_303, linha_91])
+    session.commit()
+
+    tratativa_303 = editar_glosa(
+        origem.id,
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='303.48',
+                demonstrativo_id_registro=linha_303.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    tratativa_91 = editar_glosa(
+        origem.id,
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='91.04',
+                demonstrativo_id_registro=linha_91.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert tratativa_303.id != tratativa_91.id
+    assert tratativa_303.valor_recursado == Decimal('303.48')
+    assert tratativa_91.valor_recursado == Decimal('91.04')
+    assert linha_303.registro_glosa_id == tratativa_303.id
+    assert linha_91.registro_glosa_id == tratativa_91.id
 
 
 def test_salva_descricoes_agrupadas_separadas_por_tipo(
