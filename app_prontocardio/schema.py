@@ -577,6 +577,10 @@ class RegistroGlosaCreate(BaseModel):
     cd_atendimento: int
     conta: int
     cd_lancamento: int | None = None
+    demonstrativo_id_registro: str | None = Field(
+        default=None,
+        max_length=255,
+    )
     cd_prestador: int
     cd_convenio: int
     tp_atendimento: TipoAtendimento
@@ -1516,6 +1520,7 @@ class ConciliacoesSemRecebimentoList(BaseModel):
 
 
 class ItemFollowUpGlosaPublic(BaseModel):
+    demonstrativo_id_registro: str | None = None
     cd_paciente: int
     nm_paciente: str | None = None
     cd_remessa: int
