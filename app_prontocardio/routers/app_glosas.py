@@ -936,14 +936,41 @@ def registrar_glosa(
         **payload.model_dump(exclude=REGISTRO_GLOSA_PAYLOAD_EXCLUDE),
         sn_ativo='true',
     )
+    registros_item = _registros_do_mesmo_item(
+        registro_glosa,
+        session,
+        payload.demonstrativo_id_registro,
+    )
     _validar_limites_tratativas_item(
         None,
         payload,
-        _registros_do_mesmo_item(registro_glosa, session),
+        registros_item,
     )
     registro_glosa.data_criacao = _data_criacao_sao_paulo()
 
     session.add(registro_glosa)
+    session.flush()
+    if payload.demonstrativo_id_registro:
+        vinculo = session.get(
+            RegistroGlosaDemonstrativoIpm,
+            payload.demonstrativo_id_registro,
+        )
+        registro_origem = next(
+            (
+                registro
+                for registro in registros_item
+                if vinculo is not None
+                and registro.id == vinculo.registro_glosa_id
+            ),
+            None,
+        )
+        if registro_origem is not None:
+            _vincular_tratativa_ao_demonstrativo(
+                session,
+                registro_origem,
+                registro_glosa,
+                payload.demonstrativo_id_registro,
+            )
     session.commit()
     session.refresh(registro_glosa)
 

@@ -639,6 +639,68 @@ def test_tratativas_de_linhas_duplicadas_nao_somam_quantidades(
     assert linha_91.registro_glosa_id == tratativa_91.id
 
 
+def test_nova_tratativa_isola_e_migra_linha_do_demonstrativo(
+    session,
+    usuario_teste,
+):
+    origem = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                valor='394.52',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    origem.processo_recurso = None
+    origem.qtd_recursado = None
+    origem.valor_recursado = None
+    origem.dt_recurso = None
+    outra_tratativa = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='303.48',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    linha = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-pendente-91-04',
+        registro_glosa_id=origem.id,
+        criterio_correspondencia='teste',
+    )
+    linha.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add(linha)
+    session.commit()
+
+    tratativa = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='394.52',
+                valor_glosado='91.04',
+                demonstrativo_id_registro=linha.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    session.refresh(linha)
+    assert outra_tratativa.valor_recursado == Decimal('303.48')
+    assert tratativa.valor_recursado == Decimal('91.04')
+    assert linha.registro_glosa_id == tratativa.id
+
+
 def test_salva_descricoes_agrupadas_separadas_por_tipo(
     session,
     usuario_teste,
