@@ -1544,6 +1544,7 @@ class ItemFollowUpGlosaPublic(BaseModel):
     cd_tuss: str | None = None
     codigo_servico: str
     numero_protocolo: str | None = None
+    numero_lote: str | None = None
     codigo_beneficiario: str | None = None
     referencia: date | None = None
     valor_protocolo: Decimal | None = None

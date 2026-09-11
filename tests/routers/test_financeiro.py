@@ -36,6 +36,7 @@ from app_prontocardio.schema import (
     ConciliacaoRemessaPublic,
     ConciliacoesGerenciamentoList,
     ConciliacoesSemRecebimentoList,
+    ItemFollowUpGlosaPublic,
     RecebimentoRemessaCreate,
     RecebimentoRemessaUpdate,
     RegistroGlosaCreate,
@@ -87,6 +88,29 @@ def test_schema_do_card_preserva_indicacao_de_recurso():
     )
 
     assert card.possui_recurso is True
+
+
+def test_schema_do_item_follow_up_preserva_numero_lote_do_demonstrativo():
+    item = financeiro._item_demonstrativo_follow_up(
+        {
+            'id_registro': 'linha-lote-1',
+            'numero_lote': 'LOTE-MAIDA-42',
+            'valor_processado': Decimal('100.00'),
+            'valor_glosa': Decimal('10.00'),
+        },
+        {
+            'cd_remessa': 987,
+            'cd_reg': 456,
+            'cd_lancamento': 3,
+            'dt_lancamento': datetime(2026, 7, 2, 9, 30),
+        },
+        None,
+        None,
+    )
+
+    serializado = ItemFollowUpGlosaPublic.model_validate(item).model_dump()
+
+    assert serializado['numero_lote'] == 'LOTE-MAIDA-42'
 
 
 def test_protocolo_cogestao_completa_card_sem_demonstrativo(monkeypatch):
