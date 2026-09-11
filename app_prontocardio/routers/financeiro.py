@@ -5835,6 +5835,55 @@ def _distribuir_tratativas_itens_demonstrativo(
         )
     for grupo in grupos.values():
         registros = grupo[0][1]
+        registros_pendentes = [
+            registro
+            for registro in registros
+            if registro.status_tratativa == 'pendente'
+        ]
+        registros_tratados = [
+            registro
+            for registro in registros
+            if registro.sn_ativo == 'true'
+            and registro.status_tratativa != 'pendente'
+        ]
+        atribuicoes_exatas: dict[int, list[RegistroGlosa]] = defaultdict(list)
+        indices_atribuidos: set[int] = set()
+        for registro in registros_tratados:
+            candidatos = [
+                indice
+                for indice, (item, _registros_item) in enumerate(grupo)
+                if indice not in indices_atribuidos
+                and _money(item['valor_glosa'])
+                == _money(registro.valor_recursado)
+            ]
+            if len(candidatos) == 1:
+                indice = candidatos[0]
+                atribuicoes_exatas[indice].append(registro)
+                indices_atribuidos.add(indice)
+        if registros_tratados and sum(
+            len(registros) for registros in atribuicoes_exatas.values()
+        ) == len(registros_tratados):
+            for indice, (item, _registros_item) in enumerate(grupo):
+                registros_item = [
+                    *registros_pendentes,
+                    *atribuicoes_exatas.get(indice, []),
+                ]
+                valor_item = min(
+                    _money(item['valor_glosa']),
+                    sum(
+                        (
+                            _money(registro.valor_recursado)
+                            for registro in atribuicoes_exatas.get(indice, [])
+                        ),
+                        Decimal('0.00'),
+                    ),
+                )
+                _aplicar_tratativas_item_demonstrativo(
+                    item,
+                    registros_item,
+                    valor_tratado=valor_item,
+                )
+            continue
         valor_tratado_grupo = sum(
             (
                 _money(registro.valor_recursado)

@@ -786,6 +786,39 @@ def test_distribui_recurso_parcial_sem_duplicar_valor_tratado():
     ) == Decimal('200.00')
 
 
+def test_atribui_recurso_exato_apenas_a_linha_com_mesma_glosa():
+    pendente = SimpleNamespace(
+        id=1,
+        sn_ativo='true',
+        status_tratativa='pendente',
+        valor_recursado=None,
+    )
+    recurso = SimpleNamespace(
+        id=2,
+        sn_ativo='true',
+        status_tratativa='recurso',
+        valor_recursado=Decimal('303.48'),
+    )
+    registros = [pendente, recurso]
+    itens = [
+        ({'valor_glosa': Decimal('303.48')}, registros),
+        ({'valor_glosa': Decimal('91.04')}, registros),
+    ]
+
+    financeiro._distribuir_tratativas_itens_demonstrativo(itens)
+
+    assert [item['valor_total_tratado'] for item, _ in itens] == [
+        Decimal('303.48'),
+        Decimal('0.00'),
+    ]
+    assert itens[0][0]['registro_recusa'] is recurso
+    assert itens[1][0]['registro_recusa'] is None
+    assert all(
+        item['valor_total_tratado'] <= item['valor_glosa']
+        for item, _ in itens
+    )
+
+
 def test_tratativa_conciliada_participa_do_detalhamento_demonstrativo(
     session,
     usuario_teste,
