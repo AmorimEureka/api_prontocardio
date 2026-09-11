@@ -129,11 +129,11 @@ def test_pdf_exibe_total_ao_final_da_coluna_valor_recurso(monkeypatch):
     gerar_pdf_recurso_glosa(_card_recurso())
 
     linha_total = tabelas[-1][-1]
-    assert linha_total[11].getPlainText() == 'TOTAL'
-    assert linha_total[12].getPlainText() == 'R$ 520,14'
+    assert linha_total[10].getPlainText() == 'TOTAL'
+    assert linha_total[11].getPlainText() == 'R$ 520,14'
 
 
-def test_pdf_exibe_coluna_de_lote_sem_torna_la_obrigatoria(monkeypatch):
+def test_pdf_ipm_exibe_layout_com_remessa_sem_lote(monkeypatch):
     tabelas = []
     tabela_original = pdf_recurso_glosa.Table
 
@@ -146,8 +146,43 @@ def test_pdf_exibe_coluna_de_lote_sem_torna_la_obrigatoria(monkeypatch):
     gerar_pdf_recurso_glosa(card)
 
     tabela_itens = tabelas[-1]
-    assert tabela_itens[0][2].getPlainText() == 'LOTE'
-    assert tabela_itens[1][2].getPlainText() == 'LOTE-MAIDA-42'
+    assert [celula.getPlainText() for celula in tabela_itens[0]][:4] == [
+        'PROCESSOINICIAL', 'REMESSA', 'PACIENTE', 'ATEND.ALTA'
+    ]
+    assert tabela_itens[1][1].getPlainText() == '5519206'
+    assert all(
+        celula.getPlainText() != 'LOTE'
+        for celula in tabela_itens[0]
+    )
+
+
+def test_pdf_issec_exibe_data_lote_maida_e_data_pagamento(monkeypatch):
+    tabelas = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        tabelas.append(dados)
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+    card = _card_recurso()
+    card['convenio'] = 'ISSEC'
+    registro = card['pacientes'][0]['itens'][0]['registro_recusa']
+    registro['dt_pagamento'] = '2026-08-25'
+    gerar_pdf_recurso_glosa(card)
+
+    assert 'ISSEC' in tabelas[0][0][0].getPlainText()
+    assert tabelas[1][0][2].getPlainText() == 'DATA DO PAGAMENTO'
+    assert tabelas[1][1][2].getPlainText() == '25/08/2026'
+    tabela_itens = tabelas[-1]
+    assert [celula.getPlainText() for celula in tabela_itens[0]][:4] == [
+        'PROCESSO', 'PACIENTE', 'DATA', 'LOTE MAIDA'
+    ]
+    assert tabela_itens[1][3].getPlainText() == 'LOTE-MAIDA-42'
+
+
+def test_lote_continua_opcional_na_montagem_das_linhas():
+    card = _card_recurso()
 
     card['pacientes'][0]['itens'][0]['registro_recusa']['numero_lote'] = None
     linhas = montar_linhas_recurso_glosa(card)
