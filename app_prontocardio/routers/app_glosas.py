@@ -932,6 +932,32 @@ def registrar_glosa(
     usuario_atual: ValidaUsuarioAtual,
     session: SessionPostgres,
 ):
+    id_demonstrativo = str(
+        payload.demonstrativo_id_registro or ''
+    ).strip()
+    if id_demonstrativo:
+        vinculo_existente = session.get(
+            RegistroGlosaDemonstrativoIpm,
+            id_demonstrativo,
+        )
+        registro_existente = (
+            session.get(RegistroGlosa, vinculo_existente.registro_glosa_id)
+            if vinculo_existente is not None
+            else None
+        )
+        if (
+            registro_existente is not None
+            and registro_existente.sn_ativo == 'true'
+            and registro_existente.status_tratativa != 'pendente'
+            and registro_existente.sn_glosado == payload.sn_glosado
+        ):
+            return editar_glosa(
+                registro_existente.id,
+                payload,
+                usuario_atual,
+                session,
+            )
+
     registro_glosa = RegistroGlosa(
         **payload.model_dump(exclude=REGISTRO_GLOSA_PAYLOAD_EXCLUDE),
         sn_ativo='true',

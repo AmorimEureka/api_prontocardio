@@ -701,6 +701,52 @@ def test_nova_tratativa_isola_e_migra_linha_do_demonstrativo(
     assert linha.registro_glosa_id == tratativa.id
 
 
+def test_post_repetido_da_mesma_linha_atualiza_sem_somar_quantidade(
+    session,
+    usuario_teste,
+):
+    existente = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='303.48',
+                valor_glosado='303.48',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    linha = RegistroGlosaDemonstrativoIpm(
+        id_registro='linha-ja-tratada-303-48',
+        registro_glosa_id=existente.id,
+        criterio_correspondencia='teste',
+    )
+    linha.data_importacao = datetime(2026, 6, 10, 10, 0)
+    session.add(linha)
+    session.commit()
+
+    atualizado = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                cd_lancamento=51,
+                qtd_registro='1',
+                qtd_glosada='1',
+                valor='303.48',
+                valor_glosado='303.48',
+                descricao_glosa='descricao atualizada',
+                demonstrativo_id_registro=linha.id_registro,
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    assert atualizado.id == existente.id
+    assert atualizado.descricao_glosa == 'descricao atualizada'
+
+
 def test_salva_descricoes_agrupadas_separadas_por_tipo(
     session,
     usuario_teste,
