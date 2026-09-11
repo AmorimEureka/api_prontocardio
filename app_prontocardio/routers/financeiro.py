@@ -5982,6 +5982,7 @@ def _resumo_tratativas_cogestao_remessa(
     tratativas_por_item: dict[tuple, list[RegistroGlosa]],
     numero_processo: str,
     codigo_remessa: int,
+    valor_glosado: Decimal | None = None,
 ) -> tuple[Decimal, bool]:
     chave_processo = numero_processo.strip().casefold()
     registros = [
@@ -5999,6 +6000,11 @@ def _resumo_tratativas_cogestao_remessa(
         ),
         Decimal('0.00'),
     )
+    if valor_glosado is not None:
+        valor_tratado = min(
+            max(valor_tratado, Decimal('0.00')),
+            _money(valor_glosado),
+        )
     possui_recurso = any(
         registro.status_tratativa == 'recurso' for registro in registros
     )
@@ -7398,6 +7404,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
                 tratativas_cogestao,
                 numero_processo,
                 codigo_remessa,
+                _money(row['valor_glosado_protocolo']),
             )
         )
         pacientes_demonstrativo = []
@@ -7868,7 +7875,13 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
         str(paciente or '').strip(),
         cd_atendimento,
     ))
-    detalhamento_demonstrativo = incluir_detalhes and consulta_direcionada
+    # Ao filtrar um processo, os totais dos cards precisam vir das mesmas
+    # linhas analíticas exibidas ao expandir a remessa. O resumo histórico de
+    # tratativas não é suficiente para distribuir registros antigos entre
+    # linhas duplicadas do demonstrativo.
+    detalhamento_demonstrativo = consulta_direcionada and (
+        incluir_detalhes or bool(str(processo_original or '').strip())
+    )
     # A listagem resumida não pode varrer e bloquear todas as conciliações.
     # A complementação legada é feita somente ao abrir uma remessa específica.
     if incluir_detalhes and conciliacao_remessa_id is not None:

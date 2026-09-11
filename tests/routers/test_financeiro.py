@@ -412,6 +412,30 @@ def test_resumo_da_cogestao_nao_confunde_acato_com_recurso():
     assert possui_recurso is False
 
 
+def test_resumo_da_cogestao_limita_tratado_ao_valor_glosado():
+    tratativas = {
+        ('p239088/2026', 18358, 1, 2, 3): [
+            SimpleNamespace(
+                sn_ativo='true',
+                status_tratativa='recurso',
+                valor_recursado=Decimal('4062.11'),
+            )
+        ]
+    }
+
+    valor, possui_recurso = (
+        financeiro._resumo_tratativas_cogestao_remessa(
+            tratativas,
+            'P239088/2026',
+            18358,
+            Decimal('3223.12'),
+        )
+    )
+
+    assert valor == Decimal('3223.12')
+    assert possui_recurso is True
+
+
 def test_marca_recurso_no_card_resumido_sem_carregar_pacientes():
     class Resultado:
         @staticmethod
@@ -2254,10 +2278,16 @@ def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
             }
         ],
     }
+    parametros_cogestao = {}
+
+    def cards_cogestao(*_args, **kwargs):
+        parametros_cogestao.update(kwargs)
+        return [card_ipm]
+
     monkeypatch.setattr(
         financeiro,
         '_cards_cogestao_follow_up',
-        lambda *_args, **_kwargs: [card_ipm],
+        cards_cogestao,
     )
 
     follow_up = financeiro.consultar_follow_up_glosas(
@@ -2285,6 +2315,7 @@ def test_follow_up_prioriza_ipm_sobre_conciliacao_legada(
     assert follow_up['valor_total_glosado'] == Decimal('55.00')
     assert follow_up['valor_total_pendente'] == Decimal('45.00')
     assert follow_up['valor_total_tratado'] == Decimal('10.00')
+    assert parametros_cogestao['incluir_detalhes'] is True
 
 
 def test_follow_up_exibe_registro_analitico_sem_conciliacao_ou_relatorio(
