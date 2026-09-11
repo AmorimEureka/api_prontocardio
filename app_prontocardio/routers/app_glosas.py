@@ -740,6 +740,7 @@ def _cards_recursos_triagem(
             registro.cd_remessa,
             {
                 'cd_remessa': registro.cd_remessa,
+                'convenio': registro.convenio,
                 'processo': {
                     'numero_processo': (
                         registro.processo_controle_fatura_gab
@@ -765,6 +766,7 @@ def _cards_recursos_triagem(
         paciente['itens'].append(
             {
                 'nm_paciente': registro.nm_paciente,
+                'nm_convenio': registro.convenio,
                 'numero_lote': registro.numero_lote,
                 'dt_alta': registro.data_alta,
                 'dt_atendimento': registro.data_atendimento,
