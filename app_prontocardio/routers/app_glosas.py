@@ -5,7 +5,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import String, cast, false, func, or_, select
+from sqlalchemy import String, and_, cast, false, func, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -396,6 +396,25 @@ def _desfazer_tratativa_glosa_conciliada(
 
 def _aplicar_filtros_conta_atendimento(query, filtros: dict):
     for chave, valor in filtros.items():
+        if chave == 'identidades_processo':
+            if not valor:
+                query = query.where(false())
+                continue
+            query = query.where(or_(*(
+                and_(
+                    ModelContaAtendimento.cd_remessa == cd_remessa,
+                    ModelContaAtendimento.cd_atendimento == cd_atendimento,
+                    ModelContaAtendimento.cd_reg == conta,
+                    (
+                        ModelContaAtendimento.cd_lancamento.is_(None)
+                        if cd_lancamento is None
+                        else ModelContaAtendimento.cd_lancamento
+                        == cd_lancamento
+                    ),
+                )
+                for cd_remessa, cd_atendimento, conta, cd_lancamento in valor
+            )))
+            continue
         if hasattr(ModelContaAtendimento, chave):
             coluna = getattr(ModelContaAtendimento, chave)
             if chave == 'tp_atendimento':
@@ -423,6 +442,33 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
                 query = query.where(coluna == valor)
 
     return query
+
+
+def _resolver_filtro_processo(
+    session: Session,
+    filtros: dict,
+) -> dict:
+    filtros_resolvidos = dict(filtros)
+    processo = str(filtros_resolvidos.pop('processo', '') or '').strip()
+    if not processo:
+        return filtros_resolvidos
+    identidades = tuple(session.execute(
+        select(
+            RegistroGlosa.cd_remessa,
+            RegistroGlosa.cd_atendimento,
+            RegistroGlosa.conta,
+            RegistroGlosa.cd_lancamento,
+        ).where(
+            func.lower(
+                func.trim(RegistroGlosa.processo_controle_fatura_gab)
+            ) == processo.casefold(),
+            RegistroGlosa.origem_registro == 'triagem',
+            RegistroGlosa.sn_ativo == 'true',
+            RegistroGlosa.dt_recurso.is_not(None),
+        ).distinct()
+    ).all())
+    filtros_resolvidos['identidades_processo'] = identidades
+    return filtros_resolvidos
 
 
 def _resolver_filtro_nome_paciente(
@@ -498,6 +544,7 @@ def conta_atendimento(
                 ),
             )
 
+        filtros = _resolver_filtro_processo(session_postgres, filtros)
         filtros = _resolver_filtro_nome_paciente(session, filtros)
 
         codigos_desabilitados = tuple(
@@ -636,6 +683,7 @@ def consultar_glosas_registradas(
     )
 
     field_mapping = {
+        'processo': RegistroGlosa.processo_controle_fatura_gab,
         'cd_remessa': RegistroGlosa.cd_remessa,
         'cd_atendimento': RegistroGlosa.cd_atendimento,
         'cd_reg': RegistroGlosa.conta,
@@ -649,6 +697,11 @@ def consultar_glosas_registradas(
     for chave, valor in filtros.items():
         coluna = field_mapping.get(chave)
         if coluna is not None:
+            if chave == 'processo' and isinstance(valor, str):
+                query = query.where(
+                    func.lower(func.trim(coluna)) == valor.strip().casefold()
+                )
+                continue
             if chave == 'tp_atendimento':
                 if isinstance(valor, TipoAtendimento):
                     query = query.where(coluna == valor.value)
