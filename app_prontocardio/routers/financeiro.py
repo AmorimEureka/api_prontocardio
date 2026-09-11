@@ -4452,6 +4452,20 @@ def _item_follow_up_glosa(
         'cd_pro_fat': registro.procedimento,
         'cd_tuss': registro.cd_tuss,
         'codigo_servico': registro.cd_tuss or registro.procedimento,
+        'numero_lote': (
+            (
+                registro_recusa.numero_lote
+                if registro_recusa is not None
+                else None
+            )
+            or (
+                registro_acato.numero_lote
+                if registro_acato is not None
+                else None
+            )
+            or origem.get('numero_lote')
+            or registro.numero_lote
+        ),
         'cd_gru_pro': registro.cd_gru_pro,
         'ds_gru_pro': registro.ds_gru_pro,
         'cd_gru_fat': registro.cd_gru_fat,
