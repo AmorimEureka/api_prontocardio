@@ -288,6 +288,7 @@ def test_pdf_da_triagem_usa_mesmo_gerador_e_inclui_lote(
     registro = registrar_glosa(
         RegistroGlosaCreate(
             **registro_glosa_payload(
+                convenio='ISSEC',
                 numero_lote='LOTE-MAIDA-42',
                 processo_controle_fatura_gab='PROC-TRIAGEM/2026',
             )
@@ -314,6 +315,8 @@ def test_pdf_da_triagem_usa_mesmo_gerador_e_inclui_lote(
     )
 
     item = cards_recebidos[0]['pacientes'][0]['itens'][0]
+    assert cards_recebidos[0]['convenio'] == 'ISSEC'
+    assert item['nm_convenio'] == 'ISSEC'
     assert item['registro_recusa'].id == registro.id
     assert item['numero_lote'] == 'LOTE-MAIDA-42'
     assert response.body == b'%PDF-1.7\ntriagem'
