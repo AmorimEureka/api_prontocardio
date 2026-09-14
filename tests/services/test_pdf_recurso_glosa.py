@@ -181,6 +181,33 @@ def test_pdf_issec_exibe_data_lote_maida_e_data_pagamento(monkeypatch):
     assert tabela_itens[1][3].getPlainText() == 'LOTE-MAIDA-42'
 
 
+@pytest.mark.parametrize('numero_recurso', ['', '2600099999', 'XPTO & 123'])
+def test_titulo_issec_usa_processo_recurso_e_preserva_processo_original(
+    monkeypatch, numero_recurso
+):
+    tabelas = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        tabelas.append(dados)
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+    card = _card_recurso()
+    card['convenio'] = 'ISSEC'
+    card['processo_recurso'] = numero_recurso
+    gerar_pdf_recurso_glosa(card)
+
+    assert (
+        tabelas[0][0][0].getPlainText().rstrip()
+        == (
+            'RECURSO DE GLOSA ISSEC 2026/ '
+            f'PROCESSO DE RECURSO: {numero_recurso}'
+        ).rstrip()
+    )
+    assert tabelas[-1][1][0].getPlainText() == 'P193251/2026'
+
+
 def test_lote_continua_opcional_na_montagem_das_linhas():
     card = _card_recurso()
 
