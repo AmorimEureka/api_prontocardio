@@ -1643,6 +1643,22 @@ class FollowUpGlosasList(BaseModel):
     offset: int
 
 
+class ProcessoRecursosPublic(BaseModel):
+    processo_original: str
+    processo_recurso: str | None = None
+    cards: list[CardFollowUpGlosaPublic]
+    detalhes_carregados: bool
+
+
+class ProcessosRecursosList(BaseModel):
+    processos: list[ProcessoRecursosPublic]
+    total: int
+    quantidade_com_processo_recurso: int
+    quantidade_sem_processo_recurso: int
+    limit: int
+    offset: int
+
+
 class ProcessoRecursoGlosaInput(BaseModel):
     processo_original: str = Field(min_length=1, max_length=100)
     processo_recurso: str = Field(min_length=1, max_length=100)

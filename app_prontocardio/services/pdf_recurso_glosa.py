@@ -16,6 +16,9 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from sqlalchemy import select
+
+from app_prontocardio.models import ProcessoRecursoGlosa
 
 CENTAVOS = Decimal('0.01')
 FUNDO_CABECALHO = colors.HexColor('#ffff99')
@@ -24,6 +27,38 @@ NOME_PRESTADOR = 'HOSPITAL PRONTOCARDIO'
 CONTATO_FATURAMENTO = (
     'Maria Letícia (85) 3466. 3011 | faturamento.pronto@gmail.com'
 )
+
+
+def preencher_processo_recurso_issec(session, cards: list[dict]) -> None:
+    """Usa o cadastro da tela Recursos, inclusive para PDFs da Triagem."""
+    cards_issec = [
+        card
+        for card in cards
+        if 'ISSEC' in str(card.get('convenio') or '').upper()
+    ]
+    chaves = {
+        str((card.get('processo') or {}).get('numero_processo') or '')
+        .strip()
+        .casefold()
+        for card in cards_issec
+    }
+    if not chaves:
+        return
+    cadastros = {
+        cadastro.processo_original_normalizado: cadastro.processo_recurso
+        for cadastro in session.scalars(
+            select(ProcessoRecursoGlosa).where(
+                ProcessoRecursoGlosa.processo_original_normalizado.in_(chaves)
+            )
+        )
+    }
+    for card in cards_issec:
+        chave = (
+            str((card.get('processo') or {}).get('numero_processo') or '')
+            .strip()
+            .casefold()
+        )
+        card['processo_recurso'] = cadastros.get(chave) or ''
 
 
 def _valor(objeto, campo: str, padrao=None):
@@ -203,7 +238,9 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
     data_recurso = max(datas_recurso) if datas_recurso else date.today()
     convenio = str(linhas[0].get('convenio') or 'IPM').strip().upper()
     is_issec = 'ISSEC' in convenio
-    processo = str(linhas[0]['processo_inicial'] or '-').strip()
+    processo_recurso = str(
+        cards_processo[0].get('processo_recurso') or ''
+    ).strip()
     datas_pagamento = [
         linha['data_pagamento']
         for linha in linhas
@@ -253,7 +290,7 @@ def gerar_pdf_recurso_glosa(cards: dict | list[dict]) -> bytes:
             _paragrafo(
                 (
                     f'RECURSO DE GLOSA ISSEC {data_recurso.year}/ '
-                    f'PROCESSO: {processo}'
+                    f'PROCESSO DE RECURSO: {processo_recurso}'
                     if is_issec
                     else f'RECURSO DE GLOSA IPM {data_recurso.year}'
                 ),
