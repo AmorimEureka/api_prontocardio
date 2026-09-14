@@ -1,9 +1,14 @@
 from http import HTTPStatus
 from types import SimpleNamespace
 
+import pytest
+from sqlalchemy import select
+
 from app_prontocardio.database import get_session_oracle
+from app_prontocardio.models import ProcessoRecursoGlosa
 from app_prontocardio.routers import app_glosas, financeiro
 from app_prontocardio.schema import RegistroGlosaCreate
+from app_prontocardio.services import pdf_recurso_glosa
 from app_prontocardio.services.pdf_recurso_glosa import (
     preencher_processo_recurso_issec,
 )
@@ -113,3 +118,68 @@ def test_pdf_issec_consulta_cadastro_e_deixa_vazio_sem_cadastro():
     card['processo']['numero_processo'] = 'outro'
     preencher_processo_recurso_issec(Sessao(), [card])
     assert card['processo_recurso'] == ''
+
+
+@pytest.mark.parametrize('numero', ['L13L13L13', '', None])
+def test_editar_modal_atualiza_cadastro_e_pdf(
+    session, usuario_teste, numero, monkeypatch
+):
+    registro = _registro(session, usuario_teste)
+    payload = RegistroGlosaCreate(
+        **registro_glosa_payload(
+            convenio='ISSEC',
+            nm_paciente='Paciente de teste',
+            processo_controle_fatura_gab='2600027503',
+            motivo_glosa='1008',
+            cd_lancamento=1,
+            processo_recurso=numero,
+        )
+    )
+    atualizado = app_glosas.editar_glosa(
+        registro.id, payload, usuario_teste, session
+    )
+    cadastro = session.scalar(select(ProcessoRecursoGlosa))
+    if numero:
+        assert cadastro.processo_recurso == numero
+    else:
+        assert cadastro is None
+    card = _card()
+    preencher_processo_recurso_issec(session, [card])
+    assert card['processo_recurso'] == (numero or '')
+    assert atualizado.processo_recurso == (numero or None)
+    titulos = []
+    tabela_original = pdf_recurso_glosa.Table
+
+    def registrar_tabela(dados, *args, **kwargs):
+        if len(dados) == 1:
+            titulos.append(dados[0][0].getPlainText())
+        return tabela_original(dados, *args, **kwargs)
+
+    monkeypatch.setattr(pdf_recurso_glosa, 'Table', registrar_tabela)
+    response = app_glosas.gerar_pdf_recurso_triagem(
+        usuario_teste, session, '2600027503'
+    )
+    assert response.body.startswith(b'%PDF-')
+    assert titulos[0].rstrip().endswith(
+        f'PROCESSO DE RECURSO: {numero or ""}'.rstrip()
+    )
+
+
+def test_modal_de_outro_convenio_nao_altera_cadastro_issec(
+    session, usuario_teste
+):
+    _registro(session, usuario_teste)
+    app_glosas.registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                convenio='IPM',
+                conta=99,
+                processo_recurso='OUTRO',
+                processo_controle_fatura_gab='2600027503',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+    cadastro = session.scalar(select(ProcessoRecursoGlosa))
+    assert cadastro.processo_recurso == 'ugkgkg'

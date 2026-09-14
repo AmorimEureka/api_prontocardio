@@ -44,6 +44,9 @@ from app_prontocardio.services.pdf_recurso_glosa import (
     gerar_pdf_recurso_glosa,
     preencher_processo_recurso_issec,
 )
+from app_prontocardio.services.processo_recurso import (
+    sincronizar_processo_recurso_issec,
+)
 
 router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
 
@@ -1053,6 +1056,7 @@ def registrar_glosa(
                 registro_glosa,
                 payload.demonstrativo_id_registro,
             )
+    sincronizar_processo_recurso_issec(session, payload, usuario_atual.id)
     session.commit()
     session.refresh(registro_glosa)
 
@@ -1215,6 +1219,7 @@ def editar_glosa(
             conciliacao_remessa.valor_glosado,
         )
 
+    sincronizar_processo_recurso_issec(session, payload, usuario_atual.id)
     session.commit()
     session.refresh(registro_glosa)
 

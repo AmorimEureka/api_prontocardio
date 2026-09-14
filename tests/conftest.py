@@ -1,7 +1,7 @@
 import factory
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import BigInteger, Integer, create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -27,6 +27,8 @@ def session():
     # Remove 'SCHEMA' do postgres para usar no sqlite
     for table in table_registry.metadata.tables.values():
         table.schema = None
+        if table.name == 'processos_recurso_glosa':
+            table.c.id.type = BigInteger().with_variant(Integer, 'sqlite')
 
     table_registry.metadata.create_all(engine)
 
