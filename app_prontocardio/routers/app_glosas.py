@@ -42,6 +42,7 @@ from app_prontocardio.schema import (
 from app_prontocardio.security import valida_token_usuario_atual
 from app_prontocardio.services.pdf_recurso_glosa import (
     gerar_pdf_recurso_glosa,
+    preencher_processo_recurso_issec,
 )
 
 router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
@@ -827,9 +828,9 @@ def gerar_pdf_recurso_triagem(
             select(Tiss).where(Tiss.codigo_termo.in_(codigos_tiss))
         )
     } if codigos_tiss else {}
-    conteudo = gerar_pdf_recurso_glosa(
-        _cards_recursos_triagem(registros, descricoes_tiss)
-    )
+    cards = _cards_recursos_triagem(registros, descricoes_tiss)
+    preencher_processo_recurso_issec(session, cards)
+    conteudo = gerar_pdf_recurso_glosa(cards)
     processo_arquivo = ''.join(
         caractere if caractere.isalnum() else '-'
         for caractere in processo_normalizado
