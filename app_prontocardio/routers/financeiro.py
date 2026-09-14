@@ -68,6 +68,7 @@ from app_prontocardio.schema import (
     NfsesSaldoRemessaList,
     ProcessoRecursoGlosaInput,
     ProcessoRecursoGlosaPublic,
+    ProcessosRecursosList,
     RecebimentoRemessaCreate,
     RecebimentoRemessaPublic,
     RecebimentoRemessaUpdate,
@@ -82,6 +83,7 @@ from app_prontocardio.services.importacao_glosas_ipm import (
 )
 from app_prontocardio.services.pdf_recurso_glosa import (
     gerar_pdf_recurso_glosa,
+    preencher_processo_recurso_issec,
 )
 from app_prontocardio.services.remessas import (
     sincronizar_totais_remessas_financeiras,
@@ -8949,9 +8951,53 @@ def _detalhar_cards_processo_recurso(
     return resultado
 
 
+def _completar_itens_recursos_triagem(
+    session: Session,
+    cards: list[dict],
+    processo_original: str,
+    paciente: str | None,
+) -> None:
+    """Completa cards sem itens usando os registros já tratados na Triagem."""
+    cards_sem_itens = [
+        card
+        for card in cards
+        if not any(
+            paciente_card.get('itens')
+            for paciente_card in card.get('pacientes') or []
+        )
+    ]
+    if not cards_sem_itens:
+        return
+    filtros = [
+        func.lower(func.trim(RegistroGlosa.processo_controle_fatura_gab))
+        == _chave_processo_recurso(processo_original),
+        RegistroGlosa.origem_registro == 'triagem',
+        RegistroGlosa.sn_ativo == 'true',
+        RegistroGlosa.cd_remessa.in_({
+            card['cd_remessa'] for card in cards_sem_itens
+        }),
+    ]
+    if termo := str(paciente or '').strip():
+        filtros.append(RegistroGlosa.nm_paciente.ilike(f'%{termo}%'))
+    registros = list(
+        session.scalars(
+            select(RegistroGlosa).where(*filtros).order_by(RegistroGlosa.id)
+        )
+    )
+    por_remessa = defaultdict(list)
+    for registro in registros:
+        por_remessa[registro.cd_remessa].append(registro)
+    descricoes = _descricoes_tiss(session, registros)
+    for card in cards_sem_itens:
+        card['pacientes'] = _pacientes_follow_up_glosa(
+            por_remessa[card['cd_remessa']], {}, descricoes
+        )
+
+
 @router.get(
     '/conciliacao-faturamento/recursos-processos',
     status_code=HTTPStatus.OK,
+    response_model=ProcessosRecursosList,
 )
 def consultar_processos_recurso(  # noqa: PLR0913
     usuario_atual: ValidaUsuarioAtual,
@@ -9072,6 +9118,9 @@ def consultar_processos_recurso(  # noqa: PLR0913
                 grupo['processo_original'],
                 cards_processo,
             )
+            _completar_itens_recursos_triagem(
+                session, cards_processo, grupo['processo_original'], paciente
+            )
         cadastro = cadastros.get(chave)
         processos.append(
             {
@@ -9187,6 +9236,7 @@ def gerar_pdf_recurso_follow_up(  # noqa: PLR0913
             detail='Processo do Follow-Up de Glosas não encontrado.',
         )
     try:
+        preencher_processo_recurso_issec(session, cards_processo)
         conteudo = gerar_pdf_recurso_glosa(cards_processo)
     except ValueError as exc:
         raise HTTPException(
