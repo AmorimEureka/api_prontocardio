@@ -18,6 +18,7 @@ from app_prontocardio.models import (
 from app_prontocardio.routers.app_glosas import (
     _aplicar_filtros_conta_atendimento,
     _executar_conta_atendimento_sem_duplicidade,
+    _resolver_filtro_guia,
     _resolver_filtro_processo,
     consultar_convenios,
     consultar_glosas_registradas,
@@ -134,6 +135,35 @@ def test_filtro_por_guia_aplica_busca_exata_na_view_oracle():
 
     assert 'NR_GUIA' in sql
     assert "NR_GUIA = 'GUIA-ABC'" in sql
+
+
+def test_filtro_guia_restringe_view_aos_atendimentos_da_tabela_guia():
+    session = Mock()
+    session.scalars.return_value = [313840, 313841]
+
+    filtros = _resolver_filtro_guia(session, {'nr_guia': '363150'})
+
+    assert filtros == {
+        'nr_guia': '363150',
+        'cd_atendimento': (313840, 313841),
+    }
+    consulta, parametros = session.scalars.call_args.args
+    assert 'FROM dbamv.guia' in str(consulta)
+    assert parametros == {'nr_guia': '363150'}
+
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        filtros,
+    )
+    sql = str(
+        query.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'CD_ATENDIMENTO IN (313840, 313841)' in sql
+    assert "NR_GUIA = '363150'" in sql
 
 
 def test_filtro_processo_resolve_tratativas_em_identidades_exatas():
