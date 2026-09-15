@@ -500,8 +500,11 @@ def _resolver_filtro_nome_paciente(
 
 def _resolver_filtro_guia(session: Session, filtros: dict) -> dict:
     filtros_resolvidos = dict(filtros)
-    numero_guia = str(filtros_resolvidos.get('nr_guia') or '').strip()
-    if not numero_guia or filtros_resolvidos.get('cd_atendimento') is not None:
+    numero_guia = str(filtros_resolvidos.pop('nr_guia', '') or '').strip()
+    if not numero_guia:
+        return filtros_resolvidos
+    filtros_resolvidos['guia_resolvida'] = numero_guia
+    if filtros_resolvidos.get('cd_atendimento') is not None:
         return filtros_resolvidos
 
     atendimentos = tuple(session.scalars(
@@ -515,6 +518,16 @@ def _resolver_filtro_guia(session: Session, filtros: dict) -> dict:
     ))
     filtros_resolvidos['cd_atendimento'] = atendimentos
     return filtros_resolvidos
+
+
+def _filtrar_linhas_por_guia(rows, numero_guia: str | None):
+    if not numero_guia:
+        return rows
+    return [
+        row
+        for row in rows
+        if str(row.nr_guia or '').strip() == numero_guia
+    ]
 
 
 def _excluir_convenios_desabilitados(query, codigos_desabilitados):
@@ -573,6 +586,7 @@ def conta_atendimento(
         filtros = _resolver_filtro_processo(session_postgres, filtros)
         filtros = _resolver_filtro_guia(session, filtros)
         filtros = _resolver_filtro_nome_paciente(session, filtros)
+        guia_resolvida = filtros.pop('guia_resolvida', None)
 
         codigos_desabilitados = tuple(
             session_postgres.scalars(
@@ -634,6 +648,7 @@ def conta_atendimento(
         )
 
         rows = _executar_conta_atendimento_sem_duplicidade(session, query)
+        rows = _filtrar_linhas_por_guia(rows, guia_resolvida)
 
     except SQLAlchemyError as exc:
         if _is_oracle_connect_timeout(exc):
