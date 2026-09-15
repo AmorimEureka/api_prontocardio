@@ -5,7 +5,7 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import String, and_, cast, false, func, or_, select
+from sqlalchemy import String, and_, cast, false, func, or_, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
@@ -426,7 +426,10 @@ def _aplicar_filtros_conta_atendimento(query, filtros: dict):
                     query = query.where(coluna == valor.value)
                 continue
 
-            if chave == 'cd_paciente' and isinstance(valor, tuple):
+            if chave in {'cd_paciente', 'cd_atendimento'} and isinstance(
+                valor,
+                tuple,
+            ):
                 if not valor:
                     query = query.where(false())
                     continue
@@ -495,6 +498,25 @@ def _resolver_filtro_nome_paciente(
     return filtros_resolvidos
 
 
+def _resolver_filtro_guia(session: Session, filtros: dict) -> dict:
+    filtros_resolvidos = dict(filtros)
+    numero_guia = str(filtros_resolvidos.get('nr_guia') or '').strip()
+    if not numero_guia or filtros_resolvidos.get('cd_atendimento') is not None:
+        return filtros_resolvidos
+
+    atendimentos = tuple(session.scalars(
+        text(
+            'SELECT DISTINCT cd_atendimento '
+            'FROM dbamv.guia '
+            'WHERE nr_guia = :nr_guia '
+            'AND cd_atendimento IS NOT NULL'
+        ),
+        {'nr_guia': numero_guia},
+    ))
+    filtros_resolvidos['cd_atendimento'] = atendimentos
+    return filtros_resolvidos
+
+
 def _excluir_convenios_desabilitados(query, codigos_desabilitados):
     if codigos_desabilitados:
         return query.where(
@@ -549,6 +571,7 @@ def conta_atendimento(
             )
 
         filtros = _resolver_filtro_processo(session_postgres, filtros)
+        filtros = _resolver_filtro_guia(session, filtros)
         filtros = _resolver_filtro_nome_paciente(session, filtros)
 
         codigos_desabilitados = tuple(
