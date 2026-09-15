@@ -121,6 +121,22 @@ def test_conta_atendimento_remove_identidades_repetidas_da_view():
     assert linhas == ['linha-unica']
 
 
+def test_filtro_por_guia_aplica_busca_parcial_na_view_oracle():
+    query = _aplicar_filtros_conta_atendimento(
+        select(ModelContaAtendimento.cd_paciente),
+        {'nr_guia': 'GUIA-ABC'},
+    )
+    sql = str(
+        query.compile(
+            dialect=oracle.dialect(),
+            compile_kwargs={'literal_binds': True},
+        )
+    ).upper()
+
+    assert 'NR_GUIA' in sql
+    assert "LIKE LOWER('%GUIA-ABC%')" in sql
+
+
 def test_filtro_por_nome_busca_primeiro_na_view_de_pacientes():
     session = Mock()
     session.scalars.return_value = [101, 202]
@@ -367,6 +383,38 @@ def test_filtra_glosas_de_convenio_desabilitado(session):
         incluir_inativos=False,
     )
     assert response['glosas'] == []
+
+
+def test_filtra_glosas_registradas_por_guia_parcial(session, usuario_teste):
+    registro_encontrado = registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(guia='GUIA-ABC-123')
+        ),
+        usuario_teste,
+        session,
+    )
+    registrar_glosa(
+        RegistroGlosaCreate(
+            **registro_glosa_payload(
+                conta=333710,
+                guia='OUTRA-GUIA',
+            )
+        ),
+        usuario_teste,
+        session,
+    )
+
+    response = consultar_glosas_registradas(
+        usuario_atual=None,
+        campos_pesquisados=FilterSearch(nr_guia='abc-123'),
+        session=session,
+        tp_atendimento=None,
+        incluir_inativos=False,
+    )
+
+    assert [registro.id for registro in response['glosas']] == [
+        registro_encontrado.id
+    ]
 
 
 def test_convenio_habilitado_por_padrao(session):
