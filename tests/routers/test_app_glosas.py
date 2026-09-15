@@ -18,6 +18,7 @@ from app_prontocardio.models import (
 from app_prontocardio.routers.app_glosas import (
     _aplicar_filtros_conta_atendimento,
     _executar_conta_atendimento_sem_duplicidade,
+    _filtrar_linhas_por_guia,
     _resolver_filtro_guia,
     _resolver_filtro_processo,
     consultar_convenios,
@@ -144,7 +145,7 @@ def test_filtro_guia_restringe_view_aos_atendimentos_da_tabela_guia():
     filtros = _resolver_filtro_guia(session, {'nr_guia': '363150'})
 
     assert filtros == {
-        'nr_guia': '363150',
+        'guia_resolvida': '363150',
         'cd_atendimento': (313840, 313841),
     }
     consulta, parametros = session.scalars.call_args.args
@@ -163,7 +164,17 @@ def test_filtro_guia_restringe_view_aos_atendimentos_da_tabela_guia():
     ).upper()
 
     assert 'CD_ATENDIMENTO IN (313840, 313841)' in sql
-    assert "NR_GUIA = '363150'" in sql
+    assert 'NR_GUIA =' not in sql
+
+
+def test_filtro_guia_descarta_outras_guias_do_mesmo_atendimento():
+    guia_correta = Mock(nr_guia='363150')
+    outra_guia = Mock(nr_guia='999999')
+
+    assert _filtrar_linhas_por_guia(
+        [guia_correta, outra_guia],
+        '363150',
+    ) == [guia_correta]
 
 
 def test_filtro_processo_resolve_tratativas_em_identidades_exatas():
