@@ -52,7 +52,7 @@ router = APIRouter(prefix='/app_glosas', tags=['app_glosas'])
 
 ValidaUsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 SessionPostgres = Annotated[Session, Depends(get_session_postgres)]
-TEXT_FILTER_FIELDS = {'nr_guia', 'nm_paciente', 'nm_convenio', 'descricao'}
+TEXT_FILTER_FIELDS = {'nm_paciente', 'nm_convenio', 'descricao'}
 ORACLE_IN_MAX_VALUES = 1000
 REGISTRO_GLOSA_PAYLOAD_EXCLUDE = {'demonstrativo_id_registro'}
 
@@ -698,7 +698,6 @@ def consultar_glosas_registradas(
         'tp_atendimento': RegistroGlosa.tp_atendimento,
     }
     text_fields = {
-        'nr_guia',
         'nm_convenio',
         'nm_paciente',
         'descricao',
