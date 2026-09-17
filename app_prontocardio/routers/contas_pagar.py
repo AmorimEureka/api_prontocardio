@@ -1,6 +1,6 @@
 # ruff: noqa: E501, PLR0913
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from math import ceil
@@ -120,6 +120,8 @@ def _consultar_oracle(session: Session) -> list[dict]:
         if row['codigo_fornecedor'] is None:
             continue
         vencimento = row['vencimento_mais_antigo']
+        if isinstance(vencimento, datetime):
+            vencimento = vencimento.date()
         resultado.append({
             'codigo_fornecedor': int(row['codigo_fornecedor']),
             'nome_fornecedor': row['nome_fornecedor'] or 'Fornecedor sem nome',
