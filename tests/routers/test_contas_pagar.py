@@ -1,6 +1,6 @@
 # ruff: noqa: PLR2004
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -51,7 +51,7 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
                 'nome_fornecedor': 'Fornecedor crítico',
                 'valor_vencido': Decimal('500000'),
                 'valor_corrente': Decimal('25000'),
-                'vencimento_mais_antigo': date(2026, 6, 9),
+                'vencimento_mais_antigo': datetime(2026, 6, 9, 0, 0),
                 'novos_vencidos_7d': Decimal('12000'),
                 'titulos_vencidos': 4,
                 'titulos_correntes': 2,
@@ -62,6 +62,7 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
     resultado = contas_pagar._consultar_oracle(oracle)
 
     assert resultado[0]['dias_atraso'] == 100
+    assert resultado[0]['vencimento_mais_antigo'] == date(2026, 6, 9)
     assert resultado[0]['valor_vencido'] == Decimal('500000.00')
     assert resultado[0]['titulos_vencidos'] == 4
 
