@@ -108,6 +108,8 @@ def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
         data_pagamento='2026-09-17',
         valor_pago='1250.50',
         banco='Banco Pronto',
+        agencia='0001',
+        numero_conta='12345-6',
         observacao='Pagamento parcial',
     )
     inclusao = FakeSession([[31]])
@@ -118,6 +120,9 @@ def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
 
     assert resposta['id'] == 31
     assert inclusao.executions[0][1]['parcela'] == 99
+    assert inclusao.executions[0][1]['banco'] == 'Banco Pronto'
+    assert inclusao.executions[0][1]['agencia'] == '0001'
+    assert inclusao.executions[0][1]['numero_conta'] == '12345-6'
     assert inclusao.commits == 1
 
     atualizacao = FakeSession([[31]])
