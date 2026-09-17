@@ -13,6 +13,7 @@ from app_prontocardio.routers import (
     app_glosas,
     autenticacao,
     biq,
+    contas_pagar,
     farmacia,
     financeiro,
     institucional,
@@ -50,6 +51,7 @@ app.include_router(livre.router)
 app.include_router(usuarios.router)
 app.include_router(app_glosas.router)
 app.include_router(financeiro.router)
+app.include_router(contas_pagar.router)
 app.include_router(requisicoes.router)
 app.include_router(agendamentos.router)
 app.include_router(biq.router)
