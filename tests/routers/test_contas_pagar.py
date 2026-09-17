@@ -60,6 +60,8 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
                 'numero_documento': 'NF-10',
                 'descricao_conta': 'Medicamentos',
                 'numero_parcela': 1,
+                'data_lancamento': datetime(2026, 5, 20, 0, 0),
+                'data_emissao': datetime(2026, 5, 18, 0, 0),
                 'valor_duplicata': Decimal('500000'),
                 'data_vencimento': datetime(2026, 6, 9, 0, 0),
                 'tipo_quitacao': 'parcialmente pago',
@@ -80,6 +82,8 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
 
     assert resultado[0]['dias_atraso'] == 100
     assert resultado[0]['vencimento_mais_antigo'] == date(2026, 6, 9)
+    assert resultado[0]['titulos'][0]['data_lancamento'] == date(2026, 5, 20)
+    assert resultado[0]['titulos'][0]['data_emissao'] == date(2026, 5, 18)
     assert resultado[0]['valor_total'] == Decimal('500000.00')
     assert resultado[0]['valor_total_honrado'] == Decimal('150000.00')
     assert resultado[0]['valor_total_vencido'] == Decimal('350000.00')
