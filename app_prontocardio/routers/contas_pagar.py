@@ -161,6 +161,8 @@ parcelas AS (
            MAX(v.numero_do_documento) AS numero_documento,
            MAX(v.descricao_da_conta) AS descricao_conta,
            MAX(v.numero_da_parcela) AS numero_parcela,
+           MAX(v.data_de_lancamento) AS data_lancamento,
+           MAX(v.data_de_emissao) AS data_emissao,
            MAX(NVL(v.valor_da_duplicata, 0)) AS valor_duplicata,
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao
@@ -176,6 +178,8 @@ SELECT p.codigo_fornecedor,
        p.numero_documento,
        p.descricao_conta,
        p.numero_parcela,
+       p.data_lancamento,
+       p.data_emissao,
        p.valor_duplicata,
        p.data_vencimento,
        p.tipo_quitacao,
@@ -285,6 +289,8 @@ def _consultar_titulos_oracle(
             'numero_documento': row['numero_documento'],
             'descricao_conta': row['descricao_conta'],
             'numero_parcela': row['numero_parcela'],
+            'data_lancamento': _normalizar_data(row['data_lancamento']),
+            'data_emissao': _normalizar_data(row['data_emissao']),
             'valor_total': _decimal(row['valor_duplicata']),
             'data_vencimento': _normalizar_data(row['data_vencimento']),
             'tipo_quitacao': row['tipo_quitacao'],
@@ -664,6 +670,12 @@ def listar_contas_pagar(
                 **titulo,
                 'data_vencimento': titulo['data_vencimento'].isoformat()
                 if titulo['data_vencimento']
+                else None,
+                'data_lancamento': titulo['data_lancamento'].isoformat()
+                if titulo['data_lancamento']
+                else None,
+                'data_emissao': titulo['data_emissao'].isoformat()
+                if titulo['data_emissao']
                 else None,
                 'valor_total': _serializar_decimal(titulo['valor_total']),
                 'valor_honrado_oracle': _serializar_decimal(
