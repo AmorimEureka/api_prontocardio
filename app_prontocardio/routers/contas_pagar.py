@@ -380,7 +380,16 @@ def _agrupar_fornecedores(
         elif saldo > 0:
             fornecedor['valor_corrente'] += saldo
             fornecedor['titulos_correntes'] += 1
-    return list(fornecedores.values())
+    resultado = list(fornecedores.values())
+    for fornecedor in resultado:
+        fornecedor['titulos'].sort(
+            key=lambda titulo: (
+                -titulo['dias_vencidos'],
+                titulo['data_vencimento'] or date.max,
+                titulo['codigo_parcela'],
+            )
+        )
+    return resultado
 
 
 def _chave_prioridade_fornecedor(item: dict):

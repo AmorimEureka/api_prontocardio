@@ -102,6 +102,43 @@ def test_consulta_oracle_ignora_fornecedor_sem_codigo():
     assert 'codigo_do_fornecedor IS NOT NULL' in oracle.executions[0][0]
 
 
+def test_titulos_do_fornecedor_sao_ordenados_por_maior_atraso(monkeypatch):
+    monkeypatch.setattr(
+        contas_pagar, 'date', SimpleNamespace(
+            today=lambda: date(2026, 9, 17),
+            max=date.max,
+        )
+    )
+    base = {
+        'codigo_fornecedor': 10,
+        'nome_fornecedor': 'Fornecedor crítico',
+        'codigo_contas_pagar': 88,
+        'numero_documento': 'NF-10',
+        'descricao_conta': 'Medicamentos',
+        'numero_parcela': 1,
+        'valor_total': Decimal('100'),
+        'tipo_quitacao': 'previsto',
+        'valor_honrado_oracle': Decimal('0'),
+    }
+    titulos = [
+        {**base, 'codigo_parcela': 1, 'data_vencimento': date(2026, 8, 1)},
+        {**base, 'codigo_parcela': 2, 'data_vencimento': date(2026, 5, 1)},
+        {**base, 'codigo_parcela': 3, 'data_vencimento': date(2026, 7, 1)},
+    ]
+
+    resultado = contas_pagar._agrupar_fornecedores(titulos, {})
+
+    assert [
+        titulo['codigo_parcela'] for titulo in resultado[0]['titulos']
+    ] == [2, 3, 1]
+    assert [
+        titulo['dias_vencidos'] for titulo in resultado[0]['titulos']
+    ] == sorted(
+        [titulo['dias_vencidos'] for titulo in resultado[0]['titulos']],
+        reverse=True,
+    )
+
+
 def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
     usuario = SimpleNamespace(id=7)
     payload = contas_pagar.PagamentoTituloInput(
