@@ -2,8 +2,8 @@
 
 """create accounts payable operational management
 
-Revision ID: 20260917_053
-Revises: 20260910_052
+Revision ID: 20260917_054
+Revises: 20260912_053
 Create Date: 2026-09-17 10:00:00.000000
 """
 
@@ -12,8 +12,8 @@ from typing import Sequence, Union
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '20260917_053'
-down_revision: Union[str, Sequence[str], None] = '20260910_052'
+revision: str = '20260917_054'
+down_revision: Union[str, Sequence[str], None] = '20260912_053'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
