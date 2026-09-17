@@ -50,14 +50,24 @@ class PagamentoTituloInput(BaseModel):
     data_pagamento: date
     valor_pago: Decimal = Field(gt=0, max_digits=15, decimal_places=2)
     banco: str = Field(min_length=1, max_length=150)
+    agencia: str = Field(min_length=1, max_length=30)
+    numero_conta: str = Field(min_length=1, max_length=50)
     observacao: str | None = Field(default=None, max_length=4000)
 
-    @field_validator('banco')
+    @field_validator('banco', 'agencia', 'numero_conta')
     @classmethod
-    def normalizar_banco(cls, value):
+    def normalizar_origem_recurso(cls, value, info):
         value = str(value).strip()
         if not value:
-            raise ValueError('Informe o banco de origem do recurso.')
+            rotulos = {
+                'banco': 'nome do banco',
+                'agencia': 'agência',
+                'numero_conta': 'número da conta',
+            }
+            raise ValueError(
+                f'Informe {rotulos.get(info.field_name, info.field_name)} '
+                'de origem do recurso.'
+            )
         return value
 
     @field_validator('observacao')
@@ -811,9 +821,9 @@ def registrar_pagamento_titulo(
         text("""
         INSERT INTO api_prontocardio.contas_pagar_pagamentos
             (codigo_fornecedor, codigo_parcela, data_pagamento, valor_pago,
-             banco, observacao, usuario_id)
+             banco, agencia, numero_conta, observacao, usuario_id)
         VALUES (:fornecedor, :parcela, :data_pagamento, :valor_pago,
-                :banco, :observacao, :usuario_id)
+                :banco, :agencia, :numero_conta, :observacao, :usuario_id)
         RETURNING id
     """),
         {
@@ -822,6 +832,8 @@ def registrar_pagamento_titulo(
             'data_pagamento': payload.data_pagamento,
             'valor_pago': payload.valor_pago,
             'banco': payload.banco,
+            'agencia': payload.agencia,
+            'numero_conta': payload.numero_conta,
             'observacao': payload.observacao,
             'usuario_id': usuario.id,
         },
@@ -851,6 +863,8 @@ def atualizar_pagamento_titulo(
            SET data_pagamento = :data_pagamento,
                valor_pago = :valor_pago,
                banco = :banco,
+               agencia = :agencia,
+               numero_conta = :numero_conta,
                observacao = :observacao,
                usuario_id = :usuario_id,
                data_atualizacao = timezone('America/Sao_Paulo', now())
@@ -866,6 +880,8 @@ def atualizar_pagamento_titulo(
             'data_pagamento': payload.data_pagamento,
             'valor_pago': payload.valor_pago,
             'banco': payload.banco,
+            'agencia': payload.agencia,
+            'numero_conta': payload.numero_conta,
             'observacao': payload.observacao,
             'usuario_id': usuario.id,
         },
