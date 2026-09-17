@@ -69,6 +69,7 @@ parcelas AS (
            MIN(TO_DATE(v.dt_vencimento, 'DD/MM/YYYY')) AS data_vencimento,
            MAX(v.tipo_de_quitacao) AS tipo_quitacao
       FROM dbamv.HPC_V_CONTAS_A_PAGAR v
+     WHERE v.codigo_do_fornecedor IS NOT NULL
      GROUP BY v.codigo_do_fornecedor, v.codigo_parcela_pk
 ),
 saldos AS (
@@ -116,6 +117,8 @@ def _consultar_oracle(session: Session) -> list[dict]:
     hoje = date.today()
     resultado = []
     for row in rows:
+        if row['codigo_fornecedor'] is None:
+            continue
         vencimento = row['vencimento_mais_antigo']
         resultado.append({
             'codigo_fornecedor': int(row['codigo_fornecedor']),

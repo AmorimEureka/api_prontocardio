@@ -66,6 +66,26 @@ def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
     assert resultado[0]['titulos_vencidos'] == 4
 
 
+def test_consulta_oracle_ignora_fornecedor_sem_codigo():
+    oracle = FakeSession([
+        [
+            {
+                'codigo_fornecedor': None,
+                'nome_fornecedor': 'Fornecedor sem código',
+                'valor_vencido': Decimal('10'),
+                'valor_corrente': Decimal('0'),
+                'vencimento_mais_antigo': None,
+                'novos_vencidos_7d': Decimal('0'),
+                'titulos_vencidos': 1,
+                'titulos_correntes': 0,
+            }
+        ]
+    ])
+
+    assert contas_pagar._consultar_oracle(oracle) == []
+    assert 'codigo_do_fornecedor IS NOT NULL' in oracle.executions[0][0]
+
+
 def test_salvar_tratamento_faz_upsert_com_usuario():
     session = FakeSession([[]])
     payload = contas_pagar.TratamentoInput(
