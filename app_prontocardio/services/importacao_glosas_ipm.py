@@ -79,6 +79,10 @@ class IndicesItensOracle:
         tuple,
         tuple[Mapping, ...],
     ]
+    lancamento_dia_guia_coalesce_servico_quantidade: Mapping[
+        tuple,
+        tuple[Mapping, ...],
+    ]
 
 
 @dataclass(frozen=True)
@@ -136,6 +140,10 @@ def normalizar_data(valor) -> date | None:
 
 def normalizar_dinheiro(valor) -> Decimal:
     return Decimal(valor or 0).quantize(CENTAVOS, ROUND_HALF_UP)
+
+
+def normalizar_quantidade(valor) -> Decimal:
+    return Decimal(valor or 0).normalize()
 
 
 def normalizar_competencia(valor) -> date | None:
@@ -364,6 +372,31 @@ def chave_item_lancamento_dia_coalesce_oracle(linha: Mapping) -> tuple:
     )
 
 
+def chave_item_lancamento_dia_guia_quantidade_demonstrativo(
+    linha: Mapping,
+) -> tuple:
+    return (
+        normalizar_data(linha['data_realizacao']),
+        normalizar_texto(linha['numero_guia_senha']),
+        normalizar_texto(linha['codigo_servico']),
+        normalizar_quantidade(linha.get('quantidade_executada')),
+    )
+
+
+def chave_item_lancamento_dia_guia_quantidade_oracle(
+    linha: Mapping,
+) -> tuple:
+    codigo_servico = linha.get('cd_pro_fat')
+    if codigo_servico is None:
+        codigo_servico = linha.get('cd_tuss')
+    return (
+        normalizar_data(linha['dt_lancamento']),
+        normalizar_texto(linha['nr_guia']),
+        normalizar_texto(codigo_servico),
+        normalizar_quantidade(linha.get('qt_lancamento')),
+    )
+
+
 def chave_item_competencia_coalesce_valor_demonstrativo(
     linha: Mapping,
 ) -> tuple:
@@ -498,6 +531,9 @@ def indexar_itens_oracle(  # noqa: PLR0912
     por_lancamento_pro_fat_valor: dict[tuple, list[Mapping]] = defaultdict(
         list
     )
+    por_lancamento_dia_guia_quantidade: dict[
+        tuple, list[Mapping]
+    ] = defaultdict(list)
     for item in itens:
         if item.get('cd_remessa') is None:
             continue
@@ -576,6 +612,13 @@ def indexar_itens_oracle(  # noqa: PLR0912
             por_lancamento[
                 chave_item_lancamento_coalesce_oracle(item)
             ].append(item)
+            if (
+                normalizar_texto(item.get('nr_guia'))
+                and normalizar_quantidade(item.get('qt_lancamento')) > 0
+            ):
+                por_lancamento_dia_guia_quantidade[
+                    chave_item_lancamento_dia_guia_quantidade_oracle(item)
+                ].append(item)
         if (
             normalizar_mes_ano(item.get('dt_lancamento')) is not None
             and normalizar_texto(item.get('cd_pro_fat'))
@@ -615,6 +658,10 @@ def indexar_itens_oracle(  # noqa: PLR0912
         lancamento_pro_fat_carteira_valor={
             chave: tuple(linhas)
             for chave, linhas in por_lancamento_pro_fat_valor.items()
+        },
+        lancamento_dia_guia_coalesce_servico_quantidade={
+            chave: tuple(linhas)
+            for chave, linhas in por_lancamento_dia_guia_quantidade.items()
         },
     )
 
@@ -677,6 +724,11 @@ def resolver_correspondencia_item_oracle(  # noqa: PLR0912
             'lancamento_pro_fat_carteira_valor',
             indices.lancamento_pro_fat_carteira_valor,
             chave_item_lancamento_pro_fat_valor_demonstrativo,
+        ),
+        (
+            'lancamento_dia_guia_coalesce_servico_quantidade',
+            indices.lancamento_dia_guia_coalesce_servico_quantidade,
+            chave_item_lancamento_dia_guia_quantidade_demonstrativo,
         ),
     )
     primeira_conta_unica = None

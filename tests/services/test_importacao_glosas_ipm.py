@@ -447,6 +447,57 @@ def test_data_exata_refina_lancamentos_da_mesma_conta_e_guia():
     assert correspondencia.resolucao.cd_lancamento == lancamento_esperado
 
 
+def test_data_guia_servico_e_quantidade_recuperam_honorario_consolidado():
+    lancamento_esperado = 56
+    linha = demonstrativo(
+        id_registro='honorario-participacao',
+        numero_guia_senha='713779',
+        codigo_servico='30912040',
+        codigo_beneficiario='1007966008',
+        data_realizacao=date(2026, 6, 4),
+        quantidade_executada=Decimal('2.0000'),
+        valor_processado=Decimal('180.44'),
+    )
+    item_base = {
+        'cd_remessa': 18977,
+        'cd_reg': 24101,
+        'nr_guia': '713779',
+        'cd_pro_fat': '30912040',
+        'cd_tuss': None,
+        'nr_carteira': '1007986008',
+        'dt_competencia': date(2026, 6, 1),
+    }
+    itens_oracle = [
+        {
+            **item_base,
+            'cd_lancamento': lancamento_esperado,
+            'dt_lancamento': date(2026, 6, 4),
+            'qt_lancamento': Decimal('2'),
+            'vl_total_conta': Decimal('781.96'),
+        },
+        {
+            **item_base,
+            'cd_lancamento': 419,
+            'dt_lancamento': date(2026, 6, 10),
+            'qt_lancamento': Decimal('1'),
+            'vl_total_conta': Decimal('300.76'),
+        },
+    ]
+
+    correspondencia = resolver_correspondencia_item_oracle(
+        linha,
+        indexar_itens_oracle(itens_oracle),
+        cd_remessa_esperada=18977,
+    )
+
+    assert correspondencia.status == 'item_unico'
+    assert correspondencia.criterio == (
+        'lancamento_dia_guia_coalesce_servico_quantidade'
+    )
+    assert correspondencia.resolucao is not None
+    assert correspondencia.resolucao.cd_lancamento == lancamento_esperado
+
+
 def test_associacao_manual_combina_senha_procedimento_e_carteira():
     cd_remessa_associada = 16425
     linha = demonstrativo(
