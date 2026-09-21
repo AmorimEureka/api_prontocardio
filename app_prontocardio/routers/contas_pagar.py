@@ -491,6 +491,20 @@ def _historico(session: Session) -> list[dict]:
     ]
 
 
+def _valor_vencido_inicio_acompanhamento(
+    session: Session,
+) -> Decimal | None:
+    valor = session.execute(
+        text("""
+        SELECT valor_vencido
+          FROM api_prontocardio.contas_pagar_snapshots
+         ORDER BY data_referencia ASC
+         LIMIT 1
+    """)
+    ).scalar_one_or_none()
+    return _decimal(valor) if valor is not None else None
+
+
 @router.get('')
 def listar_contas_pagar(
     _: UsuarioAtual,
@@ -608,9 +622,10 @@ def listar_contas_pagar(
         ),
     }
     historico = _historico(session)
+    valor_vencido_inicial = _valor_vencido_inicio_acompanhamento(session)
     resumo['valor_vencido_inicial'] = (
-        _decimal(historico[0]['valor_vencido'])
-        if historico
+        valor_vencido_inicial
+        if valor_vencido_inicial is not None
         else resumo['valor_vencido_atual']
     )
     resumo['variacao_desde_inicio'] = (

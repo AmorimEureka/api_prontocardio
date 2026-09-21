@@ -190,6 +190,23 @@ def test_hoje_hospital_nao_adianta_data_quando_utc_virou_o_dia(monkeypatch):
     assert contas_pagar._hoje_hospital() == date(2026, 9, 20)
 
 
+def test_divida_inicial_usa_primeiro_snapshot_do_acompanhamento():
+    session = FakeSession([[Decimal('9727809.96')]])
+
+    valor = contas_pagar._valor_vencido_inicio_acompanhamento(session)
+
+    sql, _ = session.executions[0]
+    assert 'ORDER BY data_referencia ASC' in sql
+    assert 'LIMIT 1' in sql
+    assert valor == Decimal('9727809.96')
+
+
+def test_divida_inicial_inexistente_retorna_none():
+    session = FakeSession([[]])
+
+    assert contas_pagar._valor_vencido_inicio_acompanhamento(session) is None
+
+
 def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
     usuario = SimpleNamespace(id=7)
     payload = contas_pagar.PagamentoTituloInput(
