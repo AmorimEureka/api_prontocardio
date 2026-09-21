@@ -143,6 +143,47 @@ def test_titulos_do_fornecedor_sao_ordenados_por_maior_atraso(monkeypatch):
     )
 
 
+def test_titulo_sem_saldo_mostra_dias_vencidos_sem_alterar_prioridade(monkeypatch):
+    monkeypatch.setattr(
+        contas_pagar, 'date', SimpleNamespace(
+            today=lambda: date(2026, 9, 20),
+            max=date.max,
+        ),
+    )
+    base = {
+        'codigo_fornecedor': 10,
+        'nome_fornecedor': 'Fornecedor',
+        'tipo_quitacao': 'previsto',
+        'valor_honrado_oracle': Decimal('0'),
+    }
+    titulos = [
+        {
+            **base,
+            'codigo_parcela': 1,
+            'data_vencimento': date(2022, 9, 10),
+            'valor_total': Decimal('0'),
+        },
+        {
+            **base,
+            'codigo_parcela': 2,
+            'data_vencimento': date(2026, 9, 3),
+            'valor_total': Decimal('100'),
+        },
+    ]
+
+    fornecedor = contas_pagar._agrupar_fornecedores(titulos, {})[0]
+
+    assert fornecedor['titulos'][0]['codigo_parcela'] == 1
+    assert fornecedor['titulos'][0]['dias_vencidos'] == (
+        date(2026, 9, 20) - date(2022, 9, 10)
+    ).days
+    assert fornecedor['titulos'][1]['dias_vencidos'] == 17
+    assert fornecedor['dias_atraso'] == 17
+    assert fornecedor['total_dias_vencidos'] == 17
+    assert fornecedor['titulos_vencidos'] == 1
+    assert fornecedor['valor_total_vencido'] == Decimal('100')
+
+
 def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
     usuario = SimpleNamespace(id=7)
     payload = contas_pagar.PagamentoTituloInput(

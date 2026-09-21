@@ -337,7 +337,7 @@ def _agrupar_fornecedores(
         vencimento = titulo['data_vencimento']
         dias_vencidos = (
             max((hoje - vencimento).days, 0)
-            if vencimento and saldo > 0
+            if vencimento
             else 0
         )
         titulo.update({
@@ -371,10 +371,11 @@ def _agrupar_fornecedores(
         fornecedor['valor_total'] += titulo['valor_total']
         fornecedor['valor_total_honrado'] += valor_honrado
         fornecedor['saldo_a_pagar'] += saldo
-        fornecedor['total_dias_vencidos'] += dias_vencidos
-        fornecedor['dias_atraso'] = max(
-            fornecedor['dias_atraso'], dias_vencidos
-        )
+        if saldo > 0:
+            fornecedor['total_dias_vencidos'] += dias_vencidos
+            fornecedor['dias_atraso'] = max(
+                fornecedor['dias_atraso'], dias_vencidos
+            )
         if vencimento and vencimento < hoje and saldo > 0:
             fornecedor['valor_total_vencido'] += saldo
             fornecedor['titulos_vencidos'] += 1
