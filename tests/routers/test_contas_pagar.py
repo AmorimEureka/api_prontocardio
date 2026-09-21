@@ -1,6 +1,6 @@
 # ruff: noqa: PLR2004
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -48,7 +48,7 @@ class FakeSession:
 
 def test_consulta_oracle_converte_saldos_e_atraso(monkeypatch):
     monkeypatch.setattr(
-        contas_pagar, 'date', SimpleNamespace(today=lambda: date(2026, 9, 17))
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 9, 17)
     )
     oracle = FakeSession([
         [
@@ -108,10 +108,7 @@ def test_consulta_oracle_ignora_fornecedor_sem_codigo():
 
 def test_titulos_do_fornecedor_sao_ordenados_por_maior_atraso(monkeypatch):
     monkeypatch.setattr(
-        contas_pagar, 'date', SimpleNamespace(
-            today=lambda: date(2026, 9, 17),
-            max=date.max,
-        )
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 9, 17)
     )
     base = {
         'codigo_fornecedor': 10,
@@ -143,12 +140,9 @@ def test_titulos_do_fornecedor_sao_ordenados_por_maior_atraso(monkeypatch):
     )
 
 
-def test_titulo_sem_saldo_mostra_dias_vencidos_sem_alterar_prioridade(monkeypatch):
+def test_titulo_sem_saldo_mostra_dias_sem_alterar_prioridade(monkeypatch):
     monkeypatch.setattr(
-        contas_pagar, 'date', SimpleNamespace(
-            today=lambda: date(2026, 9, 20),
-            max=date.max,
-        ),
+        contas_pagar, '_hoje_hospital', lambda: date(2026, 9, 20)
     )
     base = {
         'codigo_fornecedor': 10,
@@ -182,6 +176,18 @@ def test_titulo_sem_saldo_mostra_dias_vencidos_sem_alterar_prioridade(monkeypatc
     assert fornecedor['total_dias_vencidos'] == 17
     assert fornecedor['titulos_vencidos'] == 1
     assert fornecedor['valor_total_vencido'] == Decimal('100')
+
+
+def test_hoje_hospital_nao_adianta_data_quando_utc_virou_o_dia(monkeypatch):
+    class DataHoraFixa:
+        @staticmethod
+        def now(fuso):
+            horario_utc = datetime(2026, 9, 21, 2, 30, tzinfo=timezone.utc)
+            return horario_utc.astimezone(fuso)
+
+    monkeypatch.setattr(contas_pagar, 'datetime', DataHoraFixa)
+
+    assert contas_pagar._hoje_hospital() == date(2026, 9, 20)
 
 
 def test_pagamento_titulo_pode_ser_incluido_atualizado_e_excluido():
