@@ -1624,6 +1624,7 @@ class CardFollowUpGlosaPublic(BaseModel):
     valor_glosa_pendente: Decimal
     valor_total_tratado: Decimal
     possui_recurso: bool = False
+    possui_pendencia_associacao_manual: bool = False
     processo: ProcessoFollowUpGlosaPublic
     recebimentos: list[RecebimentoFollowUpGlosaPublic] = Field(
         default_factory=list

@@ -1724,6 +1724,51 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
     }
 
 
+def test_marca_pendencia_manual_apenas_no_mesmo_processo_e_protocolo(
+    monkeypatch,
+):
+    class Sessao:
+        def execute(self, _query, params):
+            assert params == {
+                'processos': ['P129288/2026', 'P142201/2026'],
+            }
+            return [
+                ('P142201/2026', '5027380'),
+                ('P129288/2026', 'OUTRO-PROTOCOLO'),
+            ]
+
+    monkeypatch.setattr(
+        financeiro,
+        '_tabela_ipm_existe',
+        lambda _session, tabela: tabela == 'glossas_nao_vinculadas_ipm',
+    )
+    cards = [
+        {
+            'cd_remessa': 17372,
+            'numero_protocolo': '5027964',
+            'processo': {'numero_processo': 'P142201/2026'},
+        },
+        {
+            'cd_remessa': 17372,
+            'numero_protocolo': '5027380',
+            'processo': {'numero_processo': 'P142201/2026'},
+        },
+        {
+            'cd_remessa': 17372,
+            'numero_protocolo': '5027964',
+            'processo': {'numero_processo': 'P129288/2026'},
+        },
+    ]
+
+    financeiro._marcar_cards_com_pendencia_associacao_manual(
+        Sessao(), cards
+    )
+
+    assert [
+        card['possui_pendencia_associacao_manual'] for card in cards
+    ] == [False, True, False]
+
+
 def test_associacao_manual_inclui_remessa_indicada_pelo_outro_portal(
     monkeypatch,
 ):
