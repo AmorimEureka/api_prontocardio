@@ -5,6 +5,7 @@ from decimal import Decimal, InvalidOperation
 from http import HTTPStatus
 from math import ceil
 from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
@@ -24,6 +25,11 @@ SessionOracle = Annotated[Session, Depends(get_session_oracle)]
 UsuarioAtual = Annotated[Usuario, Depends(valida_token_usuario_atual)]
 CENTAVOS = Decimal('0.01')
 STATUS_VALIDOS = {'PENDENTE', 'CONTATO', 'NEGOCIACAO', 'ACORDADO'}
+FUSO_HOSPITAL = ZoneInfo('America/Sao_Paulo')
+
+
+def _hoje_hospital() -> date:
+    return datetime.now(FUSO_HOSPITAL).date()
 
 
 class TratamentoInput(BaseModel):
@@ -225,7 +231,7 @@ def _consultar_oracle(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE,
             detail='Não foi possível consultar a HPC_V_CONTAS_A_PAGAR.',
         ) from exc
-    hoje = date.today()
+    hoje = _hoje_hospital()
     resultado = []
     for row in rows:
         if row['codigo_fornecedor'] is None:
@@ -321,7 +327,7 @@ def _pagamentos_manuais(session: Session) -> dict[int, list[dict]]:
 def _agrupar_fornecedores(
     titulos: list[dict], pagamentos_por_titulo: dict[int, list[dict]]
 ) -> list[dict]:
-    hoje = date.today()
+    hoje = _hoje_hospital()
     fornecedores = {}
     for titulo_oracle in titulos:
         titulo = dict(titulo_oracle)
@@ -419,7 +425,7 @@ def _tratamentos(session: Session) -> dict[int, dict]:
 
 
 def _registrar_snapshot(session: Session, fornecedores: list[dict]) -> None:
-    hoje = date.today()
+    hoje = _hoje_hospital()
     total_vencido = sum(
         (item['valor_vencido'] for item in fornecedores), Decimal('0')
     )
@@ -729,7 +735,7 @@ def listar_contas_pagar(
             for key, value in resumo.items()
         },
         'historico': historico,
-        'gerado_em': date.today().isoformat(),
+        'gerado_em': _hoje_hospital().isoformat(),
     }
 
 
