@@ -4584,7 +4584,50 @@ def _protocolos_cogestao_por_processo_glosa_follow_up(
     }
 
 
-def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
+def _processos_canonicos_por_protocolo_follow_up(
+    session: Session,
+    protocolos: set[str],
+) -> dict[str, str]:
+    protocolos_normalizados = sorted({
+        str(protocolo).strip().casefold()
+        for protocolo in protocolos
+        if str(protocolo).strip()
+    })
+    if not protocolos_normalizados or not _tabela_ipm_existe(
+        session, 'processos_ipm_saude_cogestao'
+    ):
+        return {}
+    rows = session.execute(
+        text(
+            """
+            SELECT LOWER(protocolo) AS protocolo,
+                   MIN(BTRIM(numero_processo)) AS numero_processo
+              FROM (
+                    SELECT LOWER(BTRIM(nr)) AS protocolo,
+                           numero_processo
+                      FROM api_prontocardio.processos_ipm_saude_cogestao
+                     WHERE LOWER(BTRIM(nr)) = ANY(:protocolos)
+                    UNION ALL
+                    SELECT LOWER(BTRIM(nr_origem)) AS protocolo,
+                           numero_processo
+                      FROM api_prontocardio.processos_ipm_saude_cogestao
+                     WHERE LOWER(BTRIM(nr_origem)) = ANY(:protocolos)
+                   ) AS origem
+             GROUP BY LOWER(protocolo)
+            HAVING COUNT(DISTINCT LOWER(BTRIM(numero_processo))) = 1
+            """
+        ),
+        {'protocolos': protocolos_normalizados},
+    ).mappings()
+    return {
+        str(row['protocolo']).strip().casefold(): str(
+            row['numero_processo']
+        ).strip().casefold()
+        for row in rows
+    }
+
+
+def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     chaves_excluidas: set[tuple[str, int]],
     *,
@@ -4718,6 +4761,16 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             {chave[0] for chave in grupos},
         )
     )
+    processos_canonicos_por_protocolo = (
+        _processos_canonicos_por_protocolo_follow_up(
+            session,
+            {
+                protocolo
+                for protocolos in protocolos_por_registro.values()
+                for protocolo in protocolos
+            },
+        )
+    )
 
     cards = []
     termo_protocolo = str(numero_protocolo or '').strip().casefold()
@@ -4760,6 +4813,23 @@ def _cards_registros_glosa_follow_up(  # noqa: PLR0912, PLR0913
             )
             if protocolo_cogestao:
                 protocolos.append(protocolo_cogestao)
+        processos_canonicos = {
+            processo_canonico
+            for protocolo in protocolos
+            if (
+                processo_canonico := processos_canonicos_por_protocolo.get(
+                    protocolo.casefold()
+                )
+            )
+        }
+        # O processo da COGESTAO/IPM e a fonte oficial da associacao do
+        # protocolo. Registros analiticos historicos podem conter o processo
+        # anterior; nesses casos o card canonico sera montado pela COGESTAO.
+        if (
+            len(processos_canonicos) == 1
+            and chave[0] not in processos_canonicos
+        ):
+            continue
         if termo_protocolo and not any(
             termo_protocolo in protocolo.casefold()
             for protocolo in protocolos
@@ -4870,7 +4940,7 @@ def _remover_correspondencias_automaticas_associadas_manualmente(
     ]
 
 
-def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913
+def _pacientes_demonstrativo_conciliado(  # noqa: PLR0911, PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
     cd_remessa: int,
@@ -5936,12 +6006,28 @@ def _tratativas_da_linha_demonstrativo(
     chave_tratativa: tuple,
     demonstrativo_id_registro: str | None,
 ) -> list[RegistroGlosa]:
-    return [
+    registros_exatos = [
         *tratativas_por_item.get(
             (*chave_tratativa, demonstrativo_id_registro),
             [],
         ),
         *tratativas_por_item.get(chave_tratativa, []),
+    ]
+    if registros_exatos or not demonstrativo_id_registro:
+        return registros_exatos
+
+    # A identidade do demonstrativo e estavel mesmo quando um registro
+    # historico foi salvo com o processo incorreto. O fallback deliberadamente
+    # nao usa apenas conta/lancamento, que podem se repetir entre processos.
+    chave_sem_processo = (
+        *chave_tratativa[1:],
+        demonstrativo_id_registro,
+    )
+    return [
+        registro
+        for chave, registros in tratativas_por_item.items()
+        if chave[1:] == chave_sem_processo
+        for registro in registros
     ]
 
 
@@ -7768,9 +7854,7 @@ def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
             )
         )
         pacientes_demonstrativo = []
-        carregar_detalhes = termo_paciente or (
-            incluir_detalhes and possui_recurso
-        )
+        carregar_detalhes = termo_paciente or incluir_detalhes
         if carregar_detalhes:
             if (
                 termo_paciente
