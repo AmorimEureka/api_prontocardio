@@ -7348,6 +7348,63 @@ def _preservar_totais_glosa_portal(
         )
 
 
+def _marcar_cards_com_pendencia_associacao_manual(
+    session: Session,
+    cards: list[dict],
+) -> None:
+    for card in cards:
+        card['possui_pendencia_associacao_manual'] = False
+    if not cards or not _tabela_ipm_existe(
+        session, 'glossas_nao_vinculadas_ipm'
+    ):
+        return
+
+    processos = sorted({
+        str((card.get('processo') or {}).get('numero_processo') or '')
+        .strip()
+        .upper()
+        for card in cards
+        if str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip()
+    })
+    if not processos:
+        return
+
+    chaves_pendentes = {
+        (str(processo), str(protocolo))
+        for processo, protocolo in session.execute(
+            text(
+                """
+                SELECT DISTINCT UPPER(BTRIM(numero_processo)),
+                                UPPER(BTRIM(numero_protocolo))
+                  FROM api_prontocardio.glossas_nao_vinculadas_ipm
+                 WHERE motivo IN (
+                           'remessa_nao_encontrada_ou_ambigua',
+                           'nao_encontrado'
+                       )
+                   AND UPPER(BTRIM(numero_processo)) = ANY(:processos)
+                   AND NULLIF(BTRIM(numero_protocolo), '') IS NOT NULL
+                """
+            ),
+            {'processos': processos},
+        )
+    }
+    for card in cards:
+        processo = str(
+            (card.get('processo') or {}).get('numero_processo') or ''
+        ).strip().upper()
+        protocolos = {
+            item.strip().upper()
+            for item in str(card.get('numero_protocolo') or '').split(',')
+            if item.strip()
+        }
+        card['possui_pendencia_associacao_manual'] = any(
+            (processo, protocolo) in chaves_pendentes
+            for protocolo in protocolos
+        )
+
+
 def _cards_cogestao_follow_up(  # noqa: PLR0912, PLR0913, PLR0915
     session: Session,
     session_oracle: Session,
@@ -8888,6 +8945,7 @@ def consultar_follow_up_glosas(  # noqa: PLR0912, PLR0913, PLR0915
             }
         )
     cards.extend(cards_cogestao)
+    _marcar_cards_com_pendencia_associacao_manual(session, cards)
     _marcar_cards_com_recurso_ativo(session, cards)
     return {
         'cards': cards,
