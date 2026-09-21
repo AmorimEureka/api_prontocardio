@@ -882,6 +882,55 @@ def test_busca_tratativa_pela_identidade_exata_do_demonstrativo():
     assert registros == [exata, legada]
 
 
+def test_busca_tratativa_do_demonstrativo_preserva_processo_historico():
+    historica = SimpleNamespace(id=3)
+    chave_atual = ('p142201/2026', 17372, 293592, 123, 51)
+    tratativas = {
+        (
+            'p129288/2026',
+            17372,
+            293592,
+            123,
+            51,
+            'linha-5027964',
+        ): [historica],
+    }
+
+    registros = financeiro._tratativas_da_linha_demonstrativo(
+        tratativas,
+        chave_atual,
+        'linha-5027964',
+    )
+
+    assert registros == [historica]
+
+
+def test_mapeia_processo_canonico_por_protocolo(monkeypatch):
+    class Resultado:
+        def mappings(self):
+            return self
+
+        def __iter__(self):
+            return iter([{
+                'protocolo': '5027964',
+                'numero_processo': 'P142201/2026',
+            }])
+
+    class Sessao:
+        def execute(self, _query, params):
+            assert params == {'protocolos': ['5027964']}
+            return Resultado()
+
+    monkeypatch.setattr(financeiro, '_tabela_ipm_existe', lambda *_: True)
+
+    processos = financeiro._processos_canonicos_por_protocolo_follow_up(
+        Sessao(),
+        {' 5027964 '},
+    )
+
+    assert processos == {'5027964': 'p142201/2026'}
+
+
 def test_lista_apenas_nfse_nao_conciliada(
     session,
     usuario_teste,
@@ -1722,6 +1771,58 @@ def test_cards_cogestao_incluem_remessa_sem_glosa_ao_filtrar_processo(
         'processo_sem_glosa': 'P058752/2026',
         'processo_sem_glosa_like': '%P058752/2026%',
     }
+
+    chamadas_detalhamento = []
+    monkeypatch.setattr(
+        financeiro,
+        '_remessas_cogestao_persistidas',
+        lambda *_args: {
+            Decimal('7298.14'): [{
+                'cd_remessa': cd_remessa,
+                'cnpj_convenio': '',
+                'convenio': 'IPM',
+                'valor_total': Decimal('7298.14'),
+                'data_competencia': date(2025, 12, 1),
+            }],
+            Decimal('999.99'): [{
+                'cd_remessa': cd_remessa + 1,
+                'cnpj_convenio': '',
+                'convenio': 'IPM',
+                'valor_total': Decimal('999.99'),
+                'data_competencia': date(2025, 12, 1),
+            }],
+        },
+    )
+    monkeypatch.setattr(
+        financeiro,
+        '_pacientes_demonstrativo_conciliado',
+        lambda *args: chamadas_detalhamento.append(args) or [],
+    )
+
+    financeiro._cards_cogestao_follow_up(
+        Sessao(),
+        object(),
+        set(),
+        incluir_detalhes=True,
+        q=None,
+        numero_nfse=None,
+        numero_protocolo='4123928',
+        cd_remessa=None,
+        convenio=None,
+        processo_original='P058752/2026',
+        processo_recurso=None,
+        paciente=None,
+        cd_atendimento=None,
+        tipo_atendimento=None,
+    )
+
+    assert chamadas_detalhamento[0][2:] == (
+        cd_remessa,
+        'P058752/2026',
+        Decimal('7298.14'),
+        Decimal('0.00'),
+        '4123928',
+    )
 
 
 def test_marca_pendencia_manual_apenas_no_mesmo_processo_e_protocolo(
